@@ -12,4 +12,4 @@ def test_root():
     response = cliente.get('/')
 
     assert response.status_code == HTTPStatus.OK
-    assert response.json() == {'message': 'Olá Mundo!'}
+    assert response.json() == {'message': 'Olá Mundo! API Hospital Prontocardio'}
