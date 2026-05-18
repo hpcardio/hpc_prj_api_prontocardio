@@ -50,7 +50,7 @@ addopts = '-p no:warnings' # desconsiderar mensage warning
 lint = 'ruff check'
 pre_format = 'ruff check --fix'
 format = 'ruff format'
-run = 'fastapi dev fast_zero/app.py'
+run = 'fastapi dev app_prontocardio/app.py'
 pre_tests = 'ruff check'
-tests = 'pytest --cov=fast_zero -vv' # Cobertura de código testada
+tests = 'pytest --cov=app_prontocardio -vv' # Cobertura de código testada
 pos_tests = 'coverage html'
