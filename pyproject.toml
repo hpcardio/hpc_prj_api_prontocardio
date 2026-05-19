@@ -45,7 +45,7 @@ quote-style = 'single'
 
 [tool.pytest.ini_options]
 pythonpath = "."
-addopts = '-p no:warnings' # desconsiderar mensage warning
+addopts = ['-p' , '-p no:warnings', '--random-order'] # desconsiderar mensage warning; testes independentes unitariamente
 
 
 
