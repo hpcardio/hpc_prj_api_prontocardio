@@ -1,10 +1,27 @@
 from datetime import datetime, time
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Numeric, String
+from sqlalchemy import DateTime, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column, registry
 
+from app_prontocardio.settings import Settings
+
 table_registry = registry()
+settings = Settings()
+
+
+@table_registry.mapped_as_dataclass
+class Usuario:
+    __tablename__ = 'usuarios_api'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    nome: Mapped[str] = mapped_column(String, unique=True)
+    email: Mapped[str] = mapped_column(String, unique=True)
+    senha: Mapped[str]
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
 
 
 @table_registry.mapped_as_dataclass

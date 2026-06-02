@@ -16,9 +16,7 @@ def test_root(cliente):
 
 
 def test_oracle_conn(session):
-    rows = session.execute(
-        text('SELECT * FROM v$version')
-    ).all()
+    rows = session.execute(text('SELECT * FROM v$version')).all()
 
     # breackpoint()
 

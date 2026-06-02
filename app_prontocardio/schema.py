@@ -1,7 +1,23 @@
 from datetime import datetime, time
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+
+
+class UserSchema(BaseModel):
+    nome: str
+    email: EmailStr
+    senha: str
+
+
+class UserPublic(UserSchema):
+    id: int
+    nome: str
+    email: EmailStr
+
+
+class Message(BaseModel):
+    message: str
 
 
 class VersaoOracle(BaseModel):
