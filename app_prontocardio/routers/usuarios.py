@@ -1,7 +1,7 @@
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -14,17 +14,20 @@ from app_prontocardio.models import Usuario
 from app_prontocardio.schema import (
     FilterPage,
     Message,
+    UserList,
     UserPublic,
     UserSchema,
-    UserList,
 )
-from app_prontocardio.security import gera_hash_senha
-
+from app_prontocardio.security import (
+    gera_hash_senha,
+    valida_token_usuario_atual,
+)
 
 router = APIRouter(prefix='/usuarios', tags=['usuarios'])
 
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 Filter_Users = Annotated[FilterPage, Query()]
+ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 
 
 @router.on_event('startup')
@@ -32,35 +35,32 @@ def startup() -> None:
     ensure_postgres_schema()
 
 
-def get_usuario_or_404(user_id: int, session: SessionPostgres) -> Usuario:
-    usuario = session.get(Usuario, user_id)
+# def get_usuario_or_404(
+#         user_id: int,
+#         session: SessionPostgres
+# ) -> Usuario:
 
-    if usuario is None:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_FOUND,
-            detail='Usuário não encontrado.',
-        )
+#     usuario = session.get(Usuario, user_id)
 
-    return usuario
+#     if usuario is None:
+#         raise HTTPException(
+#             status_code=HTTPStatus.NOT_FOUND,
+#             detail='Usuário não encontrado.',
+#         )
+
+#     return usuario
 
 
-UsuarioAtual = Annotated[Usuario, Depends(get_usuario_or_404)]
-
-
-@router.get(
-    '/',
-    status_code=HTTPStatus.OK,
-    response_model=UserList
-)
+@router.get('/', status_code=HTTPStatus.OK, response_model=UserList)
 def consultar_usuario(
     filter_usuario: Filter_Users,
-    # usuario_atual: UsuarioAtual,
-    session: SessionPostgres
-
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
 ):
     usuarios_banco = session.scalars(
         select(Usuario)
-        .limit(filter_usuario.limit).offset(filter_usuario.offset)
+        .limit(filter_usuario.limit)
+        .offset(filter_usuario.offset)
     ).all()
 
     return {'usuarios': usuarios_banco}
@@ -85,7 +85,7 @@ def criar_usuario(
 
     excessao_conflito_usuario = HTTPException(
         status_code=HTTPStatus.CONFLICT,
-        detail='Já temos um usuário cadastrado nome/email!',
+        detail='Já temos um usuário cadastrado com o mesmo nome/email!',
     )
 
     if usuario_banco:
@@ -108,16 +108,19 @@ def criar_usuario(
 
 
 @router.put(
-    '/usuarios/{user_id}',
-    status_code=HTTPStatus.OK,
-    response_model=UserPublic
+    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic
 )
 def alterar_usuario(
     user_id: int,
     usuario_input: UserSchema,
-    usuario_atual: UsuarioAtual,
+    usuario_atual: ValidaUsuarioAtual,
     session: Session = Depends(get_session_postgres),
 ):
+
+    if usuario_atual.id != user_id:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN, detail='Usuário sem permissão!!'
+        )
 
     try:
         usuario_atual.nome = usuario_input.nome
@@ -132,20 +135,24 @@ def alterar_usuario(
     except IntegrityError:
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
-            detail='Nome ou e-mail já cadastrado.',
+            detail='Nome ou e-mail já cadastrado',
         )
 
 
 @router.delete(
-    '/usuarios/{user_id}',
-    status_code=HTTPStatus.OK,
-    response_model=Message
+    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=Message
 )
 def deletar_usuario(
     user_id: int,
-    usuario_atual: UsuarioAtual,
+    usuario_atual: ValidaUsuarioAtual,
     session: Session = Depends(get_session_postgres),
 ):
+
+    if usuario_atual.id != user_id:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN, detail='Usuário sem permissão!!'
+        )
+
     session.delete(usuario_atual)
     session.commit()
 

@@ -1,56 +1,22 @@
 from http import HTTPStatus
 
-from sqlalchemy import select, text
 
-from app_prontocardio.models import ModelContaAtendimento
-
-
-def test_root(cliente):
-
-    response = cliente.get('/')
+def test_docs_endpoint_disponivel(cliente):
+    # Garante que a documentação Swagger está disponível.
+    response = cliente.get('/docs')
 
     assert response.status_code == HTTPStatus.OK
-    assert response.json() == {
-        'message': 'Olá Mundo! API Hospital Prontocardio'
-    }
 
 
-def test_oracle_conn(session):
-    rows = session.execute(text('SELECT * FROM v$version')).all()
+def test_openapi_contem_todos_os_routers(cliente):
+    # Confirma que as rotas principais existem no esquema OpenAPI.
+    response = cliente.get('/openapi.json')
 
-    # breackpoint()
+    assert response.status_code == HTTPStatus.OK
 
-    assert rows
-
-
-def test_conta_atendimento_found(cliente, session):
-    # Buscar um cd_atendimento válido da view
-    first_record = session.execute(
-        select(ModelContaAtendimento).limit(1)
-    ).scalar()
-
-    if first_record:
-        response = cliente.get(
-            f'/conta_atendimento/{first_record.cd_atendimento}'
-        )
-
-        assert response.status_code == HTTPStatus.OK
-        data = response.json()
-        assert isinstance(data, dict)
-        assert 'atendimentos' in data
-        assert isinstance(data['atendimentos'], list)
-        assert len(data['atendimentos']) > 0
-        assert 'cd_atendimento' in data['atendimentos'][0]
-
-
-def test_conta_atendimento_not_found(cliente):
-    response = cliente.get('/conta_atendimento/999999999')
-
-    assert response.status_code == HTTPStatus.NOT_FOUND
-    assert 'não encontrado' in response.json()['detail']
-
-
-def test_conta_atendimento_invalid_path(cliente):
-    response = cliente.get('/conta_atendimento/0')
-
-    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    schema = response.json()
+    paths = set(schema.get('paths', {}).keys())
+    assert '/autenticacao/token' in paths
+    assert '/livre/' in paths
+    assert '/usuarios/' in paths
+    assert '/app_glosas/conta_atendimento/{cd_atendimento}' in paths

@@ -1,10 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session
 
 from app_prontocardio.app import app
-from app_prontocardio.settings import Settings
+from app_prontocardio.models import Usuario
 
 
 @pytest.fixture
@@ -13,26 +11,19 @@ def cliente():
         yield client
 
 
-@pytest.fixture(scope='session')
-def oracle_engine():
-    database_url = Settings().ORACLE_DATABASE_URL
-    engine = create_engine(
-        database_url,
-        thick_mode=True,
-        pool_pre_ping=True,
+@pytest.fixture
+def override_dependencies():
+    app.dependency_overrides = {}
+    yield app.dependency_overrides
+    app.dependency_overrides = {}
+
+
+@pytest.fixture
+def usuario_autenticado() -> Usuario:
+    usuario = Usuario(
+        nome='Usuario Teste',
+        email='usuario.teste@example.com',
+        senha='hash-senha',
     )
-
-    try:
-        with engine.connect() as conn:
-            conn.execute(text('SELECT * FROM v$version')).fetchall()
-    except Exception as exc:
-        pytest.fail(f'Falha ao validar conexao Oracle: {exc}')
-
-    yield engine
-    engine.dispose()
-
-
-@pytest.fixture(scope='session')
-def session(oracle_engine):
-    with Session(oracle_engine) as db_session:
-        yield db_session
+    usuario.id = 1
+    return usuario

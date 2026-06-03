@@ -1,4 +1,5 @@
 from http import HTTPStatus
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from sqlalchemy import select
@@ -8,13 +9,16 @@ from sqlalchemy.orm import Session
 from app_prontocardio.database import (
     get_session_oracle,
 )
-from app_prontocardio.models import ModelContaAtendimento
+from app_prontocardio.models import ModelContaAtendimento, Usuario
 from app_prontocardio.schema import (
     Atendimento,
     Atendimentos,
 )
+from app_prontocardio.security import valida_token_usuario_atual
 
 router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
+
+ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 
 
 @router.get(
@@ -23,6 +27,7 @@ router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
     response_model=Atendimentos,
 )
 def conta_atendimento(
+    usuario_atual: ValidaUsuarioAtual,
     cd_atendimento: int = Path(..., gt=0),
     session: Session = Depends(get_session_oracle),
 ):

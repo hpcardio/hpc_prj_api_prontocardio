@@ -27,9 +27,7 @@ def ensure_postgres_schema() -> None:
 
     with postgres_engine.begin() as conn:
         conn.execute(
-            text(
-                f'CREATE SCHEMA IF NOT EXISTS "{settings.POSTGRES_SCHEMA}"'
-            )
+            text(f'CREATE SCHEMA IF NOT EXISTS "{settings.POSTGRES_SCHEMA}"')
         )
 
 

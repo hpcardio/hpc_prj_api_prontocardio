@@ -11,4 +11,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices('ORACLE_DATABASE_URL', 'DATABASE_URL')
     )
     POSTGRES_DATABASE_URL: str | None = None
-    POSTGRES_SCHEMA: str = 'api_prontocardio'
+    POSTGRES_SCHEMA: str
+    SECRET_KEY: str
+    ALGORITHM: str

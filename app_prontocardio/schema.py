@@ -1,7 +1,7 @@
 from datetime import datetime, time
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class UserSchema(BaseModel):
@@ -28,6 +28,11 @@ class FilterPage(BaseModel):
 
 class Message(BaseModel):
     message: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
 
 class VersaoOracle(BaseModel):
