@@ -1,7 +1,7 @@
 from datetime import datetime, time
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator, Field
 
 
 class UserSchema(BaseModel):
@@ -10,10 +10,20 @@ class UserSchema(BaseModel):
     senha: str
 
 
-class UserPublic(UserSchema):
+class UserPublic(BaseModel):
     id: int
     nome: str
     email: EmailStr
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserList(BaseModel):
+    usuarios: list[UserPublic]
+
+
+class FilterPage(BaseModel):
+    offset: int = Field(ge=0, default=0)
+    limit: int = Field(ge=0, default=10)
 
 
 class Message(BaseModel):
