@@ -6,10 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app_prontocardio.database import (
-    ensure_postgres_schema,
-    get_session_postgres,
-)
+from app_prontocardio.database import get_session_postgres
 from app_prontocardio.models import Usuario
 from app_prontocardio.schema import (
     FilterPage,
@@ -30,27 +27,6 @@ Filter_Users = Annotated[FilterPage, Query()]
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 
 
-@router.on_event('startup')
-def startup() -> None:
-    ensure_postgres_schema()
-
-
-# def get_usuario_or_404(
-#         user_id: int,
-#         session: SessionPostgres
-# ) -> Usuario:
-
-#     usuario = session.get(Usuario, user_id)
-
-#     if usuario is None:
-#         raise HTTPException(
-#             status_code=HTTPStatus.NOT_FOUND,
-#             detail='Usuário não encontrado.',
-#         )
-
-#     return usuario
-
-
 @router.get('/', status_code=HTTPStatus.OK, response_model=UserList)
 def consultar_usuario(
     filter_usuario: Filter_Users,
@@ -67,7 +43,9 @@ def consultar_usuario(
 
 
 @router.post(
-    '/usuarios/', status_code=HTTPStatus.CREATED, response_model=UserPublic
+    '/usuarios/',
+    status_code=HTTPStatus.CREATED,
+    response_model=UserPublic
 )
 def criar_usuario(
     usuario_input: UserSchema,
@@ -108,7 +86,9 @@ def criar_usuario(
 
 
 @router.put(
-    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic
+    '/usuarios/{user_id}',
+    status_code=HTTPStatus.OK,
+    response_model=UserPublic
 )
 def alterar_usuario(
     user_id: int,
@@ -140,7 +120,9 @@ def alterar_usuario(
 
 
 @router.delete(
-    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=Message
+    '/usuarios/{user_id}',
+    status_code=HTTPStatus.OK,
+    response_model=Message
 )
 def deletar_usuario(
     user_id: int,

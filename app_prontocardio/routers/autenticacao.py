@@ -25,6 +25,7 @@ def autenticar_usuario_para_acesso(
     form_data: OAuthForm, session: SessionPostgres
 ):
     """Gera token para usuário logado"""
+
     usuario_banco = session.scalar(
         select(Usuario).where(Usuario.email == form_data.username)
     )
