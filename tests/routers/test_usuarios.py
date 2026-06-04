@@ -42,6 +42,25 @@ def test_consultar_usuario_retorna_lista_sem_senha(
     }
 
 
+def test_consultar_usuario_retorna_401_sem_token(
+    cliente,
+    override_dependencies,
+):
+    # Garante que endpoint protegido exige Authorization Bearer válido.
+    db_session = Mock()
+
+    def override_session_postgres():
+        yield db_session
+
+    override_dependencies[get_session_postgres] = override_session_postgres
+
+    response = cliente.get('/usuarios/?offset=0&limit=10')
+
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
+    assert response.json()['detail'] == 'Not authenticated'
+    db_session.scalars.assert_not_called()
+
+
 def test_criar_usuario_retorna_201_com_usuario_publico(
     cliente,
     override_dependencies,
