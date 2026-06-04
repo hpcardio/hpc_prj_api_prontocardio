@@ -43,9 +43,7 @@ def consultar_usuario(
 
 
 @router.post(
-    '/usuarios/',
-    status_code=HTTPStatus.CREATED,
-    response_model=UserPublic
+    '/usuarios/', status_code=HTTPStatus.CREATED, response_model=UserPublic
 )
 def criar_usuario(
     usuario_input: UserSchema,
@@ -86,9 +84,7 @@ def criar_usuario(
 
 
 @router.put(
-    '/usuarios/{user_id}',
-    status_code=HTTPStatus.OK,
-    response_model=UserPublic
+    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic
 )
 def alterar_usuario(
     user_id: int,
@@ -120,9 +116,7 @@ def alterar_usuario(
 
 
 @router.delete(
-    '/usuarios/{user_id}',
-    status_code=HTTPStatus.OK,
-    response_model=Message
+    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=Message
 )
 def deletar_usuario(
     user_id: int,

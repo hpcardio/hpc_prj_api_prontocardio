@@ -6,9 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app_prontocardio.database import (
-    get_session_oracle,
-)
+from app_prontocardio.database import get_session_oracle
 from app_prontocardio.models import ModelContaAtendimento, Usuario
 from app_prontocardio.schema import (
     Atendimento,
