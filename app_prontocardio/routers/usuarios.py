@@ -42,9 +42,7 @@ def consultar_usuario(
     return {'usuarios': usuarios_banco}
 
 
-@router.post(
-    '/usuarios/', status_code=HTTPStatus.CREATED, response_model=UserPublic
-)
+@router.post('/', status_code=HTTPStatus.CREATED, response_model=UserPublic)
 def criar_usuario(
     usuario_input: UserSchema,
     session: Session = Depends(get_session_postgres),
@@ -83,9 +81,7 @@ def criar_usuario(
     return usuario_banco
 
 
-@router.put(
-    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic
-)
+@router.put('/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic)
 def alterar_usuario(
     user_id: int,
     usuario_input: UserSchema,
@@ -115,9 +111,7 @@ def alterar_usuario(
         )
 
 
-@router.delete(
-    '/usuarios/{user_id}', status_code=HTTPStatus.OK, response_model=Message
-)
+@router.delete('/{user_id}', status_code=HTTPStatus.OK, response_model=Message)
 def deletar_usuario(
     user_id: int,
     usuario_atual: ValidaUsuarioAtual,
