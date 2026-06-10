@@ -1,0 +1,18 @@
+# Compose para ambiente de produção/integração:
+# - Apenas a API (sem banco local)
+# - Postgres gerenciado no Railway via DATABASE_URL
+# - Oracle acessado diretamente pela rede interna
+#
+# Uso: docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  api_prontocardio:
+    image: api_prontocardio
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    restart: unless-stopped
