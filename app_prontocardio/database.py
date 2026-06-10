@@ -13,10 +13,10 @@ oracle_engine = create_engine(
 
 postgres_engine = (
     create_engine(
-        settings.POSTGRES_DATABASE_URL,
+        settings.DATABASE_URL,
         pool_pre_ping=True,
     )
-    if settings.POSTGRES_DATABASE_URL
+    if settings.DATABASE_URL
     else None
 )
 
@@ -38,7 +38,7 @@ def get_session_oracle():
 
 def get_session_postgres():
     if postgres_engine is None:
-        raise RuntimeError('POSTGRES_DATABASE_URL não configurada.')
+        raise RuntimeError('DATABASE_URL não configurada.')
 
     with Session(postgres_engine) as session_postgres:
         yield session_postgres

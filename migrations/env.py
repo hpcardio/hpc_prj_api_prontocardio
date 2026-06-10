@@ -12,12 +12,12 @@ from app_prontocardio.settings import Settings
 config = context.config
 settings = Settings()
 
-if not settings.POSTGRES_DATABASE_URL:
+if not settings.DATABASE_URL:
     raise RuntimeError(
-        'POSTGRES_DATABASE_URL não configurada para executar migrations.'
+        'DATABASE_URL não configurada para executar migrations.'
     )
 
-config.set_main_option('sqlalchemy.url', settings.POSTGRES_DATABASE_URL)
+config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
