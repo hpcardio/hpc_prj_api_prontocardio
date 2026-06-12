@@ -26,6 +26,16 @@ class FilterPage(BaseModel):
     limit: int = Field(ge=0, default=10)
 
 
+class FilterSearch(FilterPage):
+    cd_remessa: int | None = None
+    cd_atendimento: int | None = None
+    cd_reg: int | None = None
+    nm_paciente: str | None = None
+    nm_convenio: str | None = None
+    descricao: str | None = None
+    tp_atendimento: str | None = None
+
+
 class Message(BaseModel):
     message: str
 
