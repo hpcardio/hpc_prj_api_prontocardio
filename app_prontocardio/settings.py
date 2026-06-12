@@ -9,5 +9,6 @@ class Settings(BaseSettings):
     ORACLE_DATABASE_URL: str
     DATABASE_URL: str | None = None
     POSTGRES_SCHEMA: str
+    RUN_MIGRATIONS_ON_STARTUP: bool = True
     SECRET_KEY: str
     ALGORITHM: str

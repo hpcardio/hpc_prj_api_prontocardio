@@ -1,3 +1,5 @@
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -29,6 +31,14 @@ def ensure_postgres_schema() -> None:
         conn.execute(
             text(f'CREATE SCHEMA IF NOT EXISTS "{settings.POSTGRES_SCHEMA}"')
         )
+
+
+def run_postgres_migrations() -> None:
+    if postgres_engine is None:
+        return
+
+    alembic_cfg = Config('alembic.ini')
+    command.upgrade(alembic_cfg, 'head')
 
 
 def get_session_oracle():

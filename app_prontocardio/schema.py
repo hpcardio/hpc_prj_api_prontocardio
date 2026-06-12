@@ -1,7 +1,13 @@
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+)
 
 
 class UserSchema(BaseModel):
@@ -38,6 +44,55 @@ class FilterSearch(FilterPage):
 
 class Message(BaseModel):
     message: str
+
+
+class RegistroGlosaCreate(BaseModel):
+    codigo_paciente: int
+    cd_remessa: int
+    cd_atendimento: int
+    conta: int
+    cd_prestador: int
+    cd_convenio: int
+    tp_atendimento: str
+    procedimento: str
+    convenio: str
+    guia: str
+    prestador: str
+    data_atendimento: datetime
+    valor: Decimal
+    processo_controle_fatura_gab: str
+    data_glosa: date
+    motivo_glosa: str
+    descricao_glosa: str
+
+
+class RegistroGlosaPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    codigo_paciente: int
+    cd_remessa: int
+    cd_atendimento: int
+    conta: int
+    cd_prestador: int
+    cd_convenio: int
+    tp_atendimento: str
+    procedimento: str
+    convenio: str
+    guia: str
+    prestador: str
+    data_atendimento: datetime
+    valor: Decimal
+    processo_controle_fatura_gab: str
+    data_glosa: date
+    motivo_glosa: str
+    descricao_glosa: str
+    sn_glosado: bool
+    data_criacao: datetime
+
+
+class RegistroGlosas(BaseModel):
+    glosas: list[RegistroGlosaPublic]
 
 
 class Token(BaseModel):
