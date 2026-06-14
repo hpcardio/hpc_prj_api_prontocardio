@@ -149,3 +149,6 @@ class Atendimento(BaseModel):
 
 class Atendimentos(BaseModel):
     atendimentos: list[Atendimento]
+    total: int
+    limit: int | None = None
+    offset: int

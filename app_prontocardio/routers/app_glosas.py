@@ -2,7 +2,7 @@ from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -18,8 +18,8 @@ from app_prontocardio.schema import (
     FilterSearch,
     Message,
     RegistroGlosaCreate,
-    RegistroGlosas,
     RegistroGlosaPublic,
+    RegistroGlosas,
 )
 from app_prontocardio.security import valida_token_usuario_atual
 
@@ -58,6 +58,18 @@ def _get_registro_glosa_or_404(
     return registro_glosa
 
 
+def _aplicar_filtros_conta_atendimento(query, filtros: dict):
+    for chave, valor in filtros.items():
+        if hasattr(ModelContaAtendimento, chave):
+            coluna = getattr(ModelContaAtendimento, chave)
+            if chave in TEXT_FILTER_FIELDS and isinstance(valor, str):
+                query = query.where(coluna.ilike(f'%{valor}%'))
+            else:
+                query = query.where(coluna == valor)
+
+    return query
+
+
 @router.get(
     '/',
     status_code=HTTPStatus.OK,
@@ -78,17 +90,46 @@ def conta_atendimento(
         offset = filtros.pop('offset', campos_pesquisados.offset)
         limit = filtros.pop('limit', campos_pesquisados.limit)
 
-        query = select(ModelContaAtendimento)
+        pacientes_filtrados = _aplicar_filtros_conta_atendimento(
+            select(ModelContaAtendimento.cd_paciente).group_by(
+                ModelContaAtendimento.cd_paciente
+            ),
+            filtros,
+        ).subquery()
+        total = (
+            session.scalar(select(func.count()).select_from(pacientes_filtrados))
+            or 0
+        )
 
-        for chave, valor in filtros.items():
-            if hasattr(ModelContaAtendimento, chave):
-                coluna = getattr(ModelContaAtendimento, chave)
-                if chave in TEXT_FILTER_FIELDS and isinstance(valor, str):
-                    query = query.where(coluna.ilike(f'%{valor}%'))
-                else:
-                    query = query.where(coluna == valor)
+        pacientes_query = _aplicar_filtros_conta_atendimento(
+            select(ModelContaAtendimento.cd_paciente)
+            .group_by(ModelContaAtendimento.cd_paciente)
+            .order_by(
+                func.min(ModelContaAtendimento.nm_paciente),
+                ModelContaAtendimento.cd_paciente,
+            ),
+            filtros,
+        ).offset(offset)
+        if limit is not None:
+            pacientes_query = pacientes_query.limit(limit)
 
-        query = query.offset(offset).limit(limit)
+        pacientes_paginados = pacientes_query.subquery()
+
+        query = _aplicar_filtros_conta_atendimento(
+            select(ModelContaAtendimento),
+            filtros,
+        ).where(
+            ModelContaAtendimento.cd_paciente.in_(
+                select(pacientes_paginados.c.cd_paciente)
+            )
+        )
+        query = query.order_by(
+            ModelContaAtendimento.nm_paciente,
+            ModelContaAtendimento.cd_remessa,
+            ModelContaAtendimento.cd_atendimento,
+            ModelContaAtendimento.cd_reg,
+            ModelContaAtendimento.cd_lancamento,
+        )
 
         rows = session.execute(query).scalars().all()
 
@@ -118,7 +159,12 @@ def conta_atendimento(
         for row in rows
     ]
 
-    return {'atendimentos': atendimentos_list}
+    return {
+        'atendimentos': atendimentos_list,
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+    }
 
 
 @router.get(
@@ -162,14 +208,17 @@ def consultar_glosas_registradas(
 
         if chave == 'nm_paciente' and isinstance(valor, str):
             query = query.where(
-                cast(RegistroGlosa.codigo_paciente, String).ilike(
-                    f'%{valor}%'
-                )
+                cast(RegistroGlosa.codigo_paciente, String).ilike(f'%{valor}%')
             )
 
-    rows = session.execute(
-        query.order_by(RegistroGlosa.id.desc()).offset(offset).limit(limit)
-    ).scalars().all()
+    rows = (
+        session
+        .execute(
+            query.order_by(RegistroGlosa.id.desc()).offset(offset).limit(limit)
+        )
+        .scalars()
+        .all()
+    )
 
     return {'glosas': rows}
 
