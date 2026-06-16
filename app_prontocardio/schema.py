@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import (
@@ -6,8 +6,9 @@ from pydantic import (
     ConfigDict,
     EmailStr,
     Field,
-    field_validator,
 )
+
+from app_prontocardio.models import TipoAtendimento
 
 
 class UserSchema(BaseModel):
@@ -36,10 +37,11 @@ class FilterSearch(FilterPage):
     cd_remessa: int | None = None
     cd_atendimento: int | None = None
     cd_reg: int | None = None
+    nr_guia: int | None = None
+    cd_senha: str | None = None
     nm_paciente: str | None = None
     nm_convenio: str | None = None
     descricao: str | None = None
-    tp_atendimento: str | None = None
 
 
 class Message(BaseModel):
@@ -53,7 +55,7 @@ class RegistroGlosaCreate(BaseModel):
     conta: int
     cd_prestador: int
     cd_convenio: int
-    tp_atendimento: str
+    tp_atendimento: TipoAtendimento
     procedimento: str
     convenio: str
     guia: str
@@ -61,9 +63,14 @@ class RegistroGlosaCreate(BaseModel):
     data_atendimento: datetime
     valor: Decimal
     processo_controle_fatura_gab: str
+    processo_recurso: str | None = None
     data_glosa: date
     motivo_glosa: str
     descricao_glosa: str
+    qtd_glosada: Decimal | None = None
+    valor_glosado: Decimal | None = None
+    dt_recurso: date | None = None
+    dt_pagamento: date | None = None
 
 
 class RegistroGlosaPublic(BaseModel):
@@ -76,7 +83,7 @@ class RegistroGlosaPublic(BaseModel):
     conta: int
     cd_prestador: int
     cd_convenio: int
-    tp_atendimento: str
+    tp_atendimento: TipoAtendimento
     procedimento: str
     convenio: str
     guia: str
@@ -84,15 +91,34 @@ class RegistroGlosaPublic(BaseModel):
     data_atendimento: datetime
     valor: Decimal
     processo_controle_fatura_gab: str
+    processo_recurso: str | None = None
     data_glosa: date
     motivo_glosa: str
     descricao_glosa: str
+    qtd_glosada: Decimal | None = None
+    valor_glosado: Decimal | None = None
+    dt_recurso: date | None = None
+    dt_pagamento: date | None = None
     sn_glosado: bool
     data_criacao: datetime
 
 
 class RegistroGlosas(BaseModel):
     glosas: list[RegistroGlosaPublic]
+
+
+class TissPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    codigo_termo: str
+    termo: str
+    dt_inicio_vigencia: date | None = None
+    dt_fim_vigencia: date | None = None
+    dt_fim_implantacao: date | None = None
+
+
+class TissList(BaseModel):
+    itens: list[TissPublic]
 
 
 class Token(BaseModel):
@@ -121,12 +147,19 @@ class Atendimento(BaseModel):
     ds_gru_fat: str | None = None
     cd_pro_fat: int | None = None
     descricao: str | None = None
-    cd_guia: int | None = None
+    nr_guia: int | None = None
+    cd_senha: str | None = None
+    dt_atendimento: datetime | None = None
+    dt_alta: datetime | None = None
+    dt_remessa: datetime | None = None
+    dt_fechamento: datetime | None = None
     dt_lancamento: datetime | None = None
-    hr_lancamento: time | None = None
+    hr_lancamento: datetime | None = None
     cd_prestador: int | None = None
     nm_prestador: str | None = None
+    sn_fechada: str | None = None
     sn_pertence_pacote: str | None = None
+    qt_lancamento: Decimal | None = None
     vl_unitario: Decimal | None = None
     vl_total_conta: Decimal | None = None
     vl_honorario_unitario: Decimal | None = None
@@ -136,15 +169,8 @@ class Atendimento(BaseModel):
     ds_ati_med: str | None = None
     cd_usuario: str | None = None
     nm_usuario: str | None = None
-    tp_atendimento: str | None = None
+    tp_atendimento: TipoAtendimento | None = None
     dt_ordenacao: datetime | None = None
-
-    @field_validator('hr_lancamento', mode='before')
-    @classmethod
-    def parse_hr_lancamento(cls, value):
-        if isinstance(value, datetime):
-            return value.time()
-        return value
 
 
 class Atendimentos(BaseModel):

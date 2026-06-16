@@ -1,7 +1,7 @@
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -10,6 +10,8 @@ from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
     ModelContaAtendimento,
     RegistroGlosa,
+    Tiss,
+    TipoAtendimento,
     Usuario,
 )
 from app_prontocardio.schema import (
@@ -20,6 +22,7 @@ from app_prontocardio.schema import (
     RegistroGlosaCreate,
     RegistroGlosaPublic,
     RegistroGlosas,
+    TissList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
 
@@ -62,6 +65,11 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     for chave, valor in filtros.items():
         if hasattr(ModelContaAtendimento, chave):
             coluna = getattr(ModelContaAtendimento, chave)
+            if chave == 'tp_atendimento':
+                if isinstance(valor, TipoAtendimento):
+                    query = query.where(coluna == valor.value)
+                continue
+
             if chave in TEXT_FILTER_FIELDS and isinstance(valor, str):
                 query = query.where(coluna.ilike(f'%{valor}%'))
             else:
@@ -78,6 +86,9 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
 def conta_atendimento(
     usuario_atual: ValidaUsuarioAtual,
     campos_pesquisados: Annotated[FilterSearch, Depends()],
+    tp_atendimento: TipoAtendimento = Query(
+        default=None,
+    ),
     session: Session = Depends(get_session_oracle),
 ):
 
@@ -89,6 +100,8 @@ def conta_atendimento(
 
         offset = filtros.pop('offset', campos_pesquisados.offset)
         limit = filtros.pop('limit', campos_pesquisados.limit)
+        if tp_atendimento is not None:
+            filtros['tp_atendimento'] = tp_atendimento
 
         pacientes_filtrados = _aplicar_filtros_conta_atendimento(
             select(ModelContaAtendimento.cd_paciente).group_by(
@@ -97,7 +110,9 @@ def conta_atendimento(
             filtros,
         ).subquery()
         total = (
-            session.scalar(select(func.count()).select_from(pacientes_filtrados))
+            session.scalar(
+                select(func.count()).select_from(pacientes_filtrados)
+            )
             or 0
         )
 
@@ -176,6 +191,9 @@ def consultar_glosas_registradas(
     usuario_atual: ValidaUsuarioAtual,
     campos_pesquisados: Annotated[FilterSearch, Depends()],
     session: SessionPostgres,
+    tp_atendimento: TipoAtendimento = Query(
+        default=None,
+    ),
 ):
     filtros = campos_pesquisados.model_dump(
         exclude_unset=True,
@@ -184,6 +202,8 @@ def consultar_glosas_registradas(
 
     offset = filtros.pop('offset', campos_pesquisados.offset)
     limit = filtros.pop('limit', campos_pesquisados.limit)
+    if tp_atendimento is not None:
+        filtros['tp_atendimento'] = tp_atendimento
 
     query = select(RegistroGlosa)
 
@@ -200,6 +220,11 @@ def consultar_glosas_registradas(
     for chave, valor in filtros.items():
         coluna = field_mapping.get(chave)
         if coluna is not None:
+            if chave == 'tp_atendimento':
+                if isinstance(valor, TipoAtendimento):
+                    query = query.where(coluna == valor.value)
+                continue
+
             if chave in text_fields and isinstance(valor, str):
                 query = query.where(coluna.ilike(f'%{valor}%'))
             else:
@@ -223,6 +248,35 @@ def consultar_glosas_registradas(
     return {'glosas': rows}
 
 
+@router.get(
+    '/tiss',
+    status_code=HTTPStatus.OK,
+    response_model=TissList,
+)
+def consultar_tiss(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    q: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=600),
+):
+    query = select(Tiss)
+
+    if q:
+        termo = f'%{q.strip()}%'
+        query = query.where(
+            Tiss.codigo_termo.ilike(termo) | Tiss.termo.ilike(termo)
+        )
+
+    rows = (
+        session
+        .execute(query.order_by(Tiss.codigo_termo).limit(limit))
+        .scalars()
+        .all()
+    )
+
+    return {'itens': rows}
+
+
 @router.post(
     '/glosas',
     status_code=HTTPStatus.CREATED,
@@ -234,7 +288,7 @@ def registrar_glosa(
     session: SessionPostgres,
 ):
     registro_glosa = RegistroGlosa(
-        **payload.model_dump(),
+        **payload.model_dump(mode='json'),
         sn_glosado=True,
     )
 
@@ -258,7 +312,7 @@ def editar_glosa(
 ):
     registro_glosa = _get_registro_glosa_or_404(glosa_id, session)
 
-    for field_name, value in payload.model_dump().items():
+    for field_name, value in payload.model_dump(mode='json').items():
         setattr(registro_glosa, field_name, value)
 
     session.commit()

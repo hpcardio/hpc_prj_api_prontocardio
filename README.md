@@ -118,8 +118,7 @@ Por que isso e importante:
 - Garante formato consistente para consumidores internos.
 - Evita retorno de estruturas inesperadas em runtime.
 - Documenta automaticamente os contratos no Swagger/OpenAPI.
-- Valida e normaliza tipos (ex.: campo `hr_lancamento` ajustado via
-	`field_validator`).
+- Valida e normaliza tipos retornados pela API.
 
 ## Models e interacao com banco
 

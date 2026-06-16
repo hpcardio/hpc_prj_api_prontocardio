@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.coverage
+.pytest_cache
+.ruff_cache
+.venv
+htmlcov
+__pycache__
+*.py[cod]
+*.sqlite3
+*.db
+.env
