@@ -23,6 +23,7 @@ from app_prontocardio.schema import (
     Message,
     RegistroGlosaCreate,
     RegistroGlosaPublic,
+    RegistroGlosaRecebimentoUpdate,
     RegistroGlosas,
     TissList,
 )
@@ -221,10 +222,11 @@ def consultar_glosas_registradas(
         'cd_atendimento': RegistroGlosa.cd_atendimento,
         'cd_reg': RegistroGlosa.conta,
         'nm_convenio': RegistroGlosa.convenio,
+        'nm_paciente': RegistroGlosa.nm_paciente,
         'descricao': RegistroGlosa.descricao_glosa,
         'tp_atendimento': RegistroGlosa.tp_atendimento,
     }
-    text_fields = {'nm_convenio', 'descricao', 'tp_atendimento'}
+    text_fields = {'nm_convenio', 'nm_paciente', 'descricao', 'tp_atendimento'}
 
     for chave, valor in filtros.items():
         coluna = field_mapping.get(chave)
@@ -324,6 +326,29 @@ def editar_glosa(
     for field_name, value in payload.model_dump(mode='json').items():
         setattr(registro_glosa, field_name, value)
     registro_glosa.sn_ativo = 'true'
+    registro_glosa.data_criacao = _data_criacao_sao_paulo()
+
+    session.commit()
+    session.refresh(registro_glosa)
+
+    return registro_glosa
+
+
+@router.patch(
+    '/glosas/{glosa_id}/recebimento',
+    status_code=HTTPStatus.OK,
+    response_model=RegistroGlosaPublic,
+)
+def registrar_recebimento_glosa(
+    glosa_id: int,
+    payload: RegistroGlosaRecebimentoUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    registro_glosa = _get_registro_glosa_or_404(glosa_id, session)
+
+    for field_name, value in payload.model_dump(mode='json').items():
+        setattr(registro_glosa, field_name, value)
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
 
     session.commit()

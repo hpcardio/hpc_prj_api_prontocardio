@@ -51,6 +51,7 @@ class Message(BaseModel):
 
 class RegistroGlosaCreate(BaseModel):
     codigo_paciente: int
+    nm_paciente: str | None = None
     cd_remessa: int
     cd_atendimento: int
     conta: int
@@ -72,6 +73,9 @@ class RegistroGlosaCreate(BaseModel):
     valor_glosado: Decimal | None = None
     dt_recurso: date | None = None
     dt_pagamento: date | None = None
+    dt_recebimento: date | None = None
+    valor_recebido: Decimal | None = None
+    observacao_recebimento: str | None = None
     sn_glosado: str = 'true'
 
     @field_validator('sn_glosado', mode='before')
@@ -87,6 +91,7 @@ class RegistroGlosaPublic(BaseModel):
 
     id: int
     codigo_paciente: int
+    nm_paciente: str | None = None
     cd_remessa: int
     cd_atendimento: int
     conta: int
@@ -108,6 +113,9 @@ class RegistroGlosaPublic(BaseModel):
     valor_glosado: Decimal | None = None
     dt_recurso: date | None = None
     dt_pagamento: date | None = None
+    dt_recebimento: date | None = None
+    valor_recebido: Decimal | None = None
+    observacao_recebimento: str | None = None
     sn_glosado: str
     sn_ativo: str
     data_criacao: datetime
@@ -115,6 +123,12 @@ class RegistroGlosaPublic(BaseModel):
 
 class RegistroGlosas(BaseModel):
     glosas: list[RegistroGlosaPublic]
+
+
+class RegistroGlosaRecebimentoUpdate(BaseModel):
+    dt_recebimento: date
+    valor_recebido: Decimal
+    observacao_recebimento: str | None = None
 
 
 class TissPublic(BaseModel):

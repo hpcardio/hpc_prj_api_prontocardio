@@ -39,6 +39,7 @@ class RegistroGlosa:
 
     id: Mapped[int] = mapped_column(primary_key=True, init=False)
     codigo_paciente: Mapped[int]
+    nm_paciente: Mapped[str | None] = mapped_column(String, nullable=True)
     cd_remessa: Mapped[int]
     cd_atendimento: Mapped[int]
     conta: Mapped[int]
@@ -69,6 +70,15 @@ class RegistroGlosa:
     )
     dt_recurso: Mapped[date | None] = mapped_column(Date, nullable=True)
     dt_pagamento: Mapped[date | None] = mapped_column(Date, nullable=True)
+    dt_recebimento: Mapped[date | None] = mapped_column(Date, nullable=True)
+    valor_recebido: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2),
+        nullable=True,
+    )
+    observacao_recebimento: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+    )
     sn_glosado: Mapped[str] = mapped_column(String, default='true')
     sn_ativo: Mapped[str] = mapped_column(String, default='true')
     data_criacao: Mapped[datetime] = mapped_column(
