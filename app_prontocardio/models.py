@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Boolean, Date, DateTime, Numeric, String, func
+from sqlalchemy import Date, DateTime, Numeric, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column, registry
 
 from app_prontocardio.settings import Settings
@@ -69,9 +69,10 @@ class RegistroGlosa:
     )
     dt_recurso: Mapped[date | None] = mapped_column(Date, nullable=True)
     dt_pagamento: Mapped[date | None] = mapped_column(Date, nullable=True)
-    sn_glosado: Mapped[bool] = mapped_column(Boolean, default=True)
+    sn_glosado: Mapped[str] = mapped_column(String, default='true')
     data_criacao: Mapped[datetime] = mapped_column(
-        init=False, server_default=func.now()
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
     )
 
 

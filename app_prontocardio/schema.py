@@ -6,6 +6,7 @@ from pydantic import (
     ConfigDict,
     EmailStr,
     Field,
+    field_validator,
 )
 
 from app_prontocardio.models import TipoAtendimento
@@ -71,6 +72,14 @@ class RegistroGlosaCreate(BaseModel):
     valor_glosado: Decimal | None = None
     dt_recurso: date | None = None
     dt_pagamento: date | None = None
+    sn_glosado: str = 'true'
+
+    @field_validator('sn_glosado', mode='before')
+    @classmethod
+    def normalize_sn_glosado(cls, value):
+        if value in (False, 'false', 'False', 'not', 'NOT'):
+            return 'not'
+        return 'true'
 
 
 class RegistroGlosaPublic(BaseModel):
@@ -99,7 +108,7 @@ class RegistroGlosaPublic(BaseModel):
     valor_glosado: Decimal | None = None
     dt_recurso: date | None = None
     dt_pagamento: date | None = None
-    sn_glosado: bool
+    sn_glosado: str
     data_criacao: datetime
 
 

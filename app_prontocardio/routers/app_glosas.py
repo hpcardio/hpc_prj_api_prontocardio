@@ -287,10 +287,7 @@ def registrar_glosa(
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
 ):
-    registro_glosa = RegistroGlosa(
-        **payload.model_dump(mode='json'),
-        sn_glosado=True,
-    )
+    registro_glosa = RegistroGlosa(**payload.model_dump(mode='json'))
 
     session.add(registro_glosa)
     session.commit()
