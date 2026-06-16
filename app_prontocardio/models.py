@@ -70,6 +70,7 @@ class RegistroGlosa:
     dt_recurso: Mapped[date | None] = mapped_column(Date, nullable=True)
     dt_pagamento: Mapped[date | None] = mapped_column(Date, nullable=True)
     sn_glosado: Mapped[str] = mapped_column(String, default='true')
+    sn_ativo: Mapped[str] = mapped_column(String, default='true')
     data_criacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),

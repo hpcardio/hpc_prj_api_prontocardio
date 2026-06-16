@@ -109,6 +109,7 @@ class RegistroGlosaPublic(BaseModel):
     dt_recurso: date | None = None
     dt_pagamento: date | None = None
     sn_glosado: str
+    sn_ativo: str
     data_criacao: datetime
 
 

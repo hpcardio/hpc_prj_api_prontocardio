@@ -1,5 +1,7 @@
+from datetime import datetime
 from http import HTTPStatus
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, select
@@ -10,8 +12,8 @@ from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
     ModelContaAtendimento,
     RegistroGlosa,
-    Tiss,
     TipoAtendimento,
+    Tiss,
     Usuario,
 )
 from app_prontocardio.schema import (
@@ -59,6 +61,10 @@ def _get_registro_glosa_or_404(
         )
 
     return registro_glosa
+
+
+def _data_criacao_sao_paulo():
+    return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
 
 
 def _aplicar_filtros_conta_atendimento(query, filtros: dict):
@@ -194,6 +200,7 @@ def consultar_glosas_registradas(
     tp_atendimento: TipoAtendimento = Query(
         default=None,
     ),
+    incluir_inativos: bool = Query(default=False),
 ):
     filtros = campos_pesquisados.model_dump(
         exclude_unset=True,
@@ -206,6 +213,8 @@ def consultar_glosas_registradas(
         filtros['tp_atendimento'] = tp_atendimento
 
     query = select(RegistroGlosa)
+    if not incluir_inativos:
+        query = query.where(RegistroGlosa.sn_ativo == 'true')
 
     field_mapping = {
         'cd_remessa': RegistroGlosa.cd_remessa,
@@ -287,7 +296,10 @@ def registrar_glosa(
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
 ):
-    registro_glosa = RegistroGlosa(**payload.model_dump(mode='json'))
+    registro_glosa = RegistroGlosa(
+        **payload.model_dump(mode='json'),
+        sn_ativo='true',
+    )
 
     session.add(registro_glosa)
     session.commit()
@@ -311,6 +323,8 @@ def editar_glosa(
 
     for field_name, value in payload.model_dump(mode='json').items():
         setattr(registro_glosa, field_name, value)
+    registro_glosa.sn_ativo = 'true'
+    registro_glosa.data_criacao = _data_criacao_sao_paulo()
 
     session.commit()
     session.refresh(registro_glosa)
@@ -330,7 +344,8 @@ def deletar_glosa(
 ):
     registro_glosa = _get_registro_glosa_or_404(glosa_id, session)
 
-    session.delete(registro_glosa)
+    registro_glosa.sn_ativo = 'not'
+    registro_glosa.data_criacao = _data_criacao_sao_paulo()
     session.commit()
 
-    return {'message': 'Registro de glosa excluido!'}
+    return {'message': 'Registro de glosa desfeito!'}
