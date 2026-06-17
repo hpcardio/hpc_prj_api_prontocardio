@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, DateTime, Numeric, String, func, text
+from sqlalchemy import Date, DateTime, Numeric, String, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, registry
 
 from app_prontocardio.settings import Settings
@@ -82,6 +82,24 @@ class RegistroGlosa:
     sn_glosado: Mapped[str] = mapped_column(String, default='true')
     sn_ativo: Mapped[str] = mapped_column(String, default='true')
     data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class PrazoRecursoConvenio:
+    __tablename__ = 'prazos_recurso_convenio'
+    __table_args__ = (
+        UniqueConstraint('cd_convenio', name='uq_prazos_recurso_cd_convenio'),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cd_convenio: Mapped[int]
+    convenio: Mapped[str] = mapped_column(String)
+    dias_para_recurso: Mapped[int]
+    data_atualizacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
     )

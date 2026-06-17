@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
     ModelContaAtendimento,
+    PrazoRecursoConvenio,
     RegistroGlosa,
     TipoAtendimento,
     Tiss,
@@ -21,6 +22,8 @@ from app_prontocardio.schema import (
     Atendimentos,
     FilterSearch,
     Message,
+    PrazoRecursoConvenioInput,
+    PrazoRecursoConvenioList,
     RegistroGlosaCreate,
     RegistroGlosaPublic,
     RegistroGlosaRecebimentoUpdate,
@@ -257,6 +260,132 @@ def consultar_glosas_registradas(
     )
 
     return {'glosas': rows}
+
+
+@router.get(
+    '/prazos-recurso-convenio',
+    status_code=HTTPStatus.OK,
+    response_model=PrazoRecursoConvenioList,
+)
+def consultar_prazos_recurso_convenio(
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    inicio_ano = date(date.today().year, 1, 1)
+    convenios = []
+
+    try:
+        convenios = (
+            session_oracle.execute(
+                select(
+                    ModelContaAtendimento.cd_convenio,
+                    ModelContaAtendimento.nm_convenio,
+                )
+                .where(ModelContaAtendimento.dt_lancamento >= inicio_ano)
+                .where(ModelContaAtendimento.cd_convenio.is_not(None))
+                .where(ModelContaAtendimento.nm_convenio.is_not(None))
+                .group_by(
+                    ModelContaAtendimento.cd_convenio,
+                    ModelContaAtendimento.nm_convenio,
+                )
+                .order_by(ModelContaAtendimento.nm_convenio)
+            )
+            .all()
+        )
+    except SQLAlchemyError as exc:
+        if not _is_oracle_connect_timeout(exc):
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                detail='Erro ao consultar convenios.',
+            ) from exc
+
+    prazos = {
+        prazo.cd_convenio: prazo
+        for prazo in session_postgres.execute(
+            select(PrazoRecursoConvenio)
+        ).scalars()
+    }
+
+    rows = []
+    usados = set()
+    for cd_convenio, nm_convenio in convenios:
+        prazo = prazos.get(cd_convenio)
+        usados.add(cd_convenio)
+        rows.append(
+            {
+                'cd_convenio': cd_convenio,
+                'convenio': nm_convenio,
+                'dias_para_recurso': (
+                    prazo.dias_para_recurso if prazo is not None else None
+                ),
+                'configurado': prazo is not None,
+            }
+        )
+
+    for prazo in sorted(
+        (item for key, item in prazos.items() if key not in usados),
+        key=lambda item: item.convenio,
+    ):
+        rows.append(
+            {
+                'cd_convenio': prazo.cd_convenio,
+                'convenio': prazo.convenio,
+                'dias_para_recurso': prazo.dias_para_recurso,
+                'configurado': True,
+            }
+        )
+
+    return {'convenios': rows}
+
+
+@router.put(
+    '/prazos-recurso-convenio',
+    status_code=HTTPStatus.OK,
+    response_model=PrazoRecursoConvenioList,
+)
+def salvar_prazos_recurso_convenio(
+    payload: list[PrazoRecursoConvenioInput],
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    for item in payload:
+        prazo = session.scalar(
+            select(PrazoRecursoConvenio).where(
+                PrazoRecursoConvenio.cd_convenio == item.cd_convenio
+            )
+        )
+        if prazo is None:
+            prazo = PrazoRecursoConvenio(**item.model_dump())
+            session.add(prazo)
+        else:
+            prazo.convenio = item.convenio
+            prazo.dias_para_recurso = item.dias_para_recurso
+            prazo.data_atualizacao = _data_criacao_sao_paulo()
+
+    session.commit()
+
+    rows = (
+        session
+        .execute(
+            select(PrazoRecursoConvenio).order_by(
+                PrazoRecursoConvenio.convenio
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        'convenios': [
+            {
+                'cd_convenio': row.cd_convenio,
+                'convenio': row.convenio,
+                'dias_para_recurso': row.dias_para_recurso,
+                'configurado': True,
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get(

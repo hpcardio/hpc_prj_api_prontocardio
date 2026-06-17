@@ -131,6 +131,25 @@ class RegistroGlosaRecebimentoUpdate(BaseModel):
     observacao_recebimento: str | None = None
 
 
+class PrazoRecursoConvenioInput(BaseModel):
+    cd_convenio: int
+    convenio: str
+    dias_para_recurso: int = Field(ge=0, le=365)
+
+
+class PrazoRecursoConvenioPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    cd_convenio: int
+    convenio: str
+    dias_para_recurso: int | None = None
+    configurado: bool = False
+
+
+class PrazoRecursoConvenioList(BaseModel):
+    convenios: list[PrazoRecursoConvenioPublic]
+
+
 class TissPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
