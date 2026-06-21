@@ -112,6 +112,13 @@ def conta_atendimento(
         limit = filtros.pop('limit', campos_pesquisados.limit)
         if tp_atendimento is not None:
             filtros['tp_atendimento'] = tp_atendimento
+        if not filtros:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail=(
+                    'Informe pelo menos um criterio para realizar a pesquisa.'
+                ),
+            )
 
         pacientes_filtrados = _aplicar_filtros_conta_atendimento(
             select(ModelContaAtendimento.cd_paciente).group_by(
@@ -475,6 +482,17 @@ def registrar_recebimento_glosa(
     session: SessionPostgres,
 ):
     registro_glosa = _get_registro_glosa_or_404(glosa_id, session)
+    if registro_glosa.sn_glosado != 'true':
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Recebimento permitido apenas para recursos de glosa.',
+        )
+    valor_recursado = registro_glosa.valor_glosado or registro_glosa.valor
+    if payload.valor_recebido > valor_recursado:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='O valor recebido nao pode exceder o valor recursado.',
+        )
 
     for field_name, value in payload.model_dump(mode='json').items():
         setattr(registro_glosa, field_name, value)

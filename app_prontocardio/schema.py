@@ -7,6 +7,7 @@ from pydantic import (
     EmailStr,
     Field,
     field_validator,
+    model_validator,
 )
 
 from app_prontocardio.models import TipoAtendimento
@@ -65,18 +66,66 @@ class RegistroGlosaCreate(BaseModel):
     data_atendimento: datetime
     valor: Decimal
     processo_controle_fatura_gab: str
-    processo_recurso: str | None = None
+    processo_recurso: str
     data_glosa: date
     motivo_glosa: str
     descricao_glosa: str
-    qtd_glosada: Decimal | None = None
-    valor_glosado: Decimal | None = None
-    dt_recurso: date | None = None
-    dt_pagamento: date | None = None
+    qtd_registro: Decimal = Field(gt=0, exclude=True)
+    qtd_glosada: Decimal = Field(gt=0)
+    valor_glosado: Decimal = Field(gt=0)
+    dt_recurso: date
+    dt_pagamento: date
     dt_recebimento: date | None = None
     valor_recebido: Decimal | None = None
     observacao_recebimento: str | None = None
     sn_glosado: str = 'true'
+
+    @field_validator(
+        'processo_controle_fatura_gab',
+        'processo_recurso',
+        'motivo_glosa',
+        mode='before',
+    )
+    @classmethod
+    def validate_required_text(cls, value):
+        text = str(value or '').strip()
+        if not text:
+            raise ValueError('campo obrigatorio')
+        return text
+
+    @model_validator(mode='after')
+    def validate_glosa_business_rules(self):
+        if self.data_glosa > self.dt_pagamento:
+            raise ValueError(
+                'A data da glosa deve ser igual ou anterior '
+                'a data do pagamento.'
+            )
+        if (
+            self.dt_recurso < self.data_glosa
+            or self.dt_recurso < self.dt_pagamento
+        ):
+            raise ValueError(
+                'A data do recurso nao pode ser anterior as datas '
+                'da glosa ou do pagamento.'
+            )
+        if self.qtd_glosada > self.qtd_registro:
+            raise ValueError(
+                'A quantidade glosada/acatada nao pode exceder '
+                'a quantidade do registro.'
+            )
+        if self.valor_glosado > self.valor:
+            raise ValueError(
+                'O valor glosado/acatado nao pode exceder o valor do registro.'
+            )
+        if self.sn_glosado == 'not' and (
+            self.dt_recebimento is not None
+            or self.valor_recebido is not None
+            or self.observacao_recebimento
+        ):
+            raise ValueError(
+                'Acatos nao podem possuir dados de recebimento.'
+            )
+        return self
 
     @field_validator('sn_glosado', mode='before')
     @classmethod
@@ -127,7 +176,7 @@ class RegistroGlosas(BaseModel):
 
 class RegistroGlosaRecebimentoUpdate(BaseModel):
     dt_recebimento: date
-    valor_recebido: Decimal
+    valor_recebido: Decimal = Field(gt=0)
     observacao_recebimento: str | None = None
 
 
