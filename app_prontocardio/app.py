@@ -20,8 +20,8 @@ settings = Settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    ensure_postgres_schema()
     if settings.RUN_MIGRATIONS_ON_STARTUP:
+        ensure_postgres_schema()
         run_postgres_migrations()
     yield
 

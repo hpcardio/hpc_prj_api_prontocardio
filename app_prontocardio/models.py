@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    ForeignKey,
     Numeric,
     String,
     UniqueConstraint,
@@ -36,6 +37,31 @@ class Usuario:
     nome: Mapped[str] = mapped_column(String, unique=True)
     email: Mapped[str] = mapped_column(String, unique=True)
     senha: Mapped[str]
+    perfil: Mapped[str] = mapped_column(
+        String(20), default='usuario', server_default=text("'usuario'")
+    )
+    ativo: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text('true')
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
+class TokenRedefinicaoSenha:
+    __tablename__ = 'tokens_redefinicao_senha'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expira_em: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    utilizado: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text('false')
+    )
     data_criacao: Mapped[datetime] = mapped_column(
         init=False, server_default=func.now()
     )

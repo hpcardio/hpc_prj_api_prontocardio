@@ -291,3 +291,20 @@ poetry run task pos_tests
 	cenarios de autenticacao do ambiente hospitalar.
 - Antes de subir em producao, valide conectividade com o banco e variaveis
 	de ambiente do hospital.
+# Gestão de acessos e recuperação de senha
+
+O usuário mais antigo é promovido ao perfil `ti` pela migração
+`20260622_009`. Esse perfil pode criar contas, bloquear acessos e definir
+senhas temporárias pela interface administrativa.
+
+Para habilitar o envio dos links de recuperação, configure na API:
+
+```env
+FRONTEND_BASE_URL=http://localhost:8003
+SMTP_HOST=smtp.exemplo.com
+SMTP_PORT=587
+SMTP_USERNAME=usuario
+SMTP_PASSWORD=segredo
+SMTP_FROM_EMAIL=nao-responda@prontocardio.com.br
+SMTP_USE_TLS=true
+```

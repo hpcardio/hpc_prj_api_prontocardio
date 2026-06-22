@@ -12,12 +12,15 @@ from app_prontocardio.schema import (
     FilterPage,
     Message,
     UserList,
+    UserPasswordUpdate,
     UserPublic,
     UserSchema,
+    UserStatusUpdate,
 )
 from app_prontocardio.security import (
     gera_hash_senha,
     valida_token_usuario_atual,
+    valida_usuario_ti,
 )
 
 router = APIRouter(prefix='/usuarios', tags=['usuarios'])
@@ -25,12 +28,18 @@ router = APIRouter(prefix='/usuarios', tags=['usuarios'])
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 Filter_Users = Annotated[FilterPage, Query()]
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
+ValidaUsuarioTi = Annotated[Usuario, Depends(valida_usuario_ti)]
+
+
+@router.get('/me', status_code=HTTPStatus.OK, response_model=UserPublic)
+def consultar_usuario_atual(usuario_atual: ValidaUsuarioAtual):
+    return usuario_atual
 
 
 @router.get('/', status_code=HTTPStatus.OK, response_model=UserList)
 def consultar_usuario(
     filter_usuario: Filter_Users,
-    usuario_atual: ValidaUsuarioAtual,
+    usuario_atual: ValidaUsuarioTi,
     session: SessionPostgres,
 ):
     usuarios_banco = session.scalars(
@@ -45,6 +54,7 @@ def consultar_usuario(
 @router.post('/', status_code=HTTPStatus.CREATED, response_model=UserPublic)
 def criar_usuario(
     usuario_input: UserSchema,
+    usuario_atual: ValidaUsuarioTi,
     session: Session = Depends(get_session_postgres),
 ):
     """Verifica se usuário está cadastrado na API;
@@ -79,6 +89,46 @@ def criar_usuario(
     session.refresh(usuario_banco)
 
     return usuario_banco
+
+
+@router.patch(
+    '/{user_id}/status', status_code=HTTPStatus.OK, response_model=UserPublic
+)
+def alterar_status_usuario(
+    user_id: int,
+    status_input: UserStatusUpdate,
+    usuario_atual: ValidaUsuarioTi,
+    session: SessionPostgres,
+):
+    usuario = session.get(Usuario, user_id)
+    if not usuario:
+        raise HTTPException(HTTPStatus.NOT_FOUND, 'Usuário não encontrado.')
+    if usuario.id == usuario_atual.id and not status_input.ativo:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            'Você não pode desativar seu próprio acesso.',
+        )
+    usuario.ativo = status_input.ativo
+    session.commit()
+    session.refresh(usuario)
+    return usuario
+
+
+@router.patch(
+    '/{user_id}/senha', status_code=HTTPStatus.OK, response_model=Message
+)
+def redefinir_senha_usuario(
+    user_id: int,
+    password_input: UserPasswordUpdate,
+    usuario_atual: ValidaUsuarioTi,
+    session: SessionPostgres,
+):
+    usuario = session.get(Usuario, user_id)
+    if not usuario:
+        raise HTTPException(HTTPStatus.NOT_FOUND, 'Usuário não encontrado.')
+    usuario.senha = gera_hash_senha(password_input.senha)
+    session.commit()
+    return {'message': 'Senha temporária definida com sucesso.'}
 
 
 @router.put('/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic)

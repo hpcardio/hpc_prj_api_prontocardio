@@ -16,18 +16,38 @@ from app_prontocardio.models import TipoAtendimento
 class UserSchema(BaseModel):
     nome: str
     email: EmailStr
-    senha: str
+    senha: str = Field(min_length=8, max_length=128)
+    perfil: str = Field(default='usuario', pattern='^(usuario|ti)$')
 
 
 class UserPublic(BaseModel):
     id: int
     nome: str
     email: EmailStr
+    perfil: str
+    ativo: bool
     model_config = ConfigDict(from_attributes=True)
 
 
 class UserList(BaseModel):
     usuarios: list[UserPublic]
+
+
+class UserStatusUpdate(BaseModel):
+    ativo: bool
+
+
+class UserPasswordUpdate(BaseModel):
+    senha: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+    nova_senha: str = Field(min_length=8, max_length=128)
 
 
 class FilterPage(BaseModel):

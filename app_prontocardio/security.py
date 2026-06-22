@@ -57,7 +57,16 @@ def valida_token_usuario_atual(
         select(Usuario).where(Usuario.email == subject_email)
     )
 
-    if not usuario_banco:
+    if not usuario_banco or not usuario_banco.ativo:
         raise excessao_autenticacao
 
     return usuario_banco
+
+
+def valida_usuario_ti(usuario: Usuario = Depends(valida_token_usuario_atual)):
+    if usuario.perfil != 'ti':
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Acesso restrito à equipe de TI.',
+        )
+    return usuario

@@ -3,6 +3,18 @@ from http import HTTPStatus
 from app_prontocardio.schema import UserPublic
 
 
+def test_consultar_usuario_atual(cliente, usuario_teste, token_teste):
+    response = cliente.get(
+        '/usuarios/me',
+        headers={'Authorization': f'Bearer {token_teste}'},
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() == UserPublic.model_validate(
+        usuario_teste
+    ).model_dump()
+
+
 def test_consultar_usuarios(cliente, usuario_teste, token_teste):
     """Testando consulta de usuários cadastrados"""
 
@@ -17,35 +29,39 @@ def test_consultar_usuarios(cliente, usuario_teste, token_teste):
     assert response.json() == {'usuarios': [usuario_autorizado]}
 
 
-def test_criar_usuario(cliente):
+def test_criar_usuario(cliente, token_teste):
     """Testando a criação de usuário"""
 
     response = cliente.post(
         '/usuarios/',
+        headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'nome': 'usuario_novo',
             'email': 'usuario_novo@teste.com',
-            'senha': 'testes',
+            'senha': 'testes123',
         },
     )
 
     assert response.status_code == HTTPStatus.CREATED
     assert response.json() == {
-        'id': 1,
+        'id': 2,
         'nome': 'usuario_novo',
         'email': 'usuario_novo@teste.com',
+        'perfil': 'usuario',
+        'ativo': True,
     }
 
 
-def test_criar_usuario_com_mesmo_nome(cliente, usuario_teste):
+def test_criar_usuario_com_mesmo_nome(cliente, usuario_teste, token_teste):
     """Testando a criação de usuários com mesmo nome"""
 
     response = cliente.post(
         '/usuarios/',
+        headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'nome': usuario_teste.nome,
             'email': 'novo_email@teste.com',
-            'senha': 'testes',
+            'senha': 'testes123',
         },
     )
 
@@ -55,15 +71,16 @@ def test_criar_usuario_com_mesmo_nome(cliente, usuario_teste):
     }
 
 
-def test_criar_usuario_com_mesmo_email(cliente, usuario_teste):
+def test_criar_usuario_com_mesmo_email(cliente, usuario_teste, token_teste):
     """Testando a criação de usuários com mesmo email"""
 
     response = cliente.post(
         '/usuarios/',
+        headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'nome': 'nome_novo',
             'email': usuario_teste.email,
-            'senha': 'testes',
+            'senha': 'testes123',
         },
     )
 
@@ -82,7 +99,7 @@ def test_alterar_usuario(cliente, usuario_teste, token_teste):
         json={
             'nome': 'pixolia',
             'email': 'pixolia@gmail.com',
-            'senha': 'pipi123',
+            'senha': 'pipi1234',
         },
     )
 
@@ -91,6 +108,8 @@ def test_alterar_usuario(cliente, usuario_teste, token_teste):
         'nome': 'pixolia',
         'email': 'pixolia@gmail.com',
         'id': usuario_teste.id,
+        'perfil': 'ti',
+        'ativo': True,
     }
 
 
@@ -99,10 +118,12 @@ def test_alterar_usuario_ja_cadastrado(cliente, usuario_teste, token_teste):
 
     cliente.post(
         '/usuarios/',
+        headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'nome': 'marie',
             'email': 'marie@gmail.com',
             'senha': 'xerie_anri',
+            'perfil': 'usuario',
         },
     )
 
@@ -131,7 +152,7 @@ def test_alterar_usuario_com_outro_usuario(
         json={
             'nome': 'pixolia',
             'email': 'pixolia@gmail.com',
-            'senha': 'pipi123',
+            'senha': 'pipi1234',
         },
     )
 
@@ -163,5 +184,3 @@ def test_deletar_usuario_com_outro_usuario(
 
     assert response.status_code == HTTPStatus.FORBIDDEN
     assert response.json() == {'detail': 'Usuário sem permissão!!'}
-
-

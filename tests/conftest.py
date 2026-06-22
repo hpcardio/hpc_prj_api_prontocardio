@@ -5,10 +5,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app_prontocardio.app import app
+from app_prontocardio.app import app, settings as app_settings
 from app_prontocardio.database import get_session_postgres
 from app_prontocardio.models import Usuario, table_registry
 from app_prontocardio.security import gera_hash_senha
+
+app_settings.RUN_MIGRATIONS_ON_STARTUP = False
 
 
 @pytest.fixture
@@ -49,11 +51,9 @@ def cliente(session):
     def get_session_teste():
         return session
 
+    app.dependency_overrides[get_session_postgres] = get_session_teste
     with TestClient(app) as cliente:
-        app.dependency_overrides[get_session_postgres] = get_session_teste
-
         yield cliente
-
     app.dependency_overrides.clear()
 
 
@@ -64,6 +64,7 @@ class UserFactory(factory.Factory):
     nome = factory.sequence(lambda n: f'usuario_{n}')
     email = factory.LazyAttribute(lambda obj: f'{obj.nome}@teste.com')
     senha = factory.LazyAttribute(lambda obj: f'{obj.nome}_xpto')
+    perfil = 'ti'
 
 
 @pytest.fixture
