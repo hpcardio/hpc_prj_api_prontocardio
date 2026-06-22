@@ -420,6 +420,57 @@ def consultar_prazos_recurso_convenio(
     return {'convenios': rows}
 
 
+@router.get(
+    '/tiss',
+    status_code=HTTPStatus.OK,
+    response_model=TissList,
+)
+def consultar_tiss(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    q: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=600),
+):
+    query = select(Tiss)
+
+    if q:
+        termo = f'%{q.strip()}%'
+        query = query.where(
+            Tiss.codigo_termo.ilike(termo) | Tiss.termo.ilike(termo)
+        )
+
+    rows = (
+        session
+        .execute(query.order_by(Tiss.codigo_termo).limit(limit))
+        .scalars()
+        .all()
+    )
+
+    return {'itens': rows}
+
+
+@router.post(
+    '/glosas',
+    status_code=HTTPStatus.CREATED,
+    response_model=RegistroGlosaPublic,
+)
+def registrar_glosa(
+    payload: RegistroGlosaCreate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    registro_glosa = RegistroGlosa(
+        **payload.model_dump(mode='json'),
+        sn_ativo='true',
+    )
+
+    session.add(registro_glosa)
+    session.commit()
+    session.refresh(registro_glosa)
+
+    return registro_glosa
+
+
 @router.put(
     '/prazos-recurso-convenio',
     status_code=HTTPStatus.OK,
@@ -477,57 +528,6 @@ def salvar_prazos_recurso_convenio(
             for row in rows
         ]
     }
-
-
-@router.get(
-    '/tiss',
-    status_code=HTTPStatus.OK,
-    response_model=TissList,
-)
-def consultar_tiss(
-    usuario_atual: ValidaUsuarioAtual,
-    session: SessionPostgres,
-    q: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=600),
-):
-    query = select(Tiss)
-
-    if q:
-        termo = f'%{q.strip()}%'
-        query = query.where(
-            Tiss.codigo_termo.ilike(termo) | Tiss.termo.ilike(termo)
-        )
-
-    rows = (
-        session
-        .execute(query.order_by(Tiss.codigo_termo).limit(limit))
-        .scalars()
-        .all()
-    )
-
-    return {'itens': rows}
-
-
-@router.post(
-    '/glosas',
-    status_code=HTTPStatus.CREATED,
-    response_model=RegistroGlosaPublic,
-)
-def registrar_glosa(
-    payload: RegistroGlosaCreate,
-    usuario_atual: ValidaUsuarioAtual,
-    session: SessionPostgres,
-):
-    registro_glosa = RegistroGlosa(
-        **payload.model_dump(mode='json'),
-        sn_ativo='true',
-    )
-
-    session.add(registro_glosa)
-    session.commit()
-    session.refresh(registro_glosa)
-
-    return registro_glosa
 
 
 @router.put(
