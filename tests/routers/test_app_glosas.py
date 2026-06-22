@@ -1,5 +1,18 @@
 from copy import deepcopy
+from datetime import datetime
 from http import HTTPStatus
+
+from app_prontocardio.models import PrazoRecursoConvenio, RegistroGlosa
+from app_prontocardio.routers.app_glosas import (
+    consultar_convenios,
+    consultar_glosas_registradas,
+    salvar_prazos_recurso_convenio,
+)
+from app_prontocardio.schema import (
+    FilterSearch,
+    PrazoRecursoConvenioInput,
+    RegistroGlosaCreate,
+)
 
 
 def test_conta_atendimento_exige_criterio(cliente, token_teste):
@@ -63,6 +76,90 @@ def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
     assert response.status_code == HTTPStatus.OK
     assert len(response.json()['glosas']) == 1
     assert response.json()['glosas'][0]['sn_ativo'] == 'true'
+
+
+def test_filtra_glosas_de_convenio_desabilitado(session):
+    payload = RegistroGlosaCreate(**registro_glosa_payload())
+    registro = RegistroGlosa(
+        **payload.model_dump(),
+        sn_ativo='true',
+    )
+    prazo = PrazoRecursoConvenio(
+        cd_convenio=20,
+        convenio='CASSI',
+        dias_para_recurso=10,
+        habilitado=False,
+    )
+    registro.data_criacao = datetime.now()
+    prazo.data_atualizacao = datetime.now()
+    session.add_all([registro, prazo])
+    session.commit()
+
+    response = consultar_glosas_registradas(
+        usuario_atual=None,
+        campos_pesquisados=FilterSearch(cd_reg=333709),
+        session=session,
+        tp_atendimento=None,
+        incluir_inativos=False,
+    )
+    assert response['glosas'] == []
+
+
+def test_convenio_habilitado_por_padrao(session):
+    prazo = PrazoRecursoConvenio(
+        cd_convenio=20,
+        convenio='CASSI',
+        dias_para_recurso=5,
+    )
+    prazo.data_atualizacao = datetime.now()
+    session.add(prazo)
+    session.commit()
+
+    response = salvar_prazos_recurso_convenio(
+        payload=[
+            PrazoRecursoConvenioInput(
+                cd_convenio=20,
+                convenio='CASSI',
+                dias_para_recurso=10,
+            )
+        ],
+        usuario_atual=None,
+        session=session,
+    )
+
+    assert response['convenios'][0]['habilitado'] is True
+
+
+def test_endpoint_convenios_retorna_apenas_habilitados(session):
+    prazo = PrazoRecursoConvenio(
+        cd_convenio=20,
+        convenio='CASSI',
+        dias_para_recurso=10,
+        habilitado=False,
+    )
+    prazo.data_atualizacao = datetime.now()
+    session.add(prazo)
+    session.commit()
+
+    class OracleResult:
+        @staticmethod
+        def all():
+            return [(20, 'CASSI'), (21, 'UNIMED')]
+
+    class OracleSession:
+        @staticmethod
+        def execute(_query):
+            return OracleResult()
+
+    response = consultar_convenios(
+        usuario_atual=None,
+        session_postgres=session,
+        session_oracle=OracleSession(),
+    )
+
+    assert response == {
+        'convenios': [{'cd_convenio': 21, 'nm_convenio': 'UNIMED'}]
+    }
 
 
 def test_rejeita_glosa_sem_dados_obrigatorios(cliente, token_teste):

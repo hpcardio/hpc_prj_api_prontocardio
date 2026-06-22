@@ -2,7 +2,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
-from sqlalchemy import Date, DateTime, Numeric, String, UniqueConstraint, func, text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Numeric,
+    String,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, registry
 
 from app_prontocardio.settings import Settings
@@ -99,6 +108,11 @@ class PrazoRecursoConvenio:
     cd_convenio: Mapped[int]
     convenio: Mapped[str] = mapped_column(String)
     dias_para_recurso: Mapped[int]
+    habilitado: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text('true'),
+    )
     data_atualizacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
@@ -122,6 +136,16 @@ class Tiss:
         init=False,
         server_default=func.now(),
     )
+
+
+@table_registry.mapped_as_dataclass
+class ModelConvenio:
+    __tablename__ = 'CONVENIO'
+    __table_args__ = {'schema': 'DBAMV'}
+
+    cd_convenio: Mapped[int] = mapped_column(primary_key=True, init=False)
+    nm_convenio: Mapped[str] = mapped_column(String, init=False)
+    sn_ativo: Mapped[str] = mapped_column(String, init=False)
 
 
 @table_registry.mapped_as_dataclass

@@ -184,6 +184,7 @@ class PrazoRecursoConvenioInput(BaseModel):
     cd_convenio: int
     convenio: str
     dias_para_recurso: int = Field(ge=0, le=365)
+    habilitado: bool = True
 
 
 class PrazoRecursoConvenioPublic(BaseModel):
@@ -193,10 +194,20 @@ class PrazoRecursoConvenioPublic(BaseModel):
     convenio: str
     dias_para_recurso: int | None = None
     configurado: bool = False
+    habilitado: bool = True
 
 
 class PrazoRecursoConvenioList(BaseModel):
     convenios: list[PrazoRecursoConvenioPublic]
+
+
+class ConvenioPublic(BaseModel):
+    cd_convenio: int
+    nm_convenio: str
+
+
+class ConvenioList(BaseModel):
+    convenios: list[ConvenioPublic]
 
 
 class TissPublic(BaseModel):

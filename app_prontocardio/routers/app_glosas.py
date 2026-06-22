@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
     ModelContaAtendimento,
+    ModelConvenio,
     PrazoRecursoConvenio,
     RegistroGlosa,
     TipoAtendimento,
@@ -20,6 +21,7 @@ from app_prontocardio.models import (
 from app_prontocardio.schema import (
     Atendimento,
     Atendimentos,
+    ConvenioList,
     FilterSearch,
     Message,
     PrazoRecursoConvenioInput,
@@ -88,6 +90,26 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     return query
 
 
+def _excluir_convenios_desabilitados(query, codigos_desabilitados):
+    if codigos_desabilitados:
+        return query.where(
+            ModelContaAtendimento.cd_convenio.not_in(codigos_desabilitados)
+        )
+    return query
+
+
+def _consultar_convenios_ativos_oracle(session_oracle: Session):
+    return session_oracle.execute(
+        select(
+            ModelConvenio.cd_convenio,
+            ModelConvenio.nm_convenio,
+        )
+        .where(ModelConvenio.sn_ativo == 'S')
+        .where(ModelConvenio.nm_convenio.is_not(None))
+        .order_by(ModelConvenio.nm_convenio)
+    ).all()
+
+
 @router.get(
     '/',
     status_code=HTTPStatus.OK,
@@ -96,6 +118,7 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
 def conta_atendimento(
     usuario_atual: ValidaUsuarioAtual,
     campos_pesquisados: Annotated[FilterSearch, Depends()],
+    session_postgres: SessionPostgres,
     tp_atendimento: TipoAtendimento = Query(
         default=None,
     ),
@@ -120,11 +143,21 @@ def conta_atendimento(
                 ),
             )
 
-        pacientes_filtrados = _aplicar_filtros_conta_atendimento(
-            select(ModelContaAtendimento.cd_paciente).group_by(
-                ModelContaAtendimento.cd_paciente
+        codigos_desabilitados = tuple(
+            session_postgres.scalars(
+                select(PrazoRecursoConvenio.cd_convenio).where(
+                    PrazoRecursoConvenio.habilitado.is_(False)
+                )
+            )
+        )
+        pacientes_filtrados = _excluir_convenios_desabilitados(
+            _aplicar_filtros_conta_atendimento(
+                select(ModelContaAtendimento.cd_paciente).group_by(
+                    ModelContaAtendimento.cd_paciente
+                ),
+                filtros,
             ),
-            filtros,
+            codigos_desabilitados,
         ).subquery()
         total = (
             session.scalar(
@@ -133,23 +166,29 @@ def conta_atendimento(
             or 0
         )
 
-        pacientes_query = _aplicar_filtros_conta_atendimento(
-            select(ModelContaAtendimento.cd_paciente)
-            .group_by(ModelContaAtendimento.cd_paciente)
-            .order_by(
-                func.min(ModelContaAtendimento.nm_paciente),
-                ModelContaAtendimento.cd_paciente,
+        pacientes_query = _excluir_convenios_desabilitados(
+            _aplicar_filtros_conta_atendimento(
+                select(ModelContaAtendimento.cd_paciente)
+                .group_by(ModelContaAtendimento.cd_paciente)
+                .order_by(
+                    func.min(ModelContaAtendimento.nm_paciente),
+                    ModelContaAtendimento.cd_paciente,
+                ),
+                filtros,
             ),
-            filtros,
+            codigos_desabilitados,
         ).offset(offset)
         if limit is not None:
             pacientes_query = pacientes_query.limit(limit)
 
         pacientes_paginados = pacientes_query.subquery()
 
-        query = _aplicar_filtros_conta_atendimento(
-            select(ModelContaAtendimento),
-            filtros,
+        query = _excluir_convenios_desabilitados(
+            _aplicar_filtros_conta_atendimento(
+                select(ModelContaAtendimento),
+                filtros,
+            ),
+            codigos_desabilitados,
         ).where(
             ModelContaAtendimento.cd_paciente.in_(
                 select(pacientes_paginados.c.cd_paciente)
@@ -226,6 +265,14 @@ def consultar_glosas_registradas(
     query = select(RegistroGlosa)
     if not incluir_inativos:
         query = query.where(RegistroGlosa.sn_ativo == 'true')
+    query = query.where(
+        ~select(PrazoRecursoConvenio.id)
+        .where(
+            PrazoRecursoConvenio.cd_convenio == RegistroGlosa.cd_convenio,
+            PrazoRecursoConvenio.habilitado.is_(False),
+        )
+        .exists()
+    )
 
     field_mapping = {
         'cd_remessa': RegistroGlosa.cd_remessa,
@@ -270,6 +317,48 @@ def consultar_glosas_registradas(
 
 
 @router.get(
+    '/convenios',
+    status_code=HTTPStatus.OK,
+    response_model=ConvenioList,
+)
+def consultar_convenios(
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    try:
+        convenios = _consultar_convenios_ativos_oracle(session_oracle)
+    except SQLAlchemyError as exc:
+        if _is_oracle_connect_timeout(exc):
+            raise HTTPException(
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                detail='Banco Oracle indisponivel no momento.',
+            ) from exc
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail='Erro ao consultar convenios.',
+        ) from exc
+
+    codigos_desabilitados = set(
+        session_postgres.scalars(
+            select(PrazoRecursoConvenio.cd_convenio).where(
+                PrazoRecursoConvenio.habilitado.is_(False)
+            )
+        )
+    )
+    return {
+        'convenios': [
+            {
+                'cd_convenio': cd_convenio,
+                'nm_convenio': nm_convenio,
+            }
+            for cd_convenio, nm_convenio in convenios
+            if cd_convenio not in codigos_desabilitados
+        ]
+    }
+
+
+@router.get(
     '/prazos-recurso-convenio',
     status_code=HTTPStatus.OK,
     response_model=PrazoRecursoConvenioList,
@@ -279,27 +368,10 @@ def consultar_prazos_recurso_convenio(
     session_postgres: SessionPostgres,
     session_oracle: Session = Depends(get_session_oracle),
 ):
-    inicio_ano = date(date.today().year, 1, 1)
     convenios = []
 
     try:
-        convenios = (
-            session_oracle.execute(
-                select(
-                    ModelContaAtendimento.cd_convenio,
-                    ModelContaAtendimento.nm_convenio,
-                )
-                .where(ModelContaAtendimento.dt_lancamento >= inicio_ano)
-                .where(ModelContaAtendimento.cd_convenio.is_not(None))
-                .where(ModelContaAtendimento.nm_convenio.is_not(None))
-                .group_by(
-                    ModelContaAtendimento.cd_convenio,
-                    ModelContaAtendimento.nm_convenio,
-                )
-                .order_by(ModelContaAtendimento.nm_convenio)
-            )
-            .all()
-        )
+        convenios = _consultar_convenios_ativos_oracle(session_oracle)
     except SQLAlchemyError as exc:
         if not _is_oracle_connect_timeout(exc):
             raise HTTPException(
@@ -327,6 +399,7 @@ def consultar_prazos_recurso_convenio(
                     prazo.dias_para_recurso if prazo is not None else None
                 ),
                 'configurado': prazo is not None,
+                'habilitado': prazo.habilitado if prazo is not None else True,
             }
         )
 
@@ -340,6 +413,7 @@ def consultar_prazos_recurso_convenio(
                 'convenio': prazo.convenio,
                 'dias_para_recurso': prazo.dias_para_recurso,
                 'configurado': True,
+                'habilitado': prazo.habilitado,
             }
         )
 
@@ -356,19 +430,28 @@ def salvar_prazos_recurso_convenio(
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
 ):
-    for item in payload:
-        prazo = session.scalar(
+    codigos = {item.cd_convenio for item in payload}
+    prazos = {
+        prazo.cd_convenio: prazo
+        for prazo in session.scalars(
             select(PrazoRecursoConvenio).where(
-                PrazoRecursoConvenio.cd_convenio == item.cd_convenio
+                PrazoRecursoConvenio.cd_convenio.in_(codigos)
             )
         )
+    }
+    data_atualizacao = _data_criacao_sao_paulo()
+
+    for item in payload:
+        prazo = prazos.get(item.cd_convenio)
         if prazo is None:
             prazo = PrazoRecursoConvenio(**item.model_dump())
             session.add(prazo)
+            prazos[item.cd_convenio] = prazo
         else:
             prazo.convenio = item.convenio
             prazo.dias_para_recurso = item.dias_para_recurso
-            prazo.data_atualizacao = _data_criacao_sao_paulo()
+            prazo.habilitado = item.habilitado
+            prazo.data_atualizacao = data_atualizacao
 
     session.commit()
 
@@ -389,6 +472,7 @@ def salvar_prazos_recurso_convenio(
                 'convenio': row.convenio,
                 'dias_para_recurso': row.dias_para_recurso,
                 'configurado': True,
+                'habilitado': row.habilitado,
             }
             for row in rows
         ]
