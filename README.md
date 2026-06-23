@@ -300,11 +300,12 @@ senhas temporárias pela interface administrativa.
 Para habilitar o envio dos links de recuperação, configure na API:
 
 ```env
-FRONTEND_BASE_URL=http://localhost:8003
-SMTP_HOST=smtp.exemplo.com
-SMTP_PORT=587
-SMTP_USERNAME=usuario
-SMTP_PASSWORD=segredo
-SMTP_FROM_EMAIL=nao-responda@prontocardio.com.br
-SMTP_USE_TLS=true
+FRONTEND_BASE_URL=http://localhost:8080
+SMTP_HOST=smtp.hostinger.com
+SMTP_PORT=465
+SMTP_USER=tihpc@hospitalprontocardio.com.br
+SMTP_PASSWORD=senha_do_email
+SMTP_FROM="TI Hospital Prontocardio <tihpc@hospitalprontocardio.com.br>"
+SMTP_USE_SSL=true
+SMTP_USE_TLS=false
 ```

@@ -68,20 +68,21 @@ def _enviar_email_redefinicao(destinatario: str, token: str) -> None:
     )
     mensagem = EmailMessage()
     mensagem['Subject'] = 'Redefinição de senha · Gestão de Glosas'
-    mensagem['From'] = settings.SMTP_FROM_EMAIL
+    mensagem['From'] = settings.smtp_from_email
     mensagem['To'] = destinatario
     mensagem.set_content(
         'Recebemos uma solicitação para redefinir sua senha.\n\n'
         f'Acesse o link abaixo em até 30 minutos:\n{reset_url}\n\n'
         'Se você não fez esta solicitação, ignore esta mensagem.'
     )
-    with smtplib.SMTP(
+    smtp_class = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
+    with smtp_class(
         settings.SMTP_HOST, settings.SMTP_PORT, timeout=10
     ) as smtp:
-        if settings.SMTP_USE_TLS:
+        if settings.smtp_use_tls:
             smtp.starttls()
-        if settings.SMTP_USERNAME and settings.SMTP_PASSWORD:
-            smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+        if settings.smtp_username and settings.SMTP_PASSWORD:
+            smtp.login(settings.smtp_username, settings.SMTP_PASSWORD)
         smtp.send_message(mensagem)
 
 
