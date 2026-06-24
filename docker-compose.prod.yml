@@ -1,11 +1,45 @@
 services:
   api_prontocardio:
     image: api_prontocardio
-    build: .
+    build:
+      context: .
     env_file:
       - .env
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     extra_hosts:
       - "host-gateway:host-gateway"
+    networks:
+      default:
+      api_rede_proxy:
+        aliases:
+          - api_prontocardio
     restart: unless-stopped
+
+  nginx:
+    profiles:
+      - standalone
+    image: nginx:stable-alpine3.19-slim
+    container_name: api_prontocardio_nginx
+    depends_on:
+      api_prontocardio:
+        condition: service_started
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      APP_HOST_PORT: api_prontocardio:8000
+      SERVER_NAME: ${SERVER_NAME:-apihpc.hospitalprontocardio.com.br}
+      SSL_CERTIFICATE: ${SSL_CERTIFICATE:-/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/fullchain.pem}
+      SSL_CERTIFICATE_KEY: ${SSL_CERTIFICATE_KEY:-/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/privkey.pem}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50M}
+    volumes:
+      - ./server/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./server/letsencrypt:/etc/letsencrypt:ro
+      - ./server/certbot:/var/www/certbot:ro
+    restart: unless-stopped
+
+networks:
+  api_rede_proxy:
+    external: true
+    name: api-rede_default

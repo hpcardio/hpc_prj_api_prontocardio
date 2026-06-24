@@ -206,3 +206,10 @@ __marimo__/
 
 # Generated using ignr.py - github.com/Antrikshy/ignr.py
 
+# Production TLS certificates and ACME state
+server/letsencrypt/
+server/certbot/
+server/certificates/
+server/**/*.crt
+server/**/*.key
+server/**/*.pem
