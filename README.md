@@ -142,7 +142,10 @@ O arquivo `app_prontocardio/settings.py` centraliza variaveis de ambiente com
 - `POSTGRES_SCHEMA`: schema PostgreSQL usado pelos models da aplicacao. As
 	migrations atuais criam e alteram o schema `api_prontocardio`.
 - `SECRET_KEY` e `ALGORITHM`: assinatura dos tokens JWT.
-- `FRONTEND_BASE_URL`: base usada nos links de recuperacao de senha.
+- `FRONTEND_BASE_URL`: base do frontend usada como fallback de origem.
+- `FRONTEND_PASSWORD_RESET_URL`: URL da tela do frontend que recebe o token
+	de recuperacao de senha. A API adiciona `?token=...`; se a URL contiver
+	`{token}`, substitui esse marcador pelo token gerado.
 - `CORS_ALLOWED_ORIGINS`: origens permitidas para chamadas do frontend,
 	separadas por virgula. Quando vazia, usa `FRONTEND_BASE_URL`.
 
@@ -154,8 +157,9 @@ DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/banco
 POSTGRES_SCHEMA=api_prontocardio
 SECRET_KEY=gere_uma_chave_forte
 ALGORITHM=HS256
-FRONTEND_BASE_URL=https://app.hospitalprontocardio.com.br
-CORS_ALLOWED_ORIGINS=https://app.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=https://rede.hospitalprontocardio.com.br
+FRONTEND_PASSWORD_RESET_URL=https://rede.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+CORS_ALLOWED_ORIGINS=https://rede.hospitalprontocardio.com.br
 ```
 
 ## Testes e objetivos
@@ -254,8 +258,8 @@ poetry update
 
 Crie o arquivo `.env` na raiz com as variaveis descritas na secao de
 configuracao. Para desenvolvimento local, ajuste `ORACLE_DATABASE_URL`,
-`DATABASE_URL`, `POSTGRES_SCHEMA`, `SECRET_KEY`, `ALGORITHM` e
-`FRONTEND_BASE_URL`.
+`DATABASE_URL`, `POSTGRES_SCHEMA`, `SECRET_KEY`, `ALGORITHM`,
+`FRONTEND_BASE_URL` e `FRONTEND_PASSWORD_RESET_URL`.
 
 ## Execucao da aplicacao
 
@@ -309,8 +313,9 @@ Configure no `.env`:
 
 ```env
 SERVER_NAME=apihpc.hospitalprontocardio.com.br
-FRONTEND_BASE_URL=https://app.hospitalprontocardio.com.br
-CORS_ALLOWED_ORIGINS=https://app.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=https://rede.hospitalprontocardio.com.br
+FRONTEND_PASSWORD_RESET_URL=https://rede.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+CORS_ALLOWED_ORIGINS=https://rede.hospitalprontocardio.com.br
 SSL_CERTIFICATE=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/fullchain.pem
 SSL_CERTIFICATE_KEY=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/privkey.pem
 ```
@@ -346,8 +351,9 @@ senhas temporárias pela interface administrativa.
 Para habilitar o envio dos links de recuperação, configure na API:
 
 ```env
-FRONTEND_BASE_URL=https://app.hospitalprontocardio.com.br
-CORS_ALLOWED_ORIGINS=https://app.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=https://rede.hospitalprontocardio.com.br
+FRONTEND_PASSWORD_RESET_URL=https://rede.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+CORS_ALLOWED_ORIGINS=https://rede.hospitalprontocardio.com.br
 SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
 SMTP_USER=tihpc@hospitalprontocardio.com.br
