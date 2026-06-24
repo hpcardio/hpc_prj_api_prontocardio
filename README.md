@@ -144,8 +144,9 @@ O arquivo `app_prontocardio/settings.py` centraliza variaveis de ambiente com
 - `SECRET_KEY` e `ALGORITHM`: assinatura dos tokens JWT.
 - `FRONTEND_BASE_URL`: base do frontend usada como fallback de origem.
 - `FRONTEND_PASSWORD_RESET_URL`: URL da tela do frontend que recebe o token
-	de recuperacao de senha. A API adiciona `?token=...`; se a URL contiver
-	`{token}`, substitui esse marcador pelo token gerado.
+	de recuperacao de senha. Se a URL contiver `{token}`, a API substitui
+	esse marcador pelo token gerado; prefira `#token={token}` para evitar
+	que o token seja enviado ao servidor em logs de acesso.
 - `CORS_ALLOWED_ORIGINS`: origens permitidas para chamadas do frontend,
 	separadas por virgula. Quando vazia, usa `FRONTEND_BASE_URL`.
 
@@ -158,7 +159,7 @@ POSTGRES_SCHEMA=api_prontocardio
 SECRET_KEY=gere_uma_chave_forte
 ALGORITHM=HS256
 FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha#token={token}
 CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
 ```
 
@@ -314,7 +315,7 @@ Configure no `.env`:
 ```env
 SERVER_NAME=apihpc.hospitalprontocardio.com.br
 FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha#token={token}
 CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
 SSL_CERTIFICATE=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/fullchain.pem
 SSL_CERTIFICATE_KEY=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/privkey.pem
@@ -352,7 +353,7 @@ Para habilitar o envio dos links de recuperação, configure na API:
 
 ```env
 FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha#token={token}
 CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
 SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
