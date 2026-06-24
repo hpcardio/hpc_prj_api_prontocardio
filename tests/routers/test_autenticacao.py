@@ -35,9 +35,9 @@ def test_configuracao_smtp_hostinger_usa_ssl_e_aliases():
 
 def test_link_redefinicao_usa_url_explicitada_do_frontend(monkeypatch):
     settings = _settings_teste(
-        FRONTEND_BASE_URL='https://apihpc.hospitalprontocardio.com.br',
+        FRONTEND_BASE_URL='https://api-interna.hospitalprontocardio.com.br',
         FRONTEND_PASSWORD_RESET_URL=(
-            'https://rede.hospitalprontocardio.com.br'
+            'https://apihpc.hospitalprontocardio.com.br'
             '/autenticacao/redefinir-senha'
         ),
     )
@@ -45,16 +45,16 @@ def test_link_redefinicao_usa_url_explicitada_do_frontend(monkeypatch):
     monkeypatch.setattr(autenticacao, 'settings', settings)
 
     assert autenticacao._montar_link_redefinicao('abc_123') == (
-        'https://rede.hospitalprontocardio.com.br'
+        'https://apihpc.hospitalprontocardio.com.br'
         '/autenticacao/redefinir-senha?token=abc_123'
     )
 
 
 def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
     settings = _settings_teste(
-        FRONTEND_BASE_URL='https://apihpc.hospitalprontocardio.com.br',
+        FRONTEND_BASE_URL='https://api-interna.hospitalprontocardio.com.br',
         FRONTEND_PASSWORD_RESET_URL=(
-            'https://rede.hospitalprontocardio.com.br'
+            'https://apihpc.hospitalprontocardio.com.br'
             '/autenticacao/redefinir-senha'
         ),
         SMTP_HOST='smtp.hostinger.com',
@@ -116,7 +116,7 @@ def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
 
     conteudo = smtp.mensagem.get_content()
     assert (
-        'https://rede.hospitalprontocardio.com.br'
+        'https://apihpc.hospitalprontocardio.com.br'
         '/autenticacao/redefinir-senha?token=token'
     ) in conteudo
-    assert 'https://apihpc.hospitalprontocardio.com.br' not in conteudo
+    assert 'https://api-interna.hospitalprontocardio.com.br' not in conteudo

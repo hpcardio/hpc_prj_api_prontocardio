@@ -157,9 +157,9 @@ DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/banco
 POSTGRES_SCHEMA=api_prontocardio
 SECRET_KEY=gere_uma_chave_forte
 ALGORITHM=HS256
-FRONTEND_BASE_URL=https://rede.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://rede.hospitalprontocardio.com.br/autenticacao/redefinir-senha
-CORS_ALLOWED_ORIGINS=https://rede.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
+FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
 ```
 
 ## Testes e objetivos
@@ -313,9 +313,9 @@ Configure no `.env`:
 
 ```env
 SERVER_NAME=apihpc.hospitalprontocardio.com.br
-FRONTEND_BASE_URL=https://rede.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://rede.hospitalprontocardio.com.br/autenticacao/redefinir-senha
-CORS_ALLOWED_ORIGINS=https://rede.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
+FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
 SSL_CERTIFICATE=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/fullchain.pem
 SSL_CERTIFICATE_KEY=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/privkey.pem
 ```
@@ -351,9 +351,9 @@ senhas temporárias pela interface administrativa.
 Para habilitar o envio dos links de recuperação, configure na API:
 
 ```env
-FRONTEND_BASE_URL=https://rede.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://rede.hospitalprontocardio.com.br/autenticacao/redefinir-senha
-CORS_ALLOWED_ORIGINS=https://rede.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
+FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha
+CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
 SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
 SMTP_USER=tihpc@hospitalprontocardio.com.br
