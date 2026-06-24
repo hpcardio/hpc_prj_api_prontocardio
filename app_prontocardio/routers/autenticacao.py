@@ -7,6 +7,7 @@ from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -64,7 +65,7 @@ def _enviar_email_redefinicao(destinatario: str, token: str) -> None:
     if not settings.SMTP_HOST:
         return
     reset_url = (
-        f"{settings.FRONTEND_BASE_URL.rstrip('/')}/redefinir-senha/?token={token}"
+        f"{settings.FRONTEND_BASE_URL.rstrip('/')}/autenticacao/redefinir-senha/?token={token}"
     )
     mensagem = EmailMessage()
     mensagem['Subject'] = 'Redefinição de senha · Gestão de Glosas'
@@ -117,6 +118,132 @@ def solicitar_redefinicao_senha(
     return {
         'message': 'Se o e-mail estiver cadastrado, enviaremos as instruções.'
     }
+
+
+@router.get('/redefinir-senha', response_class=HTMLResponse)
+def pagina_redefinicao_senha(token: str = '') -> str:
+        token_seguro = token.replace("'", "&#39;").replace('"', '&quot;')
+        return f"""<!doctype html>
+<html lang=\"pt-BR\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Redefinir senha</title>
+    <style>
+        :root {{
+            --bg: #f4f6fb;
+            --card: #ffffff;
+            --text: #1c2a39;
+            --muted: #5d6a79;
+            --primary: #0c7a7d;
+            --primary-2: #0a676a;
+            --danger: #b42318;
+            --ok: #027a48;
+            --border: #d8dee8;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: radial-gradient(circle at 20% 20%, #eef9f9, var(--bg));
+            color: var(--text);
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 16px;
+        }}
+        .card {{
+            width: 100%;
+            max-width: 460px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: 0 20px 40px rgba(6, 24, 44, .08);
+            padding: 24px;
+        }}
+        h1 {{ margin: 0 0 8px; font-size: 1.35rem; }}
+        p {{ margin: 0 0 16px; color: var(--muted); }}
+        label {{ display: block; margin: 12px 0 6px; font-weight: 600; }}
+        input {{
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: .95rem;
+        }}
+        input:focus {{ outline: 2px solid #9cd9db; border-color: var(--primary); }}
+        button {{
+            width: 100%;
+            margin-top: 16px;
+            border: 0;
+            border-radius: 10px;
+            padding: 11px 14px;
+            color: #fff;
+            background: linear-gradient(135deg, var(--primary), var(--primary-2));
+            font-weight: 700;
+            cursor: pointer;
+        }}
+        button:disabled {{ opacity: .7; cursor: wait; }}
+        .msg {{ margin-top: 12px; font-size: .93rem; }}
+        .msg.error {{ color: var(--danger); }}
+        .msg.ok {{ color: var(--ok); }}
+    </style>
+</head>
+<body>
+    <main class=\"card\">
+        <h1>Redefinição de senha</h1>
+        <p>Defina uma nova senha para continuar.</p>
+        <form id=\"form\">
+            <label for=\"token\">Token</label>
+            <input id=\"token\" name=\"token\" value=\"{token_seguro}\" required />
+            <label for=\"nova_senha\">Nova senha</label>
+            <input id=\"nova_senha\" name=\"nova_senha\" type=\"password\" minlength=\"8\" maxlength=\"128\" required />
+            <button id=\"btn\" type=\"submit\">Redefinir senha</button>
+            <div id=\"msg\" class=\"msg\" aria-live=\"polite\"></div>
+        </form>
+    </main>
+
+    <script>
+        const form = document.getElementById('form');
+        const msg = document.getElementById('msg');
+        const btn = document.getElementById('btn');
+
+        form.addEventListener('submit', async (ev) => {{
+            ev.preventDefault();
+            msg.textContent = '';
+            msg.className = 'msg';
+            btn.disabled = true;
+
+            const body = {{
+                token: document.getElementById('token').value.trim(),
+                nova_senha: document.getElementById('nova_senha').value,
+            }};
+
+            try {{
+                const resp = await fetch('/autenticacao/redefinir-senha', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify(body),
+                }});
+                const data = await resp.json().catch(() => ({{}}));
+                if (!resp.ok) {{
+                    msg.classList.add('error');
+                    msg.textContent = data.detail || 'Não foi possível redefinir a senha.';
+                }} else {{
+                    msg.classList.add('ok');
+                    msg.textContent = data.message || 'Senha redefinida com sucesso.';
+                    form.reset();
+                }}
+            }} catch (_) {{
+                msg.classList.add('error');
+                msg.textContent = 'Falha de conexão. Tente novamente.';
+            }} finally {{
+                btn.disabled = false;
+            }}
+        }});
+    </script>
+</body>
+</html>"""
 
 
 @router.post(
