@@ -4514,6 +4514,24 @@ def _tratativas_demonstrativo_por_item(
     return dict(resultado)
 
 
+def _valor_tratado_cogestao_remessa(
+    tratativas_por_item: dict[tuple, list[RegistroGlosa]],
+    numero_processo: str,
+    codigo_remessa: int,
+) -> Decimal:
+    chave_processo = numero_processo.strip().casefold()
+    return sum(
+        (
+            _money(registro.valor_recursado)
+            for chave, registros in tratativas_por_item.items()
+            if chave[0] == chave_processo and chave[1] == codigo_remessa
+            for registro in registros
+            if registro.status_tratativa != 'pendente'
+        ),
+        Decimal('0.00'),
+    )
+
+
 def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -5566,6 +5584,17 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         if incluir_detalhes and termo_paciente
         else set()
     )
+    # Sem o detalhamento por paciente (Oracle), o card ainda precisa
+    # refletir as tratativas de "+Glosar" já registradas para a remessa.
+    codigos_remessa_cogestao = {
+        int(item['cd_remessa'])
+        for itens in remessas_por_valor.values()
+        for item in itens
+    }
+    tratativas_cogestao = _tratativas_demonstrativo_por_item(
+        session,
+        codigos_remessa_cogestao,
+    )
     cards = []
     for row in rows:
         valor_protocolo = _money(row['valor_protocolo'])
@@ -5666,12 +5695,20 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             if pacientes_demonstrativo
             else _money(row['valor_glosado_protocolo'])
         )
-        valor_tratado = sum(
-            (
-                _money(paciente['valor_total_tratado'])
-                for paciente in pacientes_demonstrativo
-            ),
-            Decimal('0.00'),
+        valor_tratado = (
+            sum(
+                (
+                    _money(paciente['valor_total_tratado'])
+                    for paciente in pacientes_demonstrativo
+                ),
+                Decimal('0.00'),
+            )
+            if pacientes_demonstrativo
+            else _valor_tratado_cogestao_remessa(
+                tratativas_cogestao,
+                numero_processo,
+                codigo_remessa,
+            )
         )
         cards.append({
             'conciliacao_remessa_id': None,
