@@ -4813,6 +4813,81 @@ def _protocolos_demonstrativo_por_paciente(
     }
 
 
+def _identificar_remessa_demonstrativos_oracle(
+    session_oracle: Session,
+    demonstrativos: list[Mapping],
+) -> int | None:
+    datas = []
+    for demonstrativo in demonstrativos:
+        data_realizacao = demonstrativo.get('data_realizacao')
+        if isinstance(data_realizacao, datetime):
+            data_realizacao = data_realizacao.date()
+        if isinstance(data_realizacao, date):
+            datas.append(data_realizacao)
+    codigos_servico = {
+        str(item.get('codigo_servico') or '').strip()
+        for item in demonstrativos
+        if str(item.get('codigo_servico') or '').strip()
+    }
+    if not datas or not codigos_servico:
+        return None
+    inicio = date(min(datas).year, min(datas).month, 1)
+    fim = _mes_seguinte(date(max(datas).year, max(datas).month, 1))
+    contas = session_oracle.scalars(
+        select(ModelContaAtendimento).where(
+            ModelContaAtendimento.cd_remessa.is_not(None),
+            or_(
+                ModelContaAtendimento.cd_pro_fat.in_(codigos_servico),
+                ModelContaAtendimento.cd_tuss.in_(codigos_servico),
+            ),
+            or_(
+                and_(
+                    ModelContaAtendimento.dt_competencia >= inicio,
+                    ModelContaAtendimento.dt_competencia < fim,
+                ),
+                and_(
+                    ModelContaAtendimento.dt_lancamento >= inicio,
+                    ModelContaAtendimento.dt_lancamento < fim,
+                ),
+                and_(
+                    ModelContaAtendimento.dt_atendimento >= inicio,
+                    ModelContaAtendimento.dt_atendimento < fim,
+                ),
+            ),
+        )
+    ).all()
+    itens_oracle = [
+        {
+            'cd_remessa': int(conta.cd_remessa),
+            'cd_reg': int(conta.cd_reg),
+            'cd_lancamento': int(conta.cd_lancamento),
+            'nr_guia': conta.nr_guia,
+            'nr_carteira': conta.nr_carteira,
+            'cd_pro_fat': conta.cd_pro_fat,
+            'cd_tuss': getattr(conta, 'cd_tuss', None),
+            'vl_total_conta': conta.vl_total_conta,
+            'dt_competencia': conta.dt_competencia,
+            'dt_atendimento': conta.dt_atendimento,
+            'dt_lancamento': conta.dt_lancamento,
+        }
+        for conta in contas
+    ]
+    indice = indexar_itens_oracle(itens_oracle)
+    remessas = {
+        correspondencia.cd_remessa
+        for demonstrativo in demonstrativos
+        if (
+            correspondencia := resolver_correspondencia_item_oracle(
+                demonstrativo,
+                indice,
+            )
+        ).cd_remessa is not None
+    }
+    if len(remessas) != 1:
+        return None
+    return int(next(iter(remessas)))
+
+
 def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     remessas_excluidas: set[int],
@@ -5496,7 +5571,39 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         valor_protocolo = _money(row['valor_protocolo'])
         competencia = _competencia_cogestao(row['competencia_producao'])
         numero_processo = str(row['numero_processo'] or '').strip()
+        numero_protocolo = str(row['nr'] or '').strip()
         remessa = _selecionar_remessa_cogestao(row, remessas_por_valor)
+        if (
+            remessa is None
+            and termo_paciente
+            and numero_protocolo in protocolos_paciente
+        ):
+            demonstrativos_paciente = session.execute(
+                text(
+                    """
+                    SELECT *
+                      FROM api_prontocardio.demonstrativo_conta_ipm
+                     WHERE BTRIM(numero_protocolo) = :numero_protocolo
+                       AND nome_beneficiario ILIKE :paciente
+                       AND COALESCE(valor_glosa, 0) > 0
+                     ORDER BY referencia, id_registro
+                    """
+                ),
+                {
+                    'numero_protocolo': numero_protocolo,
+                    'paciente': f'%{str(paciente or "").strip()}%',
+                },
+            ).mappings().all()
+            codigo_identificado = _identificar_remessa_demonstrativos_oracle(
+                session_oracle,
+                list(demonstrativos_paciente),
+            )
+            if codigo_identificado is not None:
+                remessas_identificadas, _ = _itens_oracle_remessas_ipm(
+                    session_oracle,
+                    {codigo_identificado},
+                )
+                remessa = remessas_identificadas.get(codigo_identificado)
         if remessa is None:
             continue
 
@@ -5517,7 +5624,6 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             )
         ):
             continue
-        numero_protocolo = str(row['nr'] or '').strip()
         pacientes_demonstrativo = []
         if termo_paciente:
             if numero_protocolo not in protocolos_paciente:
