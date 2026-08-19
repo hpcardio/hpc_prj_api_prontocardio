@@ -6114,19 +6114,19 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             session_oracle,
             {conciliacao_remessa_id},
         )
+    # Tratativas de "+Glosar" nem sempre têm conciliacao_remessa_id
+    # preenchido (origem_registro='triagem'), então a alocação é somada
+    # pelo cd_remessa para não ignorar tratativas de remessas já modeladas.
     valores_alocados = (
         select(
-            RegistroGlosa.conciliacao_remessa_id.label(
-                'conciliacao_remessa_id'
-            ),
+            RegistroGlosa.cd_remessa.label('cd_remessa'),
             func.sum(RegistroGlosa.valor_recursado).label('valor_alocado'),
         )
         .where(
-            RegistroGlosa.conciliacao_remessa_id.is_not(None),
             RegistroGlosa.sn_ativo == 'true',
             RegistroGlosa.valor_recursado.is_not(None),
         )
-        .group_by(RegistroGlosa.conciliacao_remessa_id)
+        .group_by(RegistroGlosa.cd_remessa)
         .subquery()
     )
     data_entrega = (
@@ -6264,8 +6264,8 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         )
         .outerjoin(
             valores_alocados,
-            valores_alocados.c.conciliacao_remessa_id
-            == ConciliacaoFaturamentoRemessa.id,
+            valores_alocados.c.cd_remessa
+            == ConciliacaoFaturamentoRemessa.cd_remessa,
         )
         .where(*filtros)
     )
@@ -6278,8 +6278,8 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         )
         .outerjoin(
             valores_alocados,
-            valores_alocados.c.conciliacao_remessa_id
-            == ConciliacaoFaturamentoRemessa.id,
+            valores_alocados.c.cd_remessa
+            == ConciliacaoFaturamentoRemessa.cd_remessa,
         )
         .where(*filtros)
     )
@@ -6306,8 +6306,8 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         )
         .outerjoin(
             valores_alocados,
-            valores_alocados.c.conciliacao_remessa_id
-            == ConciliacaoFaturamentoRemessa.id,
+            valores_alocados.c.cd_remessa
+            == ConciliacaoFaturamentoRemessa.cd_remessa,
         )
         .where(*filtros)
     ).one()
