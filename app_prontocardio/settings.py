@@ -1,3 +1,6 @@
+from urllib.parse import urlsplit
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SMTP_SSL_PORT = 465
@@ -13,6 +16,9 @@ class Settings(BaseSettings):
     ORACLE_CLIENT_LIB_DIR: str | None = None
     DATABASE_URL: str | None = None
     POSTGRES_SCHEMA: str
+    APP_ENV: str = 'development'
+    EXPECTED_POSTGRES_HOST: str | None = None
+    EXPECTED_POSTGRES_DATABASE: str | None = None
     RUN_MIGRATIONS_ON_STARTUP: bool = True
     SECRET_KEY: str
     ALGORITHM: str
@@ -43,6 +49,38 @@ class Settings(BaseSettings):
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
     WHATSAPP_ACCESS_TOKEN: str | None = None
     WHATSAPP_AUTO_REPLY_TEXT: str | None = None
+
+    @model_validator(mode='after')
+    def validar_banco_de_producao(self):
+        if self.APP_ENV.strip().casefold() not in {'prod', 'production'}:
+            return self
+
+        if not self.DATABASE_URL:
+            raise ValueError('DATABASE_URL é obrigatória em produção.')
+        if not self.EXPECTED_POSTGRES_HOST:
+            raise ValueError(
+                'EXPECTED_POSTGRES_HOST é obrigatório em produção.'
+            )
+        if not self.EXPECTED_POSTGRES_DATABASE:
+            raise ValueError(
+                'EXPECTED_POSTGRES_DATABASE é obrigatório em produção.'
+            )
+
+        destino = urlsplit(self.DATABASE_URL)
+        host_atual = (destino.hostname or '').strip().casefold()
+        host_esperado = self.EXPECTED_POSTGRES_HOST.strip().casefold()
+        banco_atual = destino.path.lstrip('/').strip().casefold()
+        banco_esperado = (
+            self.EXPECTED_POSTGRES_DATABASE.strip().casefold()
+        )
+        if host_atual != host_esperado or banco_atual != banco_esperado:
+            raise ValueError(
+                'DATABASE_URL não aponta para o PostgreSQL oficial: '
+                f'esperado {host_esperado}/{banco_esperado}, '
+                f'recebido {host_atual}/{banco_atual}.'
+            )
+
+        return self
 
     @property
     def smtp_username(self) -> str | None:
