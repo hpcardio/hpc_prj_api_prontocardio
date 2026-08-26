@@ -1222,6 +1222,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
         paciente=None,
         cd_atendimento=None,
         tipo_atendimento=None,
+        numero_protocolo=None,
     )
 
     assert len(cards) == 1
@@ -1279,6 +1280,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
         paciente=None,
         cd_atendimento=None,
         tipo_atendimento=None,
+        numero_protocolo=None,
     )
 
     assert cards[0]['pacientes'] == [paciente_demonstrativo]
