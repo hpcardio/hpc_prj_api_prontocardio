@@ -115,6 +115,52 @@ class TokenRedefinicaoSenha:
 
 
 @table_registry.mapped_as_dataclass
+class DesafioOtpPaciente:
+    __tablename__ = 'desafios_otp_paciente'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    desafio_id: Mapped[str] = mapped_column(String(64), unique=True)
+    cd_paciente: Mapped[int]
+    nm_paciente: Mapped[str] = mapped_column(String(200))
+    cpf_hash: Mapped[str] = mapped_column(String(64), index=True)
+    telefone_final: Mapped[str] = mapped_column(String(4))
+    codigo_hash: Mapped[str] = mapped_column(String(64))
+    expira_em: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    proximo_envio_em: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    tentativas: Mapped[int] = mapped_column(
+        default=0, server_default=text('0')
+    )
+    utilizado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
+class SessaoPaciente:
+    __tablename__ = 'sessoes_paciente'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    cd_paciente: Mapped[int] = mapped_column(index=True)
+    nm_paciente: Mapped[str] = mapped_column(String(200))
+    expira_em: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revogado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    ultimo_acesso_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
 class AuditoriaAgendamento:
     __tablename__ = 'auditoria_agendamentos'
     __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
@@ -170,6 +216,26 @@ class AssociacaoRemessaIpmManual:
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
         onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class AuditoriaEvolucaoMv:
+    __tablename__ = 'auditoria_evolucoes_mv'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    chave_idempotencia: Mapped[str] = mapped_column(String(64), unique=True)
+    acao: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20))
+    operador_id: Mapped[int | None] = mapped_column(nullable=True)
+    operador_nome: Mapped[str] = mapped_column(String(200))
+    cd_atendimento: Mapped[int]
+    cd_pre_med: Mapped[int | None] = mapped_column(nullable=True)
+    cd_documento_clinico: Mapped[int | None] = mapped_column(nullable=True)
+    detalhe: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
     )
 
 
@@ -304,6 +370,18 @@ class RegistroGlosa:
         default=None,
     )
     cd_tuss: Mapped[str | None] = mapped_column(String, default=None)
+    descricao_glosa_agrupada: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    descricao_recurso_agrupada: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    descricao_acato_agrupada: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento_remessas.id',
@@ -1352,6 +1430,7 @@ class ModelContaAtendimento:
     cd_gru_fat: Mapped[int | None] = mapped_column(init=False)
     ds_gru_fat: Mapped[str | None] = mapped_column(String, init=False)
     cd_pro_fat: Mapped[str | None] = mapped_column(String, init=False)
+    cd_tuss: Mapped[str | None] = mapped_column(String, init=False)
     descricao: Mapped[str | None] = mapped_column(String, init=False)
     nr_guia: Mapped[str | None] = mapped_column(String, init=False)
     cd_senha: Mapped[str | None] = mapped_column(String, init=False)

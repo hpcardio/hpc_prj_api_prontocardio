@@ -1,6 +1,6 @@
 from collections import defaultdict
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from http import HTTPStatus
 from typing import Annotated
@@ -3669,6 +3669,7 @@ def _item_follow_up_glosa(
         'dt_alta': registro.data_alta,
         'dt_lancamento': registro.data_lancamento,
         'qt_lancamento': registro.qtd_registro or Decimal('1.00'),
+        'qtd_glosada': registro.qtd_registro or Decimal('1.00'),
         'vl_total_conta': registro.valor,
         'valor_processado': valor_processado,
         'valor_glosa': valor_glosa,
@@ -4428,6 +4429,13 @@ def _item_demonstrativo_follow_up(
             ),
             Decimal('1.00'),
         ),
+        'qtd_glosada': max(
+            _money(
+                demonstrativo.get('quantidade_executada')
+                or item_oracle.get('qt_lancamento')
+            ),
+            Decimal('1.00'),
+        ),
         # O item Oracle pode reunir várias linhas do demonstrativo. Cada
         # linha deve conservar o próprio valor processado na apresentação.
         'vl_total_conta': valor_processado,
@@ -4663,9 +4671,12 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     cd_remessa: int | None,
     convenio: str | None,
     processo_original: str | None,
+    numero_protocolo: str | None,
     paciente: str | None,
     cd_atendimento: int | None,
     tipo_atendimento: str | None,
+    processos_permitidos: set[str] | None = None,
+    remessas_permitidas: set[int] | None = None,
 ) -> list[dict]:
     if (
         not _tabela_ipm_existe(session, 'processos_remessas_ipm')
@@ -4712,11 +4723,24 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
             if termo_processo
             in str(row['numero_processo'] or '').strip().casefold()
         ]
+    if processos_permitidos is not None:
+        processos_remessas = [
+            row
+            for row in processos_remessas
+            if str(row['numero_processo'] or '').strip().casefold()
+            in processos_permitidos
+        ]
     if cd_remessa is not None:
         processos_remessas = [
             row
             for row in processos_remessas
             if int(row['cd_remessa']) == cd_remessa
+        ]
+    if remessas_permitidas is not None:
+        processos_remessas = [
+            row
+            for row in processos_remessas
+            if int(row['cd_remessa']) in remessas_permitidas
         ]
     processos_remessas = [
         row
@@ -4741,6 +4765,16 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     except SQLAlchemyError:
         return []
     demonstrativos = _demonstrativos_remessas_ipm(session, remessas)
+    termo_protocolo = str(numero_protocolo or '').strip().casefold()
+    if termo_protocolo:
+        demonstrativos = [
+            demonstrativo
+            for demonstrativo in demonstrativos
+            if termo_protocolo
+            in str(
+                demonstrativo.get('numero_protocolo') or ''
+            ).strip().casefold()
+        ]
     if not demonstrativos:
         return []
 
@@ -4977,44 +5011,108 @@ def _identificar_remessa_demonstrativos_oracle(
     }
     if not datas or not codigos_servico:
         return None
-    inicio = date(min(datas).year, min(datas).month, 1)
-    fim = _mes_seguinte(date(max(datas).year, max(datas).month, 1))
-    contas = session_oracle.scalars(
-        select(ModelContaAtendimento).where(
-            ModelContaAtendimento.cd_remessa.is_not(None),
-            or_(
-                ModelContaAtendimento.cd_pro_fat.in_(codigos_servico),
-                ModelContaAtendimento.cd_tuss.in_(codigos_servico),
-            ),
-            or_(
-                and_(
-                    ModelContaAtendimento.dt_competencia >= inicio,
-                    ModelContaAtendimento.dt_competencia < fim,
-                ),
-                and_(
-                    ModelContaAtendimento.dt_lancamento >= inicio,
-                    ModelContaAtendimento.dt_lancamento < fim,
-                ),
-                and_(
-                    ModelContaAtendimento.dt_atendimento >= inicio,
-                    ModelContaAtendimento.dt_atendimento < fim,
-                ),
-            ),
-        )
-    ).all()
+    inicio = min(datas)
+    fim = max(datas) + timedelta(days=1)
+    parametros = {'inicio': inicio, 'fim': fim}
+    marcadores = []
+    for indice_codigo, codigo_servico in enumerate(
+        sorted(codigos_servico)
+    ):
+        nome_parametro = f'codigo_servico_{indice_codigo}'
+        parametros[nome_parametro] = codigo_servico
+        marcadores.append(f':{nome_parametro}')
+    lista_codigos = ', '.join(marcadores)
+    # A view HPC_V_CONTA_ATENDIMENTO executa UNION ALL, funções de janela e
+    # vários LEFT JOINs antes de aplicar os filtros externos. Para uma busca
+    # direcionada isso varria meses de lançamentos e ultrapassava o timeout
+    # do frontend. Consultar as duas tabelas-base pela data do lançamento
+    # permite usar os índices existentes e preserva as mesmas chaves usadas
+    # pelo resolvedor de correspondência.
+    contas = session_oracle.execute(
+        text(
+            f"""
+            SELECT rf.cd_remessa,
+                   it.cd_reg_fat AS cd_reg,
+                   it.cd_lancamento,
+                   g.nr_guia,
+                   a.nr_carteira,
+                   it.cd_pro_fat,
+                   t.cd_tuss,
+                   it.vl_total_conta,
+                   f.dt_competencia,
+                   a.dt_atendimento,
+                   it.dt_lancamento
+              FROM dbamv.itreg_fat it
+              JOIN dbamv.reg_fat rf
+                ON rf.cd_reg_fat = it.cd_reg_fat
+              JOIN dbamv.atendime a
+                ON a.cd_atendimento = rf.cd_atendimento
+              LEFT JOIN dbamv.guia g
+                ON g.cd_guia = it.cd_guia
+              LEFT JOIN dbamv.remessa_fatura re
+                ON re.cd_remessa = rf.cd_remessa
+              LEFT JOIN dbamv.fatura f
+                ON f.cd_fatura = re.cd_fatura
+              LEFT JOIN dbamv.tuss t
+                ON t.cd_pro_fat = it.cd_pro_fat
+               AND t.cd_convenio = rf.cd_convenio
+             WHERE rf.cd_remessa IS NOT NULL
+               AND (
+                    it.cd_pro_fat IN ({lista_codigos})
+                    OR t.cd_tuss IN ({lista_codigos})
+               )
+               AND it.dt_lancamento >= :inicio
+               AND it.dt_lancamento < :fim
+            UNION ALL
+            SELECT ra.cd_remessa,
+                   ia.cd_reg_amb AS cd_reg,
+                   ia.cd_lancamento,
+                   g.nr_guia,
+                   a.nr_carteira,
+                   ia.cd_pro_fat,
+                   t.cd_tuss,
+                   ia.vl_total_conta,
+                   f.dt_competencia,
+                   a.dt_atendimento,
+                   ra.dt_lancamento_final AS dt_lancamento
+              FROM dbamv.itreg_amb ia
+              JOIN dbamv.reg_amb ra
+                ON ra.cd_reg_amb = ia.cd_reg_amb
+              JOIN dbamv.atendime a
+                ON a.cd_atendimento = ia.cd_atendimento
+              LEFT JOIN dbamv.guia g
+                ON g.cd_guia = ia.cd_guia
+              LEFT JOIN dbamv.remessa_fatura re
+                ON re.cd_remessa = ra.cd_remessa
+              LEFT JOIN dbamv.fatura f
+                ON f.cd_fatura = re.cd_fatura
+              LEFT JOIN dbamv.tuss t
+                ON t.cd_pro_fat = ia.cd_pro_fat
+               AND t.cd_convenio = ra.cd_convenio
+             WHERE ra.cd_remessa IS NOT NULL
+               AND (
+                    ia.cd_pro_fat IN ({lista_codigos})
+                    OR t.cd_tuss IN ({lista_codigos})
+               )
+               AND ra.dt_lancamento_final >= :inicio
+               AND ra.dt_lancamento_final < :fim
+            """
+        ),
+        parametros,
+    ).mappings().all()
     itens_oracle = [
         {
-            'cd_remessa': int(conta.cd_remessa),
-            'cd_reg': int(conta.cd_reg),
-            'cd_lancamento': int(conta.cd_lancamento),
-            'nr_guia': conta.nr_guia,
-            'nr_carteira': conta.nr_carteira,
-            'cd_pro_fat': conta.cd_pro_fat,
-            'cd_tuss': getattr(conta, 'cd_tuss', None),
-            'vl_total_conta': conta.vl_total_conta,
-            'dt_competencia': conta.dt_competencia,
-            'dt_atendimento': conta.dt_atendimento,
-            'dt_lancamento': conta.dt_lancamento,
+            'cd_remessa': int(conta['cd_remessa']),
+            'cd_reg': int(conta['cd_reg']),
+            'cd_lancamento': int(conta['cd_lancamento']),
+            'nr_guia': conta['nr_guia'],
+            'nr_carteira': conta['nr_carteira'],
+            'cd_pro_fat': conta['cd_pro_fat'],
+            'cd_tuss': conta['cd_tuss'],
+            'vl_total_conta': conta['vl_total_conta'],
+            'dt_competencia': conta['dt_competencia'],
+            'dt_atendimento': conta['dt_atendimento'],
+            'dt_lancamento': conta['dt_lancamento'],
         }
         for conta in contas
     ]
@@ -5043,18 +5141,39 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     cd_remessa: int | None,
     convenio: str | None,
     processo_original: str | None,
+    numero_protocolo: str | None,
     paciente: str | None,
     cd_atendimento: int | None,
     tipo_atendimento: str | None,
+    processos_permitidos: set[str] | None = None,
+    remessas_permitidas: set[int] | None = None,
 ) -> list[dict]:
     if (
         not _tabela_ipm_existe(session, 'processos_relatorios_itens_ipm')
         or not _tabela_ipm_existe(session, 'processos_ipm')
     ):
         return []
+    filtros_escopo = ''
+    parametros_escopo = {}
+    if processos_permitidos is not None:
+        filtros_escopo += (
+            '\n               AND LOWER(BTRIM(item.numero_processo))'
+            ' = ANY(CAST(:processos_permitidos AS TEXT[]))'
+        )
+        parametros_escopo['processos_permitidos'] = sorted(
+            processos_permitidos
+        )
+    if remessas_permitidas is not None:
+        filtros_escopo += (
+            '\n               AND item.cd_remessa'
+            ' = ANY(CAST(:remessas_permitidas AS BIGINT[]))'
+        )
+        parametros_escopo['remessas_permitidas'] = sorted(
+            remessas_permitidas
+        )
     rows = session.execute(
         text(
-            """
+            f"""
             SELECT item.id_item_relatorio,
                    item.numero_processo,
                    item.cd_remessa,
@@ -5113,6 +5232,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                    ~ '^[0-9]{4}$'
                AND split_part(item.numero_processo, '/', 2)::integer >= 2024
                AND COALESCE(item.valor_glosa, 0) > 0
+               {filtros_escopo}
              ORDER BY item.competencia DESC,
                       item.numero_processo,
                       item.cd_remessa,
@@ -5121,11 +5241,26 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                       item.conta,
                       item.cd_lancamento
             """
-        )
+        ),
+        parametros_escopo,
     ).mappings().all()
+    if processos_permitidos is not None:
+        rows = [
+            row
+            for row in rows
+            if str(row['numero_processo'] or '').strip().casefold()
+            in processos_permitidos
+        ]
+    if remessas_permitidas is not None:
+        rows = [
+            row
+            for row in rows
+            if int(row['cd_remessa']) in remessas_permitidas
+        ]
     termo_geral = str(q or '').strip().casefold()
     termo_processo = str(processo_original or '').strip().casefold()
     termo_convenio = str(convenio or '').strip().casefold()
+    termo_protocolo = str(numero_protocolo or '').strip().casefold()
     termo_paciente = str(paciente or '').strip().casefold()
     termo_tipo = str(tipo_atendimento or '').strip().casefold()
     protocolos_paciente = (
@@ -5166,6 +5301,11 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         if termo_processo and termo_processo not in numero_processo.casefold():
             continue
         protocolo_row = str(row['numero_protocolo'] or '').strip()
+        if (
+            termo_protocolo
+            and termo_protocolo not in protocolo_row.casefold()
+        ):
+            continue
         if (
             termo_paciente
             and termo_paciente not in nome_paciente.casefold()
@@ -5560,6 +5700,87 @@ def _numeros_protocolo_cogestao_follow_up(
     }
 
 
+def _codigos_remessa_por_protocolo_follow_up(
+    session: Session,
+    numero_protocolo: str | None,
+) -> set[int]:
+    termo = str(numero_protocolo or '').strip()
+    if not termo:
+        return set()
+    parametros = {'numero_protocolo': f'%{termo}%'}
+    codigos: set[int] = set()
+    if _tabela_ipm_existe(
+        session,
+        'processos_relatorios_itens_ipm',
+    ):
+        codigos.update(
+            int(codigo)
+            for codigo in session.execute(
+                text(
+                    """
+                    SELECT DISTINCT cd_remessa
+                      FROM api_prontocardio.processos_relatorios_itens_ipm
+                     WHERE numero_protocolo ILIKE :numero_protocolo
+                       AND COALESCE(valor_glosa, 0) > 0
+                    """
+                ),
+                parametros,
+            ).scalars()
+            if codigo is not None
+        )
+    if _tabela_ipm_existe(
+        session,
+        'associacoes_remessas_ipm_manuais',
+    ):
+        codigos.update(
+            int(codigo)
+            for codigo in session.execute(
+                text(
+                    """
+                    SELECT DISTINCT cd_remessa
+                      FROM api_prontocardio.associacoes_remessas_ipm_manuais
+                     WHERE nr ILIKE :numero_protocolo
+                    """
+                ),
+                parametros,
+            ).scalars()
+            if codigo is not None
+        )
+    if _tabela_ipm_existe(
+        session,
+        'processos_ipm_saude_cogestao',
+    ):
+        codigos.update(
+            int(codigo)
+            for codigo in session.execute(
+                text(
+                    """
+                    SELECT DISTINCT vinculo.cd_remessa
+                      FROM api_prontocardio.
+                           conciliacoes_faturamento_remessas AS vinculo
+                      JOIN api_prontocardio.
+                           conciliacoes_faturamento AS conciliacao
+                        ON conciliacao.id = vinculo.conciliacao_id
+                      JOIN api_prontocardio.
+                           processos_ipm_saude_cogestao AS cog
+                        ON UPPER(BTRIM(cog.numero_processo))
+                         = UPPER(BTRIM(
+                               conciliacao.processo_recebimento
+                           ))
+                       AND ROUND(cog.valor_protocolo, 2)
+                         = ROUND(vinculo.valor_total, 2)
+                       AND ROUND(cog.valor_glosado_protocolo, 2)
+                         = ROUND(vinculo.valor_glosado, 2)
+                     WHERE cog.nr ILIKE :numero_protocolo
+                    """
+                ),
+                parametros,
+            ).scalars()
+            if codigo is not None
+        )
+    return codigos
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -5572,9 +5793,12 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     convenio: str | None,
     processo_original: str | None,
     processo_recurso: str | None,
+    numero_protocolo: str | None,
     paciente: str | None,
     cd_atendimento: int | None,
     tipo_atendimento: str | None,
+    processos_permitidos: set[str] | None = None,
+    remessas_permitidas: set[int] | None = None,
 ) -> list[dict]:
     # Estes filtros dependem de dados fiscais ou de tratativa, ausentes nos
     # cards ainda não conciliados.
@@ -5677,6 +5901,14 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 )
             ).mappings()
         )
+    termo_protocolo = str(numero_protocolo or '').strip().casefold()
+    if termo_protocolo:
+        rows = [
+            row
+            for row in rows
+            if termo_protocolo
+            in str(row.get('nr') or '').strip().casefold()
+        ]
     termo_processo = str(processo_original or '').strip().casefold()
     if termo_processo:
         rows = [
@@ -5684,6 +5916,13 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             for row in rows
             if termo_processo
             in str(row['numero_processo'] or '').strip().casefold()
+        ]
+    if processos_permitidos is not None:
+        rows = [
+            row
+            for row in rows
+            if str(row['numero_processo'] or '').strip().casefold()
+            in processos_permitidos
         ]
     competencia_minima = session.scalar(
         select(func.min(RemessaFinanceira.data_competencia))
@@ -5856,6 +6095,11 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             continue
 
         codigo_remessa = int(remessa['cd_remessa'])
+        if (
+            remessas_permitidas is not None
+            and codigo_remessa not in remessas_permitidas
+        ):
+            continue
         if codigo_remessa in remessas_modeladas:
             continue
         nome_convenio = str(remessa.get('convenio') or 'IPM').strip()
@@ -6002,9 +6246,12 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             cd_remessa=cd_remessa,
             convenio=convenio,
             processo_original=processo_original,
+            numero_protocolo=numero_protocolo,
             paciente=paciente,
             cd_atendimento=cd_atendimento,
             tipo_atendimento=tipo_atendimento,
+            processos_permitidos=processos_permitidos,
+            remessas_permitidas=remessas_permitidas,
         )
     remessas_demonstrativo = {
         int(card['cd_remessa']) for card in cards_demonstrativo
@@ -6017,9 +6264,12 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         cd_remessa=cd_remessa,
         convenio=convenio,
         processo_original=processo_original,
+        numero_protocolo=numero_protocolo,
         paciente=paciente,
         cd_atendimento=cd_atendimento,
         tipo_atendimento=tipo_atendimento,
+        processos_permitidos=processos_permitidos,
+        remessas_permitidas=remessas_permitidas,
     )
     remessas_relatorios = {
         int(card['cd_remessa']) for card in cards_relatorios
@@ -6323,6 +6573,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     convenio: Annotated[str | None, Query(max_length=100)] = None,
     processo_original: Annotated[str | None, Query(max_length=100)] = None,
     processo_recurso: Annotated[str | None, Query(max_length=100)] = None,
+    numero_protocolo: Annotated[str | None, Query(max_length=100)] = None,
     paciente: Annotated[str | None, Query(max_length=150)] = None,
     cd_atendimento: Annotated[int | None, Query(ge=1)] = None,
     tipo_atendimento: Annotated[str | None, Query(max_length=50)] = None,
@@ -6331,11 +6582,45 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     conciliacao_remessa_id: Annotated[int | None, Query(ge=1)] = None,
     incluir_detalhes: bool = True,
     agrupar_por_processo: bool = False,
+    somente_processos_com_valor_tratado: bool = False,
+    somente_remessas_com_valor_tratado: bool = False,
 ):
+    processos_permitidos: set[str] | None = None
+    remessas_permitidas: set[int] | None = None
+    if (
+        somente_processos_com_valor_tratado
+        or somente_remessas_com_valor_tratado
+    ):
+        escopo_tratado = session.execute(
+            select(
+                RegistroGlosa.processo_controle_fatura_gab,
+                RegistroGlosa.cd_remessa,
+            )
+            .where(
+                RegistroGlosa.sn_ativo == 'true',
+                RegistroGlosa.dt_recurso.is_not(None),
+                RegistroGlosa.valor_recursado.is_not(None),
+                RegistroGlosa.valor_recursado > 0,
+            )
+            .distinct()
+        ).all()
+        if somente_processos_com_valor_tratado:
+            processos_permitidos = {
+                str(numero_processo or '').strip().casefold()
+                for numero_processo, _codigo_remessa in escopo_tratado
+                if str(numero_processo or '').strip()
+            }
+        if somente_remessas_com_valor_tratado:
+            remessas_permitidas = {
+                int(codigo_remessa)
+                for _numero_processo, codigo_remessa in escopo_tratado
+                if codigo_remessa is not None
+            }
     consulta_direcionada = any((
         conciliacao_remessa_id,
         cd_remessa,
         str(processo_original or '').strip(),
+        str(numero_protocolo or '').strip(),
         str(paciente or '').strip(),
         cd_atendimento,
     ))
@@ -6389,6 +6674,18 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         ConciliacaoFaturamentoRemessa.sn_glosado == 'true',
         ConciliacaoFaturamentoRemessa.valor_glosado > 0,
     ]
+    if processos_permitidos is not None:
+        filtros.append(
+            func.lower(
+                func.btrim(ConciliacaoFaturamento.processo_recebimento)
+            ).in_(processos_permitidos)
+        )
+    if remessas_permitidas is not None:
+        filtros.append(
+            ConciliacaoFaturamentoRemessa.cd_remessa.in_(
+                remessas_permitidas
+            )
+        )
     if conciliacao_remessa_id is not None:
         filtros.append(
             ConciliacaoFaturamentoRemessa.id == conciliacao_remessa_id
@@ -6447,6 +6744,19 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 RegistroGlosa.processo_recurso.ilike(f'%{termo_recurso}%'),
             )
             .exists()
+        )
+    termo_protocolo = (numero_protocolo or '').strip()
+    if termo_protocolo:
+        codigos_remessa_protocolo = (
+            _codigos_remessa_por_protocolo_follow_up(
+                session,
+                termo_protocolo,
+            )
+        )
+        filtros.append(
+            ConciliacaoFaturamentoRemessa.cd_remessa.in_(
+                codigos_remessa_protocolo
+            )
         )
     termo_paciente = (paciente or '').strip()
     if termo_paciente:
@@ -6597,9 +6907,12 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             convenio=convenio,
             processo_original=processo_original,
             processo_recurso=processo_recurso,
+            numero_protocolo=numero_protocolo,
             paciente=paciente,
             cd_atendimento=cd_atendimento,
             tipo_atendimento=tipo_atendimento,
+            processos_permitidos=processos_permitidos,
+            remessas_permitidas=remessas_permitidas,
         )
         quantidade_glosas += sum(
             len(paciente.get('itens') or [])
@@ -6926,6 +7239,52 @@ def _chave_processo_recurso(numero_processo: str | None) -> str:
     return str(numero_processo or '').strip().casefold()
 
 
+def _detalhar_cards_processo_recurso(
+    session: Session,
+    session_oracle: Session,
+    numero_processo: str,
+    cards: list[dict],
+) -> list[dict]:
+    chave_processo = _chave_processo_recurso(numero_processo)
+    remessas_tratadas = set(
+        session.scalars(
+            select(RegistroGlosa.cd_remessa)
+            .where(
+                func.lower(
+                    func.btrim(
+                        RegistroGlosa.processo_controle_fatura_gab
+                    )
+                )
+                == chave_processo,
+                RegistroGlosa.sn_ativo == 'true',
+                RegistroGlosa.dt_recurso.is_not(None),
+                RegistroGlosa.valor_recursado.is_not(None),
+                RegistroGlosa.valor_recursado > 0,
+            )
+            .distinct()
+        )
+    )
+    resultado = []
+    for card in cards:
+        codigo_remessa = int(card['cd_remessa'])
+        if codigo_remessa not in remessas_tratadas:
+            resultado.append(card)
+            continue
+        pacientes = _pacientes_demonstrativo_conciliado(
+            session,
+            session_oracle,
+            codigo_remessa,
+            numero_processo,
+            _money(card['valor_remessa']),
+            _money(card['valor_glosado']),
+            card.get('numero_protocolo'),
+        )
+        card_detalhado = dict(card)
+        card_detalhado['pacientes'] = pacientes
+        resultado.append(card_detalhado)
+    return resultado
+
+
 @router.get(
     '/conciliacao-faturamento/recursos-processos',
     status_code=HTTPStatus.OK,
@@ -6963,6 +7322,7 @@ def consultar_processos_recurso(  # noqa: PLR0913
             convenio=None,
             processo_original=(processo_original or '').strip() or None,
             processo_recurso=None,
+            numero_protocolo=None,
             paciente=(paciente or '').strip() or None,
             cd_atendimento=None,
             tipo_atendimento=None,
@@ -6971,6 +7331,7 @@ def consultar_processos_recurso(  # noqa: PLR0913
             conciliacao_remessa_id=None,
             incluir_detalhes=False,
             agrupar_por_processo=True,
+            somente_processos_com_valor_tratado=True,
         )
         cards.extend(resultado['cards'])
         total_origem = int(resultado['total'])
@@ -7025,12 +7386,13 @@ def consultar_processos_recurso(  # noqa: PLR0913
             ).casefold()
         ]
 
-    quantidade_com = sum(chave in cadastros for chave in ordem)
-    quantidade_sem = len(ordem) - quantidade_com
+    # A tela Recursos é uma fila de trabalho: exibe somente processos que
+    # já têm valor tratado e ainda aguardam o número do processo do recurso.
+    ordem = [chave for chave in ordem if chave not in cadastros]
+    quantidade_com = 0
+    quantidade_sem = len(ordem)
     if situacao == 'com':
-        ordem = [chave for chave in ordem if chave in cadastros]
-    elif situacao == 'sem':
-        ordem = [chave for chave in ordem if chave not in cadastros]
+        ordem = []
 
     total = len(ordem)
     chaves_pagina = ordem[offset : offset + limit]
@@ -7040,33 +7402,12 @@ def consultar_processos_recurso(  # noqa: PLR0913
         grupo = agrupados[chave]
         cards_processo = grupo['cards']
         if incluir_detalhes or chave == detalhar_chave:
-            detalhe = consultar_follow_up_glosas(
-                usuario_atual=usuario_atual,
-                session=session,
-                session_oracle=session_oracle,
-                q=None,
-                numero_nfse=None,
-                cd_remessa=None,
-                convenio=None,
-                processo_original=grupo['processo_original'],
-                processo_recurso=None,
-                paciente=None,
-                cd_atendimento=None,
-                tipo_atendimento=None,
-                limit=100,
-                offset=0,
-                conciliacao_remessa_id=None,
-                incluir_detalhes=True,
-                agrupar_por_processo=True,
+            cards_processo = _detalhar_cards_processo_recurso(
+                session,
+                session_oracle,
+                grupo['processo_original'],
+                cards_processo,
             )
-            cards_processo = [
-                card
-                for card in detalhe['cards']
-                if _chave_processo_recurso(
-                    (card.get('processo') or {}).get('numero_processo')
-                )
-                == chave
-            ]
         cadastro = cadastros.get(chave)
         processos.append(
             {
@@ -7158,6 +7499,7 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
         convenio=None,
         processo_original=processo_normalizado,
         processo_recurso=None,
+        numero_protocolo=None,
         paciente=None,
         cd_atendimento=None,
         tipo_atendimento=None,
