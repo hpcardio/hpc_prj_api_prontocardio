@@ -5,7 +5,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, false, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -15,6 +15,7 @@ from app_prontocardio.models import (
     ConciliacaoFaturamentoRemessa,
     ModelContaAtendimento,
     ModelConvenio,
+    ModelHpcPaciente,
     PrazoRecursoConvenio,
     RegistroGlosa,
     TipoAtendimento,
@@ -30,6 +31,8 @@ from app_prontocardio.schema import (
     PrazoRecursoConvenioInput,
     PrazoRecursoConvenioList,
     RegistroGlosaCreate,
+    RegistroGlosaDescricaoAgrupadaPublic,
+    RegistroGlosaDescricaoAgrupadaUpdate,
     RegistroGlosaPublic,
     RegistroGlosaRecebimentoUpdate,
     RegistroGlosas,
@@ -42,6 +45,7 @@ router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 TEXT_FILTER_FIELDS = {'nm_paciente', 'nm_convenio', 'descricao'}
+ORACLE_IN_MAX_VALUES = 1000
 
 
 def _is_oracle_connect_timeout(exc: SQLAlchemyError) -> bool:
@@ -303,10 +307,16 @@ def _desfazer_tratativa_glosa_conciliada(
         or 'Item da remessa'
     ).strip()
 
+    tipo_tratativa = registro_glosa.status_tratativa
     registro_glosa.processo_recurso = None
     registro_glosa.qtd_recursado = None
     registro_glosa.valor_recursado = None
     registro_glosa.dt_recurso = None
+    registro_glosa.descricao_glosa_agrupada = None
+    if tipo_tratativa == 'recurso':
+        registro_glosa.descricao_recurso_agrupada = None
+    elif tipo_tratativa == 'acato':
+        registro_glosa.descricao_acato_agrupada = None
     registro_glosa.dt_pagamento = (
         conciliacao.data_recebimento if conciliacao is not None else None
     )
@@ -327,12 +337,46 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
                     query = query.where(coluna == valor.value)
                 continue
 
+            if chave == 'cd_paciente' and isinstance(valor, tuple):
+                if not valor:
+                    query = query.where(false())
+                    continue
+
+                grupos = (
+                    valor[indice : indice + ORACLE_IN_MAX_VALUES]
+                    for indice in range(0, len(valor), ORACLE_IN_MAX_VALUES)
+                )
+                query = query.where(
+                    or_(*(coluna.in_(grupo) for grupo in grupos))
+                )
+                continue
+
             if chave in TEXT_FILTER_FIELDS and isinstance(valor, str):
                 query = query.where(coluna.ilike(f'%{valor}%'))
             else:
                 query = query.where(coluna == valor)
 
     return query
+
+
+def _resolver_filtro_nome_paciente(
+    session: Session,
+    filtros: dict,
+) -> dict:
+    filtros_resolvidos = dict(filtros)
+    nome_paciente = filtros_resolvidos.pop('nm_paciente', None)
+    if not isinstance(nome_paciente, str):
+        return filtros_resolvidos
+
+    codigos_paciente = tuple(
+        session.scalars(
+            select(ModelHpcPaciente.cd_paciente).where(
+                ModelHpcPaciente.paciente.ilike(f'%{nome_paciente}%')
+            )
+        )
+    )
+    filtros_resolvidos['cd_paciente'] = codigos_paciente
+    return filtros_resolvidos
 
 
 def _excluir_convenios_desabilitados(query, codigos_desabilitados):
@@ -387,6 +431,8 @@ def conta_atendimento(
                     'Informe pelo menos um criterio para realizar a pesquisa.'
                 ),
             )
+
+        filtros = _resolver_filtro_nome_paciente(session, filtros)
 
         codigos_desabilitados = tuple(
             session_postgres.scalars(
@@ -824,6 +870,22 @@ def editar_glosa(
     else:
         for field_name, value in payload.model_dump().items():
             setattr(registro_glosa, field_name, value)
+    campo_descricao_agrupada = (
+        'descricao_acato_agrupada'
+        if payload.sn_glosado == 'not'
+        else 'descricao_recurso_agrupada'
+    )
+    descricao_agrupada = next(
+        (
+            getattr(item, campo_descricao_agrupada)
+            for item in [registro_glosa, registro_origem, *registros_item]
+            if getattr(item, campo_descricao_agrupada, None)
+        ),
+        None,
+    )
+    if descricao_agrupada:
+        setattr(registro_glosa, campo_descricao_agrupada, descricao_agrupada)
+        registro_glosa.descricao_glosa_agrupada = descricao_agrupada
     registro_glosa.sn_ativo = 'true'
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
     if alocacao is not None:
@@ -844,6 +906,101 @@ def editar_glosa(
     session.refresh(registro_glosa)
 
     return registro_glosa
+
+
+@router.patch(
+    '/glosas/descricoes-agrupadas',
+    status_code=HTTPStatus.OK,
+    response_model=RegistroGlosaDescricaoAgrupadaPublic,
+)
+def salvar_descricoes_agrupadas_glosa(
+    payload: RegistroGlosaDescricaoAgrupadaUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    ids_solicitados = payload.recursos_ids + payload.acatos_ids
+    registros = {
+        registro.id: registro
+        for registro in session.scalars(
+            select(RegistroGlosa).where(RegistroGlosa.id.in_(ids_solicitados))
+        )
+    }
+    ids_ausentes = [
+        registro_id
+        for registro_id in ids_solicitados
+        if registro_id not in registros
+    ]
+    if ids_ausentes:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=(
+                'Tratamentos de glosa nao encontrados: '
+                + ', '.join(map(str, ids_ausentes))
+                + '.'
+            ),
+        )
+
+    registros_solicitados = [registros[item_id] for item_id in ids_solicitados]
+    if any(item.sn_ativo != 'true' for item in registros_solicitados):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Selecione apenas tratamentos ativos.',
+        )
+
+    contextos = {
+        (
+            item.codigo_paciente,
+            item.cd_atendimento,
+            item.cd_remessa,
+            item.conciliacao_remessa_id,
+        )
+        for item in registros_solicitados
+    }
+    if len(contextos) != 1:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Selecione tratamentos do mesmo paciente e atendimento.',
+        )
+
+    recursos_invalidos = [
+        item_id
+        for item_id in payload.recursos_ids
+        if registros[item_id].status_tratativa != 'recurso'
+    ]
+    acatos_invalidos = [
+        item_id
+        for item_id in payload.acatos_ids
+        if registros[item_id].status_tratativa != 'acato'
+    ]
+    if recursos_invalidos or acatos_invalidos:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'Todos os registros selecionados devem possuir uma '
+                'tratativa preenchida do mesmo tipo.'
+            ),
+        )
+
+    for item_id in payload.recursos_ids:
+        registros[item_id].descricao_recurso_agrupada = (
+            payload.descricao_recurso
+        )
+        if registros[item_id].status_tratativa == 'recurso':
+            registros[item_id].descricao_glosa_agrupada = (
+                payload.descricao_recurso
+            )
+    for item_id in payload.acatos_ids:
+        registros[item_id].descricao_acato_agrupada = payload.descricao_acato
+        if registros[item_id].status_tratativa == 'acato':
+            registros[item_id].descricao_glosa_agrupada = (
+                payload.descricao_acato
+            )
+    session.commit()
+
+    return {
+        'recursos_atualizados': payload.recursos_ids,
+        'acatos_atualizados': payload.acatos_ids,
+    }
 
 
 @router.patch(
