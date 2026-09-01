@@ -1181,7 +1181,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
             ]
 
     class Sessao:
-        def execute(self, query):
+        def execute(self, query, _params=None):
             queries.append(str(query))
             return Resultado()
 
