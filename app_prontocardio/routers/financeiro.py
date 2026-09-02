@@ -3187,7 +3187,7 @@ def _validar_remessa_associacao_manual(  # noqa: PLR0913
 
 
 @router.get('/associacoes-remessas-ipm')
-def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913
+def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
     competencia: Annotated[str | None, Query(max_length=7)] = None,
@@ -3347,6 +3347,63 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913
         )
         for row in processos_rows
     }
+    registros_pendentes_por_chave: dict[
+        tuple[str, str, str], list[dict]
+    ] = defaultdict(list)
+    registros_pendentes_por_id: dict[str, dict] = {}
+    if chaves_pendentes:
+        processos_pendentes = sorted({chave[0] for chave in chaves_pendentes})
+        for pendencia in session.execute(
+            text(
+                """
+                SELECT id_registro,
+                       UPPER(BTRIM(numero_processo))
+                           AS numero_processo_normalizado,
+                       TO_CHAR(data_realizacao, 'MM/YYYY')
+                           AS competencia_producao,
+                       UPPER(BTRIM(numero_protocolo)) AS nr,
+                       data_realizacao,
+                       numero_guia_senha,
+                       codigo_beneficiario,
+                       codigo_servico,
+                       codigo_glosa,
+                       valor_processado,
+                       valor_glosa
+                  FROM api_prontocardio.glossas_nao_vinculadas_ipm
+                       AS pendencia
+                 WHERE pendencia.motivo
+                       = 'remessa_nao_encontrada_ou_ambigua'
+                   AND UPPER(BTRIM(numero_processo)) = ANY(:processos)
+                 ORDER BY numero_processo_normalizado,
+                          competencia_producao, nr,
+                          numero_guia_senha, codigo_servico
+                """
+            ),
+            {'processos': processos_pendentes},
+        ).mappings():
+            chave = (
+                pendencia['numero_processo_normalizado'],
+                pendencia['competencia_producao'],
+                pendencia['nr'],
+            )
+            registro_pendente = {
+                'id_registro': pendencia['id_registro'],
+                'data_realizacao': pendencia['data_realizacao'],
+                'numero_guia_senha': pendencia['numero_guia_senha'],
+                'codigo_beneficiario': pendencia['codigo_beneficiario'],
+                'codigo_servico': pendencia['codigo_servico'],
+                'codigo_glosa': pendencia['codigo_glosa'],
+                'valor_processado': _money(
+                    pendencia['valor_processado']
+                ),
+                'valor_glosa': _money(pendencia['valor_glosa']),
+                'correspondencias_oracle': [],
+                'correspondencia_unica': False,
+            }
+            registros_pendentes_por_chave[chave].append(registro_pendente)
+            registros_pendentes_por_id[
+                pendencia['id_registro']
+            ] = registro_pendente
     remessas_portal_por_chave: dict[tuple[str, str], set[int]] = defaultdict(
         set
     )
@@ -3379,6 +3436,82 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913
                 remessas_portal_por_chave[chave].add(
                     int(candidata['cd_remessa'])
                 )
+        for correspondencia in session.execute(
+            text(
+                """
+                SELECT DISTINCT pendencia.id_registro,
+                       item_oracle.cd_remessa,
+                       item_oracle.conta,
+                       item_oracle.cd_lancamento,
+                       item_oracle.cd_atendimento,
+                       item_oracle.cd_paciente,
+                       item_oracle.nm_paciente,
+                       item_oracle.nr_guia,
+                       item_oracle.cd_pro_fat,
+                       item_oracle.cd_tuss,
+                       item_oracle.descricao,
+                       item_oracle.dt_atendimento,
+                       item_oracle.nm_prestador,
+                       item_oracle.valor_item
+                  FROM api_prontocardio.glossas_nao_vinculadas_ipm
+                       AS pendencia
+                  JOIN api_prontocardio.processos_relatorios_itens_ipm
+                       AS indicacao_portal
+                    ON UPPER(BTRIM(indicacao_portal.numero_processo))
+                     = UPPER(BTRIM(pendencia.numero_processo))
+                   AND UPPER(BTRIM(indicacao_portal.numero_protocolo))
+                     = UPPER(BTRIM(pendencia.numero_protocolo))
+                   AND indicacao_portal.cd_remessa IS NOT NULL
+                  JOIN api_prontocardio.processos_relatorios_itens_ipm
+                       AS item_oracle
+                    ON UPPER(BTRIM(item_oracle.numero_processo))
+                     = UPPER(BTRIM(pendencia.numero_processo))
+                   AND item_oracle.cd_remessa
+                     = indicacao_portal.cd_remessa
+                   AND item_oracle.dt_lancamento::date
+                     = pendencia.data_realizacao
+                   AND UPPER(BTRIM(pendencia.codigo_servico)) IN (
+                       UPPER(BTRIM(item_oracle.cd_pro_fat)),
+                       UPPER(BTRIM(item_oracle.cd_tuss))
+                   )
+                   AND ROUND(item_oracle.valor_item, 2)
+                     = ROUND(pendencia.valor_processado, 2)
+                 WHERE pendencia.motivo
+                       = 'remessa_nao_encontrada_ou_ambigua'
+                   AND UPPER(BTRIM(pendencia.numero_processo))
+                       = ANY(:processos)
+                 ORDER BY pendencia.id_registro,
+                          item_oracle.cd_remessa,
+                          item_oracle.conta,
+                          item_oracle.cd_lancamento
+                """
+            ),
+            {'processos': processos_pendentes},
+        ).mappings():
+            registro = registros_pendentes_por_id.get(
+                correspondencia['id_registro']
+            )
+            if registro is None:
+                continue
+            registro['correspondencias_oracle'].append({
+                'cd_remessa': int(correspondencia['cd_remessa']),
+                'conta': correspondencia['conta'],
+                'cd_lancamento': correspondencia['cd_lancamento'],
+                'cd_atendimento': correspondencia['cd_atendimento'],
+                'cd_paciente': correspondencia['cd_paciente'],
+                'nm_paciente': correspondencia['nm_paciente'],
+                'nr_guia': correspondencia['nr_guia'],
+                'cd_pro_fat': correspondencia['cd_pro_fat'],
+                'cd_tuss': correspondencia['cd_tuss'],
+                'descricao': correspondencia['descricao'],
+                'dt_atendimento': correspondencia['dt_atendimento'],
+                'nm_prestador': correspondencia['nm_prestador'],
+                'valor_item': _money(correspondencia['valor_item']),
+            })
+        for registro in registros_pendentes_por_id.values():
+            registro['correspondencia_unica'] = (
+                len(registro['correspondencias_oracle']) == 1
+            )
     codigos_remessas_portal = sorted({
         codigo
         for codigos in remessas_portal_por_chave.values()
@@ -3504,6 +3637,13 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913
                 'valor_protocolado': _money(row['valor_protocolado_nr']),
                 'valor_aprovado': _money(row['valor_aprovado_nr']),
                 'valor_glosado': _money(row['valor_glosado_nr']),
+                'registros_pendentes': registros_pendentes_por_chave[
+                    (
+                        row['numero_processo_normalizado'],
+                        row['competencia_producao'],
+                        row['nr'],
+                    )
+                ],
                 'associacoes': associacoes,
                 'remessas': candidatas,
             }

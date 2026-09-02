@@ -1564,6 +1564,24 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
                     'data_abertura': date(2026, 2, 9),
                     'status_processo': 'FINALIZADO',
                 }])
+            if 'AS item_oracle' in consulta:
+                assert params == {'processos': ['P058752/2026']}
+                return Resultado([{
+                    'id_registro': 'registro-1',
+                    'cd_remessa': 16425,
+                    'conta': 343332,
+                    'cd_lancamento': 9,
+                    'cd_atendimento': 279139,
+                    'cd_paciente': 107036,
+                    'nm_paciente': 'PHABYANE FRANCA RIBEIRO',
+                    'nr_guia': '363150',
+                    'cd_pro_fat': '90222377',
+                    'cd_tuss': '',
+                    'descricao': 'CLORETO SODIO 0,9% BOLS C/100ML',
+                    'dt_atendimento': date(2025, 12, 21),
+                    'nm_prestador': None,
+                    'valor_item': Decimal('10.95'),
+                }])
             if 'SELECT DISTINCT' in consulta and (
                 'processos_relatorios_itens_ipm' in consulta
             ):
@@ -1572,6 +1590,23 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
                     'numero_processo_normalizado': 'P058752/2026',
                     'nr': '4124085',
                     'cd_remessa': 16425,
+                }])
+            if 'glossas_nao_vinculadas_ipm' in consulta and (
+                'AS pendencia' in consulta
+            ):
+                assert params == {'processos': ['P058752/2026']}
+                return Resultado([{
+                    'id_registro': 'registro-1',
+                    'numero_processo_normalizado': 'P058752/2026',
+                    'competencia_producao': '12/2025',
+                    'nr': '4124085',
+                    'data_realizacao': date(2025, 12, 21),
+                    'numero_guia_senha': '389690',
+                    'codigo_beneficiario': '1106530000',
+                    'codigo_servico': '90222377',
+                    'codigo_glosa': '1714',
+                    'valor_processado': Decimal('10.95'),
+                    'valor_glosa': Decimal('0.88'),
                 }])
             if 'ipm_remessas_oracle AS rem' in consulta:
                 assert params == {
@@ -1613,6 +1648,32 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
 
     nr = resultado['processos'][0]['nrs'][0]
     assert nr['valor_glosado'] == Decimal('0.92')
+    assert nr['registros_pendentes'] == [{
+        'id_registro': 'registro-1',
+        'data_realizacao': date(2025, 12, 21),
+        'numero_guia_senha': '389690',
+        'codigo_beneficiario': '1106530000',
+        'codigo_servico': '90222377',
+        'codigo_glosa': '1714',
+        'valor_processado': Decimal('10.95'),
+        'valor_glosa': Decimal('0.88'),
+        'correspondencias_oracle': [{
+            'cd_remessa': 16425,
+            'conta': 343332,
+            'cd_lancamento': 9,
+            'cd_atendimento': 279139,
+            'cd_paciente': 107036,
+            'nm_paciente': 'PHABYANE FRANCA RIBEIRO',
+            'nr_guia': '363150',
+            'cd_pro_fat': '90222377',
+            'cd_tuss': '',
+            'descricao': 'CLORETO SODIO 0,9% BOLS C/100ML',
+            'dt_atendimento': date(2025, 12, 21),
+            'nm_prestador': None,
+            'valor_item': Decimal('10.95'),
+        }],
+        'correspondencia_unica': True,
+    }]
     assert nr['remessas'] == [{
         'cd_remessa': 16425,
         'competencia': '01/2026',
