@@ -5,6 +5,10 @@ services:
       context: .
     env_file:
       - .env
+    environment:
+      APP_ENV: production
+      EXPECTED_POSTGRES_HOST: ${EXPECTED_POSTGRES_HOST:?configure o host oficial}
+      EXPECTED_POSTGRES_DATABASE: ${EXPECTED_POSTGRES_DATABASE:?configure o banco oficial}
     expose:
       - "8000"
     extra_hosts:
