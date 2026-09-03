@@ -3534,6 +3534,27 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
         parametros,
     ).mappings().all()
 
+    chaves_processos_ordenadas = list(dict.fromkeys(
+        (
+            row['numero_processo_normalizado'],
+            row['competencia_producao'],
+        )
+        for row in processos_rows
+    ))
+    total_processos = len(chaves_processos_ordenadas)
+    total_nrs = len(processos_rows)
+    chaves_processos_pagina = set(
+        chaves_processos_ordenadas[offset : offset + limit]
+    )
+    processos_rows = [
+        row
+        for row in processos_rows
+        if (
+            row['numero_processo_normalizado'],
+            row['competencia_producao'],
+        ) in chaves_processos_pagina
+    ]
+
     competencias = sorted(
         {row['competencia_producao'] for row in processos_rows}
     )
@@ -3984,11 +4005,9 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 for registro in nr['registros_pendentes']
             )
     resumo = {
-        'processos_pendentes': len(processos),
-        'nrs_pendentes': sum(
-            len(processo['nrs']) for processo in processos
-        ),
-        'associacoes_realizadas': len(associacoes_itens),
+        'processos_pendentes': total_processos,
+        'nrs_pendentes': total_nrs,
+        'associacoes_realizadas': len(todas_associacoes_itens),
         'remessas_disponiveis': len(
             {
                 (
@@ -4004,8 +4023,8 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
         ),
     }
     return {
-        'processos': processos[offset : offset + limit],
-        'total': len(processos),
+        'processos': processos,
+        'total': total_processos,
         'limit': limit,
         'offset': offset,
         'resumo': resumo,
