@@ -6566,7 +6566,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
              WHERE UPPER(BTRIM(proc.status_processo))
                    IN ('FINALIZADO', 'TRAMITANDO')
                AND split_part(item.numero_processo, '/', 2)
-                   ~ '^[0-9]{4}$'
+                   ~ '^[0-9]{{4}}$'
                AND split_part(item.numero_processo, '/', 2)::integer >= 2024
                AND COALESCE(item.valor_glosa, 0) > 0
                {filtros_escopo}
