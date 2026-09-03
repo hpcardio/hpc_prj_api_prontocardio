@@ -1465,7 +1465,19 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
                         'status_processo': 'FINALIZADO',
                         'motivo_finalizacao': None,
                         'cd_remessa_manual': None,
-                    }
+                    },
+                    {
+                        'numero_processo': 'P058752/2026',
+                        'nr': 'SEM-VINCULO',
+                        'competencia_producao': '12/2025',
+                        'valor_protocolo': Decimal('999.99'),
+                        'valor_glosado_protocolo': Decimal('10.00'),
+                        'data_fechamento': None,
+                        'data_abertura': date(2026, 2, 9),
+                        'status_processo': 'FINALIZADO',
+                        'motivo_finalizacao': None,
+                        'cd_remessa_manual': None,
+                    },
                 ])
             return Resultado([])
 
@@ -1494,6 +1506,13 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
                 'data_competencia': date(2025, 12, 1),
             }]
         },
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_remessas_cogestao_oracle',
+        lambda *_args, **_kwargs: pytest.fail(
+            'A listagem resumida não deve consultar remessas no MV.'
+        ),
     )
     monkeypatch.setattr(
         financeiro,
