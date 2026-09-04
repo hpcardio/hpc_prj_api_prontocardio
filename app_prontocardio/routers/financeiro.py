@@ -3077,7 +3077,10 @@ def _validar_remessa_associacao_manual(  # noqa: PLR0913
             SELECT EXISTS (
                 SELECT 1
                   FROM api_prontocardio.glossas_nao_vinculadas_ipm AS glosa
-                 WHERE glosa.motivo = 'remessa_nao_encontrada_ou_ambigua'
+                 WHERE glosa.motivo IN (
+                           'remessa_nao_encontrada_ou_ambigua',
+                           'nao_encontrado'
+                       )
                    AND UPPER(BTRIM(glosa.numero_processo)) = :processo
                    AND TO_CHAR(glosa.data_realizacao, 'MM/YYYY') = :competencia
                    AND UPPER(BTRIM(glosa.numero_protocolo)) = :nr
@@ -3274,7 +3277,10 @@ def _buscar_pendencia_associacao_item(
                    valor_processado, valor_glosa
               FROM api_prontocardio.glossas_nao_vinculadas_ipm
              WHERE id_registro = :id_registro
-               AND motivo = 'remessa_nao_encontrada_ou_ambigua'
+               AND motivo IN (
+                       'remessa_nao_encontrada_ou_ambigua',
+                       'nao_encontrado'
+                   )
             """
         ),
         {'id_registro': glosa_id_registro.strip()},
@@ -3439,7 +3445,10 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                            AS competencia_producao,
                        UPPER(BTRIM(numero_protocolo)) AS nr
                   FROM api_prontocardio.glossas_nao_vinculadas_ipm
-                 WHERE motivo = 'remessa_nao_encontrada_ou_ambigua'
+                 WHERE motivo IN (
+                           'remessa_nao_encontrada_ou_ambigua',
+                           'nao_encontrado'
+                       )
                    AND NULLIF(BTRIM(numero_processo), '') IS NOT NULL
                    AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
                 UNION
@@ -3500,7 +3509,10 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                              UPPER(BTRIM(numero_protocolo)) AS nr,
                              SUM(valor_glosa) AS valor_glosado_pendente
                         FROM api_prontocardio.glossas_nao_vinculadas_ipm
-                       WHERE motivo = 'remessa_nao_encontrada_ou_ambigua'
+                       WHERE motivo IN (
+                                 'remessa_nao_encontrada_ou_ambigua',
+                                 'nao_encontrado'
+                             )
                        GROUP BY UPPER(BTRIM(numero_processo)),
                                 TO_CHAR(data_realizacao, 'MM/YYYY'),
                                 UPPER(BTRIM(numero_protocolo))
@@ -3589,8 +3601,10 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                        valor_glosa
                   FROM api_prontocardio.glossas_nao_vinculadas_ipm
                        AS pendencia
-                 WHERE pendencia.motivo
-                       = 'remessa_nao_encontrada_ou_ambigua'
+                 WHERE pendencia.motivo IN (
+                           'remessa_nao_encontrada_ou_ambigua',
+                           'nao_encontrado'
+                       )
                    AND UPPER(BTRIM(numero_processo)) = ANY(:processos)
                  ORDER BY numero_processo_normalizado,
                           competencia_producao, nr,
@@ -3695,8 +3709,10 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                    )
                    AND ROUND(item_oracle.valor_item, 2)
                      = ROUND(pendencia.valor_processado, 2)
-                 WHERE pendencia.motivo
-                       = 'remessa_nao_encontrada_ou_ambigua'
+                 WHERE pendencia.motivo IN (
+                           'remessa_nao_encontrada_ou_ambigua',
+                           'nao_encontrado'
+                       )
                    AND UPPER(BTRIM(pendencia.numero_processo))
                        = ANY(:processos)
                  ORDER BY pendencia.id_registro,
