@@ -7452,7 +7452,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         valor_protocolo = _money(row['valor_protocolo'])
         competencia = _competencia_cogestao(row['competencia_producao'])
         numero_processo = str(row['numero_processo'] or '').strip()
-        numero_protocolo = str(row['nr'] or '').strip()
+        numero_protocolo_card = str(row['nr'] or '').strip()
         remessa = _selecionar_remessa_cogestao(
             row,
             remessas_por_valor,
@@ -7462,7 +7462,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         if (
             remessa is None
             and termo_paciente
-            and numero_protocolo in protocolos_paciente
+            and numero_protocolo_card in protocolos_paciente
         ):
             demonstrativos_paciente = session.execute(
                 text(
@@ -7476,7 +7476,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                     """
                 ),
                 {
-                    'numero_protocolo': numero_protocolo,
+                    'numero_protocolo': numero_protocolo_card,
                     'paciente': f'%{str(paciente or "").strip()}%',
                 },
             ).mappings().all()
@@ -7529,7 +7529,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         if carregar_detalhes:
             if (
                 termo_paciente
-                and numero_protocolo not in protocolos_paciente
+                and numero_protocolo_card not in protocolos_paciente
             ):
                 continue
             pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
@@ -7539,7 +7539,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 numero_processo,
                 valor_protocolo,
                 _money(row['valor_glosado_protocolo']),
-                numero_protocolo,
+                numero_protocolo_card,
             )
             if termo_paciente:
                 pacientes_demonstrativo = [
@@ -7585,7 +7585,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         cards.append({
             'conciliacao_remessa_id': None,
             'cd_remessa': codigo_remessa,
-            'numero_protocolo': numero_protocolo or None,
+            'numero_protocolo': numero_protocolo_card or None,
             'convenio': nome_convenio,
             'data_competencia': (
                 remessa.get('data_competencia') or competencia
