@@ -4554,6 +4554,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
     paciente: str | None,
     cd_atendimento: int | None,
     tipo_atendimento: str | None,
+    numero_protocolo: str | None = None,
 ) -> list[dict]:
     # NFS-e não faz parte do registro analítico; esse filtro só pode ser
     # atendido pelos cards financeiros legados.
@@ -4676,6 +4677,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
     )
 
     cards = []
+    termo_protocolo = str(numero_protocolo or '').strip().casefold()
     for chave, registros in grupos.items():
         pacientes = _pacientes_follow_up_glosa(
             registros,
@@ -4715,6 +4717,11 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             )
             if protocolo_cogestao:
                 protocolos.append(protocolo_cogestao)
+        if termo_protocolo and not any(
+            termo_protocolo in protocolo.casefold()
+            for protocolo in protocolos
+        ):
+            continue
         cards.append({
             'conciliacao_remessa_id': None,
             'cd_remessa': chave[1],
@@ -8347,6 +8354,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 paciente=paciente,
                 cd_atendimento=cd_atendimento,
                 tipo_atendimento=tipo_atendimento,
+                numero_protocolo=numero_protocolo,
             )
         )
 
