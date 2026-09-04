@@ -1438,6 +1438,7 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
     monkeypatch,
 ):
     consultas = []
+    filtros_relatorios = []
     cd_remessa = 16303
 
     class Resultado:
@@ -1525,10 +1526,14 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
         '_cards_demonstrativo_processos_abertos',
         lambda *_args, **_kwargs: [],
     )
+    def cards_relatorios(*_args, **kwargs):
+        filtros_relatorios.append(kwargs)
+        return []
+
     monkeypatch.setattr(
         financeiro,
         '_cards_relatorios_follow_up',
-        lambda *_args, **_kwargs: [],
+        cards_relatorios,
     )
 
     cards = financeiro._cards_cogestao_follow_up(
@@ -1554,6 +1559,7 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
     assert cards[0]['valor_glosado'] == Decimal('0.00')
     assert cards[0]['valor_total_tratado'] == Decimal('0.00')
     assert cards[0]['valor_glosa_pendente'] == Decimal('0.00')
+    assert filtros_relatorios[0]['numero_protocolo'] is None
     assert consultas[0][1] == {
         'processo_sem_glosa': 'P058752/2026',
         'processo_sem_glosa_like': '%P058752/2026%',
