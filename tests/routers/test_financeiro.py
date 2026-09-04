@@ -1313,6 +1313,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert item['valor_total_tratado'] == Decimal('25.00')
     assert item['tratativa_disponivel'] is True
     assert "IN ('FINALIZADO', 'TRAMITANDO')" in queries[0]
+    assert "~ '^[0-9]{4}$'" in queries[0]
     assert '::integer >= 2024' in queries[0]
     assert 'COALESCE(item.valor_glosa, 0) > 0' in queries[0]
 
