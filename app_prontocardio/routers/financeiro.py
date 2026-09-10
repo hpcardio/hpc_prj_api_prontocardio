@@ -5664,6 +5664,7 @@ def _item_demonstrativo_follow_up(
             or '-'
         ),
         'numero_protocolo': demonstrativo.get('numero_protocolo'),
+        'numero_lote': demonstrativo.get('numero_lote'),
         'codigo_beneficiario': demonstrativo.get('codigo_beneficiario'),
         'referencia': demonstrativo.get('referencia'),
         'valor_protocolo': demonstrativo.get('valor_protocolo'),
