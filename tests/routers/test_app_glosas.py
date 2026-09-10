@@ -2,6 +2,7 @@ from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from http import HTTPStatus
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
@@ -10,8 +11,10 @@ from app_prontocardio.models import (
     ModelContaAtendimento,
     PrazoRecursoConvenio,
     RegistroGlosa,
+    RegistroGlosaDemonstrativoIpm,
 )
 from app_prontocardio.routers.app_glosas import (
+    _executar_conta_atendimento_sem_duplicidade,
     consultar_convenios,
     consultar_glosas_registradas,
     deletar_glosa,
@@ -95,6 +98,21 @@ def test_modelo_conta_atendimento_mapeia_nr_carteira_da_view():
     assert coluna.nullable is True
 
 
+def test_conta_atendimento_remove_identidades_repetidas_da_view():
+    session = Mock()
+    resultado = session.execute.return_value
+    resultado.unique.return_value.scalars.return_value.all.return_value = [
+        'linha-unica'
+    ]
+
+    linhas = _executar_conta_atendimento_sem_duplicidade(
+        session,
+        'consulta',
+    )
+
+    session.execute.assert_called_once_with('consulta')
+    resultado.unique.assert_called_once_with()
+    assert linhas == ['linha-unica']
 def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
     payload = registro_glosa_payload(sn_ativo='not')
 
@@ -369,6 +387,61 @@ def test_recurso_e_acato_coexistem_respeitando_limites_do_item(
             usuario_teste,
             session,
         )
+
+
+def test_vinculo_da_linha_do_demonstrativo_migra_de_forma_idempotente(
+    session,
+    usuario_teste,
+):
+    origem = registrar_glosa(
+        RegistroGlosaCreate(**registro_glosa_payload(cd_lancamento=51)),
+        usuario_teste,
+        session,
+    )
+    origem.processo_recurso = None
+    origem.qtd_recursado = None
+    origem.valor_recursado = None
+    origem.dt_recurso = None
+    vinculo = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-demonstrativo-30348',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    vinculo.data_importacao = datetime(2026, 6, 10, 10, 0)
+    outro_vinculo = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-demonstrativo-91-04',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    outro_vinculo.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add_all([vinculo, outro_vinculo])
+    session.commit()
+
+    payload = RegistroGlosaCreate(
+        **registro_glosa_payload(
+            cd_lancamento=51,
+            demonstrativo_id_registro=vinculo.id_registro,
+        )
+    )
+    tratativa = editar_glosa(
+        origem.id,
+        payload,
+        usuario_teste,
+        session,
+    )
+    mesma_tratativa = editar_glosa(
+        tratativa.id,
+        payload,
+        usuario_teste,
+        session,
+    )
+    session.refresh(vinculo)
+    session.refresh(outro_vinculo)
+
+    assert tratativa.id != origem.id
+    assert mesma_tratativa.id == tratativa.id
+    assert vinculo.registro_glosa_id == tratativa.id
+    assert outro_vinculo.registro_glosa_id == origem.id
 
 
 def test_salva_descricoes_agrupadas_separadas_por_tipo(
