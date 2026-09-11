@@ -6,6 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.dialects import oracle
 
 from app_prontocardio.models import (
     ModelContaAtendimento,
@@ -14,7 +16,9 @@ from app_prontocardio.models import (
     RegistroGlosaDemonstrativoIpm,
 )
 from app_prontocardio.routers.app_glosas import (
+    _aplicar_filtros_conta_atendimento,
     _executar_conta_atendimento_sem_duplicidade,
+    _resolver_filtro_processo,
     consultar_convenios,
     consultar_glosas_registradas,
     deletar_glosa,
@@ -114,6 +118,53 @@ def test_conta_atendimento_remove_identidades_repetidas_da_view():
     session.execute.assert_called_once_with('consulta')
     resultado.unique.assert_called_once_with()
     assert linhas == ['linha-unica']
+
+
+def test_filtro_processo_resolve_tratativas_em_identidades_exatas():
+    session = Mock()
+    session.execute.return_value.all.return_value = [
+        (18289, 313840, 23475, 51),
+        (18289, 313840, 23475, 52),
+    ]
+
+    filtros = _resolver_filtro_processo(
+        session,
+        {'processo': ' P239088/2026 ', 'nm_convenio': 'IPM'},
+    )
+
+    assert filtros == {
+        'nm_convenio': 'IPM',
+        'identidades_processo': (
+            (18289, 313840, 23475, 51),
+            (18289, 313840, 23475, 52),
+        ),
+    }
+    sql_postgres = str(session.execute.call_args.args[0]).lower()
+    assert 'processo_controle_fatura_gab' in sql_postgres
+    assert 'origem_registro' in sql_postgres
+    assert 'dt_recurso is not null' in sql_postgres
+
+
+def test_filtro_processo_aplica_itens_exatos_na_view_oracle():
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        {
+            'identidades_processo': (
+                (18289, 313840, 23475, 51),
+                (18289, 313840, 23475, 52),
+            )
+        },
+    )
+    sql = str(query.compile(
+        dialect=oracle.dialect(),
+        compile_kwargs={'literal_binds': True},
+    )).upper()
+
+    assert 'CD_REMESSA = 18289' in sql
+    assert 'CD_ATENDIMENTO = 313840' in sql
+    assert 'CD_REG = 23475' in sql
+    assert 'CD_LANCAMENTO = 51' in sql
+    assert 'CD_LANCAMENTO = 52' in sql
 def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
     payload = registro_glosa_payload(sn_ativo='not')
 
