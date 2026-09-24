@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     LargeBinary,
     Numeric,
     String,
@@ -29,6 +30,27 @@ from app_prontocardio.settings import Settings
 
 table_registry = registry()
 settings = Settings()
+
+
+@table_registry.mapped_as_dataclass
+class WhatsappEnvioIdempotente:
+    __tablename__ = 'whatsapp_envios_idempotentes'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    chave: Mapped[str] = mapped_column(String(160), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default='ENVIANDO')
+    id_externo: Mapped[str | None] = mapped_column(String(255), default=None)
+    telefone_final: Mapped[str | None] = mapped_column(String(4), default=None)
+    erro_sanitizado: Mapped[str | None] = mapped_column(
+        String(240), default=None
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+    atualizado_em: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class TipoAtendimento(str, Enum):
@@ -84,6 +106,11 @@ class Usuario:
     )
     ativo: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text('true')
+    )
+    origem_agendamento: Mapped[str] = mapped_column(
+        String(30),
+        default='NAO_IDENTIFICADA',
+        server_default=text("'NAO_IDENTIFICADA'"),
     )
     telas_permitidas: Mapped[list[str]] = mapped_column(
         JSON,
@@ -161,6 +188,57 @@ class SessaoPaciente:
 
 
 @table_registry.mapped_as_dataclass
+class RespostaPosAlta:
+    __tablename__ = 'respostas_pos_alta'
+    __table_args__ = (
+        UniqueConstraint(
+            'cd_paciente',
+            'chave_idempotencia',
+            name='uq_respostas_pos_alta_paciente_chave',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    chave_idempotencia: Mapped[str] = mapped_column(String(64))
+    cd_paciente: Mapped[int] = mapped_column(Integer, index=True)
+    cd_atendimento: Mapped[int] = mapped_column(Integer, index=True)
+    etapa: Mapped[str] = mapped_column(String(30))
+    respostas: Mapped[dict] = mapped_column(JSON)
+    resultado: Mapped[str] = mapped_column(String(30))
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
+class SolicitacaoPaciente:
+    __tablename__ = 'solicitacoes_paciente'
+    __table_args__ = (
+        UniqueConstraint(
+            'cd_paciente',
+            'chave_idempotencia',
+            name='uq_solicitacoes_paciente_chave',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    chave_idempotencia: Mapped[str] = mapped_column(String(64))
+    cd_paciente: Mapped[int] = mapped_column(Integer, index=True)
+    tipo: Mapped[str] = mapped_column(String(40))
+    destino: Mapped[str] = mapped_column(String(30), index=True)
+    assunto: Mapped[str] = mapped_column(String(300))
+    contexto: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(
+        String(20), default='pendente', server_default=text("'pendente'")
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
 class AuditoriaAgendamento:
     __tablename__ = 'auditoria_agendamentos'
     __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
@@ -176,8 +254,101 @@ class AuditoriaAgendamento:
     cd_tip_mar: Mapped[int | None] = mapped_column(nullable=True)
     protocolo_mv: Mapped[int | None] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column(String(30))
+    chave_efeito_lote: Mapped[str | None] = mapped_column(
+        String(100), unique=True, nullable=True, default=None
+    )
     data_criacao: Mapped[datetime] = mapped_column(
         init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
+class AgendamentoOrigem:
+    __tablename__ = 'agendamento_origens'
+    __table_args__ = (
+        CheckConstraint(
+            '(slot_origem_anterior IS NULL AND '
+            'protocolo_origem_anterior IS NULL) OR '
+            '(slot_origem_anterior IS NOT NULL AND '
+            'protocolo_origem_anterior IS NOT NULL)',
+            name='ck_agendamento_origens_instancia_anterior_completa',
+        ),
+        ForeignKeyConstraint(
+            ['slot_origem_anterior', 'protocolo_origem_anterior'],
+            [
+                f'{settings.POSTGRES_SCHEMA}.agendamento_origens.cd_it_agenda_central',
+                f'{settings.POSTGRES_SCHEMA}.agendamento_origens.protocolo_mv',
+            ],
+            name='fk_agendamento_origens_instancia_anterior',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    cd_it_agenda_central: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True
+    )
+    protocolo_mv: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    cd_paciente: Mapped[int] = mapped_column(BigInteger)
+    origem: Mapped[str] = mapped_column(String(30))
+    evidencia: Mapped[str] = mapped_column(String(40))
+    registrada_por_nome: Mapped[str] = mapped_column(String(200))
+    cd_agenda_central: Mapped[int | None] = mapped_column(
+        BigInteger, default=None
+    )
+    referencia_externa: Mapped[str | None] = mapped_column(
+        String(160), default=None
+    )
+    slot_origem_anterior: Mapped[int | None] = mapped_column(
+        BigInteger, default=None
+    )
+    protocolo_origem_anterior: Mapped[int | None] = mapped_column(
+        BigInteger, default=None
+    )
+    registrada_por_id: Mapped[int | None] = mapped_column(default=None)
+    criada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), init=False, server_default=func.now()
+    )
+    atualizada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class AgendamentoOrigemEvento:
+    __tablename__ = 'agendamento_origem_eventos'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['cd_it_agenda_central', 'protocolo_mv'],
+            [
+                f'{settings.POSTGRES_SCHEMA}.agendamento_origens.cd_it_agenda_central',
+                f'{settings.POSTGRES_SCHEMA}.agendamento_origens.protocolo_mv',
+            ],
+            name='fk_agendamento_origem_eventos_instancia',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, 'sqlite'),
+        primary_key=True,
+        init=False,
+    )
+    cd_it_agenda_central: Mapped[int] = mapped_column(BigInteger)
+    protocolo_mv: Mapped[int] = mapped_column(BigInteger)
+    origem_nova: Mapped[str] = mapped_column(String(30))
+    evidencia: Mapped[str] = mapped_column(String(40))
+    resultado: Mapped[str] = mapped_column(String(20))
+    justificativa: Mapped[str] = mapped_column(String(300))
+    registrada_por_nome: Mapped[str] = mapped_column(String(200))
+    origem_anterior: Mapped[str | None] = mapped_column(
+        String(30), default=None
+    )
+    registrada_por_id: Mapped[int | None] = mapped_column(default=None)
+    criada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), init=False, server_default=func.now()
     )
 
 
@@ -425,6 +596,10 @@ class RegistroGlosa:
     )
     descricao_acato_agrupada: Mapped[str | None] = mapped_column(
         String,
+        default=None,
+    )
+    numero_lote: Mapped[str | None] = mapped_column(
+        String(255),
         default=None,
     )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(

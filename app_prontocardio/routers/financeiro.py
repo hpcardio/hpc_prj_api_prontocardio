@@ -68,6 +68,7 @@ from app_prontocardio.schema import (
     NfsesSaldoRemessaList,
     ProcessoRecursoGlosaInput,
     ProcessoRecursoGlosaPublic,
+    ProcessosRecursosList,
     RecebimentoRemessaCreate,
     RecebimentoRemessaPublic,
     RecebimentoRemessaUpdate,
@@ -82,6 +83,7 @@ from app_prontocardio.services.importacao_glosas_ipm import (
 )
 from app_prontocardio.services.pdf_recurso_glosa import (
     gerar_pdf_recurso_glosa,
+    preencher_processo_recurso_issec,
 )
 from app_prontocardio.services.remessas import (
     sincronizar_totais_remessas_financeiras,
@@ -4450,6 +4452,20 @@ def _item_follow_up_glosa(
         'cd_pro_fat': registro.procedimento,
         'cd_tuss': registro.cd_tuss,
         'codigo_servico': registro.cd_tuss or registro.procedimento,
+        'numero_lote': (
+            (
+                registro_recusa.numero_lote
+                if registro_recusa is not None
+                else None
+            )
+            or (
+                registro_acato.numero_lote
+                if registro_acato is not None
+                else None
+            )
+            or origem.get('numero_lote')
+            or registro.numero_lote
+        ),
         'cd_gru_pro': registro.cd_gru_pro,
         'ds_gru_pro': registro.ds_gru_pro,
         'cd_gru_fat': registro.cd_gru_fat,
@@ -4568,7 +4584,50 @@ def _protocolos_cogestao_por_processo_glosa_follow_up(
     }
 
 
-def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
+def _processos_canonicos_por_protocolo_follow_up(
+    session: Session,
+    protocolos: set[str],
+) -> dict[str, str]:
+    protocolos_normalizados = sorted({
+        str(protocolo).strip().casefold()
+        for protocolo in protocolos
+        if str(protocolo).strip()
+    })
+    if not protocolos_normalizados or not _tabela_ipm_existe(
+        session, 'processos_ipm_saude_cogestao'
+    ):
+        return {}
+    rows = session.execute(
+        text(
+            """
+            SELECT LOWER(protocolo) AS protocolo,
+                   MIN(BTRIM(numero_processo)) AS numero_processo
+              FROM (
+                    SELECT LOWER(BTRIM(nr)) AS protocolo,
+                           numero_processo
+                      FROM api_prontocardio.processos_ipm_saude_cogestao
+                     WHERE LOWER(BTRIM(nr)) = ANY(:protocolos)
+                    UNION ALL
+                    SELECT LOWER(BTRIM(nr_origem)) AS protocolo,
+                           numero_processo
+                      FROM api_prontocardio.processos_ipm_saude_cogestao
+                     WHERE LOWER(BTRIM(nr_origem)) = ANY(:protocolos)
+                   ) AS origem
+             GROUP BY LOWER(protocolo)
+            HAVING COUNT(DISTINCT LOWER(BTRIM(numero_processo))) = 1
+            """
+        ),
+        {'protocolos': protocolos_normalizados},
+    ).mappings()
+    return {
+        str(row['protocolo']).strip().casefold(): str(
+            row['numero_processo']
+        ).strip().casefold()
+        for row in rows
+    }
+
+
+def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     chaves_excluidas: set[tuple[str, int]],
     *,
@@ -4702,6 +4761,16 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             {chave[0] for chave in grupos},
         )
     )
+    processos_canonicos_por_protocolo = (
+        _processos_canonicos_por_protocolo_follow_up(
+            session,
+            {
+                protocolo
+                for protocolos in protocolos_por_registro.values()
+                for protocolo in protocolos
+            },
+        )
+    )
 
     cards = []
     termo_protocolo = str(numero_protocolo or '').strip().casefold()
@@ -4744,6 +4813,23 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             )
             if protocolo_cogestao:
                 protocolos.append(protocolo_cogestao)
+        processos_canonicos = {
+            processo_canonico
+            for protocolo in protocolos
+            if (
+                processo_canonico := processos_canonicos_por_protocolo.get(
+                    protocolo.casefold()
+                )
+            )
+        }
+        # O processo da COGESTAO/IPM e a fonte oficial da associacao do
+        # protocolo. Registros analiticos historicos podem conter o processo
+        # anterior; nesses casos o card canonico sera montado pela COGESTAO.
+        if (
+            len(processos_canonicos) == 1
+            and chave[0] not in processos_canonicos
+        ):
+            continue
         if termo_protocolo and not any(
             termo_protocolo in protocolo.casefold()
             for protocolo in protocolos
@@ -4854,7 +4940,7 @@ def _remover_correspondencias_automaticas_associadas_manualmente(
     ]
 
 
-def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
+def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
     cd_remessa: int,
@@ -5664,6 +5750,7 @@ def _item_demonstrativo_follow_up(
             or '-'
         ),
         'numero_protocolo': demonstrativo.get('numero_protocolo'),
+        'numero_lote': demonstrativo.get('numero_lote'),
         'codigo_beneficiario': demonstrativo.get('codigo_beneficiario'),
         'referencia': demonstrativo.get('referencia'),
         'valor_protocolo': demonstrativo.get('valor_protocolo'),
@@ -5785,6 +5872,55 @@ def _distribuir_tratativas_itens_demonstrativo(
         )
     for grupo in grupos.values():
         registros = grupo[0][1]
+        registros_pendentes = [
+            registro
+            for registro in registros
+            if registro.status_tratativa == 'pendente'
+        ]
+        registros_tratados = [
+            registro
+            for registro in registros
+            if registro.sn_ativo == 'true'
+            and registro.status_tratativa != 'pendente'
+        ]
+        atribuicoes_exatas: dict[int, list[RegistroGlosa]] = defaultdict(list)
+        indices_atribuidos: set[int] = set()
+        for registro in registros_tratados:
+            candidatos = [
+                indice
+                for indice, (item, _registros_item) in enumerate(grupo)
+                if indice not in indices_atribuidos
+                and _money(item['valor_glosa'])
+                == _money(registro.valor_recursado)
+            ]
+            if len(candidatos) == 1:
+                indice = candidatos[0]
+                atribuicoes_exatas[indice].append(registro)
+                indices_atribuidos.add(indice)
+        if registros_tratados and sum(
+            len(registros) for registros in atribuicoes_exatas.values()
+        ) == len(registros_tratados):
+            for indice, (item, _registros_item) in enumerate(grupo):
+                registros_item = [
+                    *registros_pendentes,
+                    *atribuicoes_exatas.get(indice, []),
+                ]
+                valor_item = min(
+                    _money(item['valor_glosa']),
+                    sum(
+                        (
+                            _money(registro.valor_recursado)
+                            for registro in atribuicoes_exatas.get(indice, [])
+                        ),
+                        Decimal('0.00'),
+                    ),
+                )
+                _aplicar_tratativas_item_demonstrativo(
+                    item,
+                    registros_item,
+                    valor_tratado=valor_item,
+                )
+            continue
         valor_tratado_grupo = sum(
             (
                 _money(registro.valor_recursado)
@@ -5870,12 +6006,28 @@ def _tratativas_da_linha_demonstrativo(
     chave_tratativa: tuple,
     demonstrativo_id_registro: str | None,
 ) -> list[RegistroGlosa]:
-    return [
+    registros_exatos = [
         *tratativas_por_item.get(
             (*chave_tratativa, demonstrativo_id_registro),
             [],
         ),
         *tratativas_por_item.get(chave_tratativa, []),
+    ]
+    if registros_exatos or not demonstrativo_id_registro:
+        return registros_exatos
+
+    # A identidade do demonstrativo e estavel mesmo quando um registro
+    # historico foi salvo com o processo incorreto. O fallback deliberadamente
+    # nao usa apenas conta/lancamento, que podem se repetir entre processos.
+    chave_sem_processo = (
+        *chave_tratativa[1:],
+        demonstrativo_id_registro,
+    )
+    return [
+        registro
+        for chave, registros in tratativas_por_item.items()
+        if chave[1:] == chave_sem_processo
+        for registro in registros
     ]
 
 
@@ -5883,6 +6035,7 @@ def _resumo_tratativas_cogestao_remessa(
     tratativas_por_item: dict[tuple, list[RegistroGlosa]],
     numero_processo: str,
     codigo_remessa: int,
+    valor_glosado: Decimal | None = None,
 ) -> tuple[Decimal, bool]:
     chave_processo = numero_processo.strip().casefold()
     registros = [
@@ -5900,6 +6053,11 @@ def _resumo_tratativas_cogestao_remessa(
         ),
         Decimal('0.00'),
     )
+    if valor_glosado is not None:
+        valor_tratado = min(
+            max(valor_tratado, Decimal('0.00')),
+            _money(valor_glosado),
+        )
     possui_recurso = any(
         registro.status_tratativa == 'recurso' for registro in registros
     )
@@ -7276,6 +7434,63 @@ def _preservar_totais_glosa_portal(
         )
 
 
+def _marcar_cards_com_pendencia_associacao_manual(
+    session: Session,
+    cards: list[dict],
+) -> None:
+    for card in cards:
+        card['possui_pendencia_associacao_manual'] = False
+    if not cards or not _tabela_ipm_existe(
+        session, 'glossas_nao_vinculadas_ipm'
+    ):
+        return
+
+    processos = sorted({
+        str((card.get('processo') or {}).get('numero_processo') or '')
+        .strip()
+        .upper()
+        for card in cards
+        if str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip()
+    })
+    if not processos:
+        return
+
+    chaves_pendentes = {
+        (str(processo), str(protocolo))
+        for processo, protocolo in session.execute(
+            text(
+                """
+                SELECT DISTINCT UPPER(BTRIM(numero_processo)),
+                                UPPER(BTRIM(numero_protocolo))
+                  FROM api_prontocardio.glossas_nao_vinculadas_ipm
+                 WHERE motivo IN (
+                           'remessa_nao_encontrada_ou_ambigua',
+                           'nao_encontrado'
+                       )
+                   AND UPPER(BTRIM(numero_processo)) = ANY(:processos)
+                   AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+                """
+            ),
+            {'processos': processos},
+        )
+    }
+    for card in cards:
+        processo = str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip().upper()
+        protocolos = {
+            item.strip().upper()
+            for item in str(card.get('numero_protocolo') or '').split(',')
+            if item.strip()
+        }
+        card['possui_pendencia_associacao_manual'] = any(
+            (processo, protocolo) in chaves_pendentes
+            for protocolo in protocolos
+        )
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -7635,12 +7850,11 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 tratativas_cogestao,
                 numero_processo,
                 codigo_remessa,
+                _money(row['valor_glosado_protocolo']),
             )
         )
         pacientes_demonstrativo = []
-        carregar_detalhes = termo_paciente or (
-            incluir_detalhes and possui_recurso
-        )
+        carregar_detalhes = termo_paciente or incluir_detalhes
         if carregar_detalhes:
             if (
                 termo_paciente
@@ -8143,7 +8357,13 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         str(paciente or '').strip(),
         cd_atendimento,
     ))
-    detalhamento_demonstrativo = incluir_detalhes and consulta_direcionada
+    # Ao filtrar um processo, os totais dos cards precisam vir das mesmas
+    # linhas analíticas exibidas ao expandir a remessa. O resumo histórico de
+    # tratativas não é suficiente para distribuir registros antigos entre
+    # linhas duplicadas do demonstrativo.
+    detalhamento_demonstrativo = consulta_direcionada and (
+        incluir_detalhes or bool(str(processo_original or '').strip())
+    )
     # A listagem resumida não pode varrer e bloquear todas as conciliações.
     # A complementação legada é feita somente ao abrir uma remessa específica.
     if incluir_detalhes and conciliacao_remessa_id is not None:
@@ -8809,6 +9029,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
     cards.extend(cards_cogestao)
+    _marcar_cards_com_pendencia_associacao_manual(session, cards)
     _marcar_cards_com_recurso_ativo(session, cards)
     return {
         'cards': cards,
@@ -8872,9 +9093,53 @@ def _detalhar_cards_processo_recurso(
     return resultado
 
 
+def _completar_itens_recursos_triagem(
+    session: Session,
+    cards: list[dict],
+    processo_original: str,
+    paciente: str | None,
+) -> None:
+    """Completa cards sem itens usando os registros já tratados na Triagem."""
+    cards_sem_itens = [
+        card
+        for card in cards
+        if not any(
+            paciente_card.get('itens')
+            for paciente_card in card.get('pacientes') or []
+        )
+    ]
+    if not cards_sem_itens:
+        return
+    filtros = [
+        func.lower(func.trim(RegistroGlosa.processo_controle_fatura_gab))
+        == _chave_processo_recurso(processo_original),
+        RegistroGlosa.origem_registro == 'triagem',
+        RegistroGlosa.sn_ativo == 'true',
+        RegistroGlosa.cd_remessa.in_({
+            card['cd_remessa'] for card in cards_sem_itens
+        }),
+    ]
+    if termo := str(paciente or '').strip():
+        filtros.append(RegistroGlosa.nm_paciente.ilike(f'%{termo}%'))
+    registros = list(
+        session.scalars(
+            select(RegistroGlosa).where(*filtros).order_by(RegistroGlosa.id)
+        )
+    )
+    por_remessa = defaultdict(list)
+    for registro in registros:
+        por_remessa[registro.cd_remessa].append(registro)
+    descricoes = _descricoes_tiss(session, registros)
+    for card in cards_sem_itens:
+        card['pacientes'] = _pacientes_follow_up_glosa(
+            por_remessa[card['cd_remessa']], {}, descricoes
+        )
+
+
 @router.get(
     '/conciliacao-faturamento/recursos-processos',
     status_code=HTTPStatus.OK,
+    response_model=ProcessosRecursosList,
 )
 def consultar_processos_recurso(  # noqa: PLR0913
     usuario_atual: ValidaUsuarioAtual,
@@ -8995,6 +9260,9 @@ def consultar_processos_recurso(  # noqa: PLR0913
                 grupo['processo_original'],
                 cards_processo,
             )
+            _completar_itens_recursos_triagem(
+                session, cards_processo, grupo['processo_original'], paciente
+            )
         cadastro = cadastros.get(chave)
         processos.append(
             {
@@ -9110,6 +9378,7 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
             detail='Processo do Follow-Up de Glosas não encontrado.',
         )
     try:
+        preencher_processo_recurso_issec(session, cards_processo)
         conteudo = gerar_pdf_recurso_glosa(cards_processo)
     except ValueError as exc:
         raise HTTPException(

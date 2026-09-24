@@ -16,6 +16,9 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from sqlalchemy import select
+
+from app_prontocardio.models import ProcessoRecursoGlosa
 
 CENTAVOS = Decimal('0.01')
 FUNDO_CABECALHO = colors.HexColor('#ffff99')
@@ -24,6 +27,38 @@ NOME_PRESTADOR = 'HOSPITAL PRONTOCARDIO'
 CONTATO_FATURAMENTO = (
     'Maria Letícia (85) 3466. 3011 | faturamento.pronto@gmail.com'
 )
+
+
+def preencher_processo_recurso_issec(session, cards: list[dict]) -> None:
+    """Usa o cadastro da tela Recursos, inclusive para PDFs da Triagem."""
+    cards_issec = [
+        card
+        for card in cards
+        if 'ISSEC' in str(card.get('convenio') or '').upper()
+    ]
+    chaves = {
+        str((card.get('processo') or {}).get('numero_processo') or '')
+        .strip()
+        .casefold()
+        for card in cards_issec
+    }
+    if not chaves:
+        return
+    cadastros = {
+        cadastro.processo_original_normalizado: cadastro.processo_recurso
+        for cadastro in session.scalars(
+            select(ProcessoRecursoGlosa).where(
+                ProcessoRecursoGlosa.processo_original_normalizado.in_(chaves)
+            )
+        )
+    }
+    for card in cards_issec:
+        chave = (
+            str((card.get('processo') or {}).get('numero_processo') or '')
+            .strip()
+            .casefold()
+        )
+        card['processo_recurso'] = cadastros.get(chave) or ''
 
 
 def _valor(objeto, campo: str, padrao=None):
@@ -129,10 +164,20 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
         linhas.append(
             {
                 'processo_inicial': processo or '-',
+                'convenio': (
+                    item.get('nm_convenio')
+                    or card.get('convenio')
+                    or 'IPM'
+                ),
                 'remessa': (
                     item.get('numero_protocolo')
                     or protocolo_card
                     or card.get('cd_remessa')
+                    or '-'
+                ),
+                'lote': (
+                    str(_valor(registro, 'numero_lote', '') or '').strip()
+                    or str(item.get('numero_lote') or '').strip()
                     or '-'
                 ),
                 'paciente': item.get('nm_paciente') or '-',
@@ -165,6 +210,7 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
                     or '-'
                 ),
                 'data_recurso': _data(_valor(registro, 'dt_recurso')),
+                'data_pagamento': _data(_valor(registro, 'dt_pagamento')),
             }
         )
     return linhas
@@ -184,6 +230,28 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     if not linhas:
         raise ValueError('O processo não possui recursos registrados.')
 
+    datas_recurso = [
+        linha['data_recurso']
+        for linha in linhas
+        if linha['data_recurso']
+    ]
+    data_recurso = max(datas_recurso) if datas_recurso else date.today()
+    convenio = str(linhas[0].get('convenio') or 'IPM').strip().upper()
+    is_issec = 'ISSEC' in convenio
+    processo_recurso = str(
+        cards_processo[0].get('processo_recurso') or ''
+    ).strip()
+    datas_pagamento = [
+        linha['data_pagamento']
+        for linha in linhas
+        if linha['data_pagamento']
+    ]
+    data_pagamento = max(datas_pagamento) if datas_pagamento else None
+    total_recurso = sum(
+        (linha['valor_recurso'] for linha in linhas),
+        Decimal('0.00'),
+    )
+
     buffer = BytesIO()
     pagina = landscape(A4)
     largura_util = pagina[0] - 10 * mm
@@ -194,7 +262,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         rightMargin=5 * mm,
         topMargin=5 * mm,
         bottomMargin=5 * mm,
-        title='Recurso de Glosa IPM',
+        title=f'Recurso de Glosa {"ISSEC" if is_issec else "IPM"}',
         author=NOME_PRESTADOR,
     )
     estilo = ParagraphStyle(
@@ -217,21 +285,15 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         fontSize=8,
         leading=9,
     )
-    datas_recurso = [
-        linha['data_recurso']
-        for linha in linhas
-        if linha['data_recurso']
-    ]
-    data_recurso = max(datas_recurso) if datas_recurso else date.today()
-    total_recurso = sum(
-        (linha['valor_recurso'] for linha in linhas),
-        Decimal('0.00'),
-    )
-
     tabela_titulo = Table(
         [[
             _paragrafo(
-                f'RECURSO DE GLOSA IPM {data_recurso.year}',
+                (
+                    f'RECURSO DE GLOSA ISSEC {data_recurso.year}/ '
+                    f'PROCESSO DE RECURSO: {processo_recurso}'
+                    if is_issec
+                    else f'RECURSO DE GLOSA IPM {data_recurso.year}'
+                ),
                 estilo_titulo,
             )
         ]],
@@ -252,12 +314,18 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             [
                 _paragrafo('CNPJ', estilo_negrito),
                 _paragrafo('PRESTADOR', estilo_negrito),
-                '',
+                _paragrafo(
+                    'DATA DO PAGAMENTO' if is_issec else '',
+                    estilo_negrito,
+                ),
             ],
             [
                 _paragrafo(CNPJ_PRESTADOR, estilo),
                 _paragrafo(NOME_PRESTADOR, estilo),
-                '',
+                _paragrafo(
+                    _formatar_data(data_pagamento) if is_issec else '',
+                    estilo,
+                ),
             ],
             [
                 _paragrafo('PESSOA / FONE / E-MAIL', estilo_negrito),
@@ -290,28 +358,41 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     )
 
     titulos = (
-        'PROCESSO<br/>INICIAL',
-        'REMESSA',
-        'PACIENTE',
-        'ATEND.<br/>ALTA',
-        'ITEM GLOSADO',
-        'QTDE<br/>APRE',
-        'QTDE<br/>GLOSADA',
-        'VALOR<br/>APRES',
-        'VALOR<br/>PAGO',
-        'VALOR<br/>GLOSADO',
-        'MOTIVO DA GLOSA',
-        'VALOR DO<br/>RECURSO',
-        'JUSTIFICATIVA',
+        (
+            'PROCESSO', 'PACIENTE', 'DATA', 'LOTE MAIDA',
+            'ITEM GLOSADO', 'QTDE APRE', 'QTDE GLOSADA',
+            'VALOR APRES', 'VALOR PAGO', 'VALOR GLOSADO',
+            'MOTIVO DA GLOSA', 'VALOR DO RECURSO', 'JUSTIFICATIVA',
+        )
+        if is_issec
+        else (
+            'PROCESSO<br/>INICIAL', 'REMESSA', 'PACIENTE',
+            'ATEND.<br/>ALTA', 'ITEM GLOSADO', 'QTDE<br/>APRE',
+            'QTDE<br/>GLOSADA', 'VALOR<br/>APRES', 'VALOR<br/>PAGO',
+            'VALOR<br/>GLOSADO', 'MOTIVO DA GLOSA',
+            'VALOR DO<br/>RECURSO', 'JUSTIFICATIVA',
+        )
     )
     dados = [[Paragraph(titulo, estilo_negrito) for titulo in titulos]]
     for linha in linhas:
-        dados.append(
+        identificacao = (
             [
+                _paragrafo(linha['processo_inicial'], estilo),
+                _paragrafo(linha['paciente'], estilo),
+                _paragrafo(linha['atend_alta'], estilo),
+                _paragrafo(linha['lote'], estilo),
+            ]
+            if is_issec
+            else [
                 _paragrafo(linha['processo_inicial'], estilo),
                 _paragrafo(linha['remessa'], estilo),
                 _paragrafo(linha['paciente'], estilo),
                 _paragrafo(linha['atend_alta'], estilo),
+            ]
+        )
+        dados.append(
+            [
+                *identificacao,
                 _paragrafo(linha['item_glosado'], estilo),
                 _paragrafo(linha['qtde_apre'], estilo),
                 _paragrafo(linha['qtde_glosada'], estilo),
@@ -334,19 +415,15 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     larguras = [
         largura_util * proporcao
         for proporcao in (
-            0.073,
-            0.067,
-            0.085,
-            0.067,
-            0.115,
-            0.042,
-            0.052,
-            0.067,
-            0.06,
-            0.064,
-            0.102,
-            0.066,
-            0.14,
+            (
+                0.07, 0.09, 0.065, 0.07, 0.15, 0.05, 0.055,
+                0.065, 0.06, 0.065, 0.09, 0.065, 0.105,
+            )
+            if is_issec
+            else (
+                0.07, 0.065, 0.095, 0.065, 0.14, 0.045, 0.055,
+                0.065, 0.06, 0.065, 0.105, 0.065, 0.10,
+            )
         )
     ]
     tabela_itens = Table(dados, colWidths=larguras, repeatRows=1)

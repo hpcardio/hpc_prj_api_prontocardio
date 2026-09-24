@@ -4,8 +4,8 @@ from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, false, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import String, and_, cast, false, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -40,6 +40,13 @@ from app_prontocardio.schema import (
     TissList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.pdf_recurso_glosa import (
+    gerar_pdf_recurso_glosa,
+    preencher_processo_recurso_issec,
+)
+from app_prontocardio.services.processo_recurso import (
+    sincronizar_processo_recurso_issec,
+)
 
 router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
 
@@ -202,6 +209,7 @@ def _validar_alocacao_glosa_conciliada(
 def _registros_do_mesmo_item(
     registro_origem: RegistroGlosa,
     session: Session,
+    demonstrativo_id_registro: str | None = None,
 ) -> list[RegistroGlosa]:
     filtros = [
         RegistroGlosa.cd_remessa == registro_origem.cd_remessa,
@@ -227,11 +235,25 @@ def _registros_do_mesmo_item(
         filtros.append(
             RegistroGlosa.motivo_glosa == registro_origem.motivo_glosa
         )
-    return session.scalars(
+    registros = session.scalars(
         select(RegistroGlosa)
         .where(*filtros)
         .order_by(RegistroGlosa.id)
     ).all()
+    id_demonstrativo = str(demonstrativo_id_registro or '').strip()
+    if not id_demonstrativo:
+        return registros
+
+    registro_vinculado_id = session.scalar(
+        select(RegistroGlosaDemonstrativoIpm.registro_glosa_id).where(
+            RegistroGlosaDemonstrativoIpm.id_registro == id_demonstrativo
+        )
+    )
+    if registro_vinculado_id is None:
+        return registros
+
+    ids_da_linha = {registro_origem.id, registro_vinculado_id}
+    return [registro for registro in registros if registro.id in ids_da_linha]
 
 
 def _resolver_registro_tratativa(
@@ -378,6 +400,25 @@ def _desfazer_tratativa_glosa_conciliada(
 
 def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     for chave, valor in filtros.items():
+        if chave == 'identidades_processo':
+            if not valor:
+                query = query.where(false())
+                continue
+            query = query.where(or_(*(
+                and_(
+                    ModelContaAtendimento.cd_remessa == cd_remessa,
+                    ModelContaAtendimento.cd_atendimento == cd_atendimento,
+                    ModelContaAtendimento.cd_reg == conta,
+                    (
+                        ModelContaAtendimento.cd_lancamento.is_(None)
+                        if cd_lancamento is None
+                        else ModelContaAtendimento.cd_lancamento
+                        == cd_lancamento
+                    ),
+                )
+                for cd_remessa, cd_atendimento, conta, cd_lancamento in valor
+            )))
+            continue
         if hasattr(ModelContaAtendimento, chave):
             coluna = getattr(ModelContaAtendimento, chave)
             if chave == 'tp_atendimento':
@@ -385,7 +426,10 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
                     query = query.where(coluna == valor.value)
                 continue
 
-            if chave == 'cd_paciente' and isinstance(valor, tuple):
+            if chave in {'cd_paciente', 'cd_atendimento'} and isinstance(
+                valor,
+                tuple,
+            ):
                 if not valor:
                     query = query.where(false())
                     continue
@@ -407,6 +451,33 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     return query
 
 
+def _resolver_filtro_processo(
+    session: Session,
+    filtros: dict,
+) -> dict:
+    filtros_resolvidos = dict(filtros)
+    processo = str(filtros_resolvidos.pop('processo', '') or '').strip()
+    if not processo:
+        return filtros_resolvidos
+    identidades = tuple(session.execute(
+        select(
+            RegistroGlosa.cd_remessa,
+            RegistroGlosa.cd_atendimento,
+            RegistroGlosa.conta,
+            RegistroGlosa.cd_lancamento,
+        ).where(
+            func.lower(
+                func.trim(RegistroGlosa.processo_controle_fatura_gab)
+            ) == processo.casefold(),
+            RegistroGlosa.origem_registro == 'triagem',
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.dt_recurso.is_not(None),
+        ).distinct()
+    ).all())
+    filtros_resolvidos['identidades_processo'] = identidades
+    return filtros_resolvidos
+
+
 def _resolver_filtro_nome_paciente(
     session: Session,
     filtros: dict,
@@ -425,6 +496,38 @@ def _resolver_filtro_nome_paciente(
     )
     filtros_resolvidos['cd_paciente'] = codigos_paciente
     return filtros_resolvidos
+
+
+def _resolver_filtro_guia(session: Session, filtros: dict) -> dict:
+    filtros_resolvidos = dict(filtros)
+    numero_guia = str(filtros_resolvidos.pop('nr_guia', '') or '').strip()
+    if not numero_guia:
+        return filtros_resolvidos
+    filtros_resolvidos['guia_resolvida'] = numero_guia
+    if filtros_resolvidos.get('cd_atendimento') is not None:
+        return filtros_resolvidos
+
+    atendimentos = tuple(session.scalars(
+        text(
+            'SELECT DISTINCT cd_atendimento '
+            'FROM dbamv.guia '
+            'WHERE nr_guia = :nr_guia '
+            'AND cd_atendimento IS NOT NULL'
+        ),
+        {'nr_guia': numero_guia},
+    ))
+    filtros_resolvidos['cd_atendimento'] = atendimentos
+    return filtros_resolvidos
+
+
+def _filtrar_linhas_por_guia(rows, numero_guia: str | None):
+    if not numero_guia:
+        return rows
+    return [
+        row
+        for row in rows
+        if str(row.nr_guia or '').strip() == numero_guia
+    ]
 
 
 def _excluir_convenios_desabilitados(query, codigos_desabilitados):
@@ -480,7 +583,10 @@ def conta_atendimento(
                 ),
             )
 
+        filtros = _resolver_filtro_processo(session_postgres, filtros)
+        filtros = _resolver_filtro_guia(session, filtros)
         filtros = _resolver_filtro_nome_paciente(session, filtros)
+        guia_resolvida = filtros.pop('guia_resolvida', None)
 
         codigos_desabilitados = tuple(
             session_postgres.scalars(
@@ -542,6 +648,7 @@ def conta_atendimento(
         )
 
         rows = _executar_conta_atendimento_sem_duplicidade(session, query)
+        rows = _filtrar_linhas_por_guia(rows, guia_resolvida)
 
     except SQLAlchemyError as exc:
         if _is_oracle_connect_timeout(exc):
@@ -618,19 +725,31 @@ def consultar_glosas_registradas(
     )
 
     field_mapping = {
+        'processo': RegistroGlosa.processo_controle_fatura_gab,
         'cd_remessa': RegistroGlosa.cd_remessa,
         'cd_atendimento': RegistroGlosa.cd_atendimento,
         'cd_reg': RegistroGlosa.conta,
+        'nr_guia': RegistroGlosa.guia,
         'nm_convenio': RegistroGlosa.convenio,
         'nm_paciente': RegistroGlosa.nm_paciente,
         'descricao': RegistroGlosa.descricao_glosa,
         'tp_atendimento': RegistroGlosa.tp_atendimento,
     }
-    text_fields = {'nm_convenio', 'nm_paciente', 'descricao', 'tp_atendimento'}
+    text_fields = {
+        'nm_convenio',
+        'nm_paciente',
+        'descricao',
+        'tp_atendimento',
+    }
 
     for chave, valor in filtros.items():
         coluna = field_mapping.get(chave)
         if coluna is not None:
+            if chave == 'processo' and isinstance(valor, str):
+                query = query.where(
+                    func.lower(func.trim(coluna)) == valor.strip().casefold()
+                )
+                continue
             if chave == 'tp_atendimento':
                 if isinstance(valor, TipoAtendimento):
                     query = query.where(coluna == valor.value)
@@ -657,6 +776,124 @@ def consultar_glosas_registradas(
     )
 
     return {'glosas': rows}
+
+
+def _cards_recursos_triagem(
+    registros: list[RegistroGlosa],
+    descricoes_tiss: dict[str, str],
+) -> list[dict]:
+    cards_por_remessa: dict[int, dict] = {}
+    for registro in registros:
+        card = cards_por_remessa.setdefault(
+            registro.cd_remessa,
+            {
+                'cd_remessa': registro.cd_remessa,
+                'convenio': registro.convenio,
+                'processo': {
+                    'numero_processo': (
+                        registro.processo_controle_fatura_gab
+                    )
+                },
+                'pacientes': [],
+            },
+        )
+        paciente = next(
+            (
+                item
+                for item in card['pacientes']
+                if item['codigo_paciente'] == registro.codigo_paciente
+            ),
+            None,
+        )
+        if paciente is None:
+            paciente = {
+                'codigo_paciente': registro.codigo_paciente,
+                'itens': [],
+            }
+            card['pacientes'].append(paciente)
+        paciente['itens'].append(
+            {
+                'nm_paciente': registro.nm_paciente,
+                'nm_convenio': registro.convenio,
+                'numero_lote': registro.numero_lote,
+                'dt_alta': registro.data_alta,
+                'dt_atendimento': registro.data_atendimento,
+                'descricao': (
+                    registro.descricao_item or registro.procedimento
+                ),
+                'qt_lancamento': registro.qtd_registro,
+                'qtd_glosada': registro.qtd_registro,
+                'valor_processado': registro.valor,
+                'valor_liberado': Decimal('0.00'),
+                'valor_glosa': registro.valor,
+                'motivo_glosa_descricao': (
+                    descricoes_tiss.get(str(registro.motivo_glosa or ''))
+                    or registro.motivo_glosa
+                    or '-'
+                ),
+                'registro_recusa': registro,
+            }
+        )
+    return list(cards_por_remessa.values())
+
+
+@router.get('/glosas/recurso.pdf', status_code=HTTPStatus.OK)
+def gerar_pdf_recurso_triagem(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    processo_original: str = Query(min_length=1, max_length=100),
+    download: bool = True,
+):
+    processo_normalizado = processo_original.strip()
+    registros = session.scalars(
+        select(RegistroGlosa)
+        .where(
+            func.lower(
+                func.trim(RegistroGlosa.processo_controle_fatura_gab)
+            ) == processo_normalizado.casefold(),
+            RegistroGlosa.origem_registro == 'triagem',
+            RegistroGlosa.sn_glosado == 'true',
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.valor_recursado.is_not(None),
+            RegistroGlosa.valor_recursado > 0,
+        )
+        .order_by(RegistroGlosa.cd_remessa, RegistroGlosa.id)
+    ).all()
+    if not registros:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='O processo da Triagem não possui recursos registrados.',
+        )
+    codigos_tiss = {
+        str(registro.motivo_glosa or '')
+        for registro in registros
+        if registro.motivo_glosa
+    }
+    descricoes_tiss = {
+        item.codigo_termo: item.termo
+        for item in session.scalars(
+            select(Tiss).where(Tiss.codigo_termo.in_(codigos_tiss))
+        )
+    } if codigos_tiss else {}
+    cards = _cards_recursos_triagem(registros, descricoes_tiss)
+    preencher_processo_recurso_issec(session, cards)
+    conteudo = gerar_pdf_recurso_glosa(cards)
+    processo_arquivo = ''.join(
+        caractere if caractere.isalnum() else '-'
+        for caractere in processo_normalizado
+    ).strip('-')
+    disposicao = 'attachment' if download else 'inline'
+    return Response(
+        content=conteudo,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': (
+                f'{disposicao}; filename="recurso-glosa-'
+                f'{processo_arquivo}.pdf"'
+            ),
+            'X-Content-Type-Options': 'nosniff',
+        },
+    )
 
 
 @router.get(
@@ -798,18 +1035,88 @@ def registrar_glosa(
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
 ):
+    id_demonstrativo = str(
+        payload.demonstrativo_id_registro or ''
+    ).strip()
+    if id_demonstrativo:
+        vinculo_existente = session.get(
+            RegistroGlosaDemonstrativoIpm,
+            id_demonstrativo,
+        )
+        registro_existente = (
+            session.get(RegistroGlosa, vinculo_existente.registro_glosa_id)
+            if vinculo_existente is not None
+            else None
+        )
+        if (
+            registro_existente is not None
+            and registro_existente.sn_ativo == 'true'
+            and registro_existente.status_tratativa != 'pendente'
+            and registro_existente.sn_glosado == payload.sn_glosado
+        ):
+            return editar_glosa(
+                registro_existente.id,
+                payload,
+                usuario_atual,
+                session,
+            )
+
     registro_glosa = RegistroGlosa(
         **payload.model_dump(exclude=REGISTRO_GLOSA_PAYLOAD_EXCLUDE),
         sn_ativo='true',
     )
+    registros_item = _registros_do_mesmo_item(
+        registro_glosa,
+        session,
+        payload.demonstrativo_id_registro,
+    )
+    candidatos_idempotentes = [
+        registro
+        for registro in registros_item
+        if registro.sn_ativo == 'true'
+        and registro.status_tratativa != 'pendente'
+        and registro.sn_glosado == payload.sn_glosado
+        and registro.qtd_recursado == payload.qtd_recursado
+        and registro.valor_recursado == payload.valor_recursado
+    ]
+    if len(candidatos_idempotentes) == 1:
+        return editar_glosa(
+            candidatos_idempotentes[0].id,
+            payload,
+            usuario_atual,
+            session,
+        )
     _validar_limites_tratativas_item(
         None,
         payload,
-        _registros_do_mesmo_item(registro_glosa, session),
+        registros_item,
     )
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
 
     session.add(registro_glosa)
+    session.flush()
+    if payload.demonstrativo_id_registro:
+        vinculo = session.get(
+            RegistroGlosaDemonstrativoIpm,
+            payload.demonstrativo_id_registro,
+        )
+        registro_origem = next(
+            (
+                registro
+                for registro in registros_item
+                if vinculo is not None
+                and registro.id == vinculo.registro_glosa_id
+            ),
+            None,
+        )
+        if registro_origem is not None:
+            _vincular_tratativa_ao_demonstrativo(
+                session,
+                registro_origem,
+                registro_glosa,
+                payload.demonstrativo_id_registro,
+            )
+    sincronizar_processo_recurso_issec(session, payload, usuario_atual.id)
     session.commit()
     session.refresh(registro_glosa)
 
@@ -887,7 +1194,11 @@ def editar_glosa(
     session: SessionPostgres,
 ):
     registro_origem = _get_registro_glosa_or_404(glosa_id, session)
-    registros_item = _registros_do_mesmo_item(registro_origem, session)
+    registros_item = _registros_do_mesmo_item(
+        registro_origem,
+        session,
+        payload.demonstrativo_id_registro,
+    )
     registro_glosa = _resolver_registro_tratativa(
         registro_origem,
         payload,
@@ -968,6 +1279,7 @@ def editar_glosa(
             conciliacao_remessa.valor_glosado,
         )
 
+    sincronizar_processo_recurso_issec(session, payload, usuario_atual.id)
     session.commit()
     session.refresh(registro_glosa)
 

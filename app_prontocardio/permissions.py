@@ -12,17 +12,24 @@ TELAS_SISTEMA = (
     'follow_up_solicitacoes',
     'emissao_nfse',
     'acompanhamento_particular',
+    'contas_pagar_operacao',
+    'contas_pagar_acompanhamento',
+    'contas_pagar_gestao',
     'solicitar_nota',
     'solicitacoes_cadastradas',
     'solicitacoes_recusas',
     'configuracao_convenio',
     'empresas_nfse',
+    'ecg_worklist',
 )
-TELAS_PADRAO_JSON = json.dumps(list(TELAS_SISTEMA))
+TELAS_PADRAO = tuple(
+    tela for tela in TELAS_SISTEMA if tela != 'ecg_worklist'
+)
+TELAS_PADRAO_JSON = json.dumps(list(TELAS_PADRAO))
 
 
 def telas_padrao() -> list[str]:
-    return list(TELAS_SISTEMA)
+    return list(TELAS_PADRAO)
 
 
 def normalizar_telas(telas: list[str]) -> list[str]:

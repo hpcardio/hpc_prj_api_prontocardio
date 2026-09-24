@@ -1,3 +1,5 @@
+import os
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from http import HTTPStatus
@@ -8,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app_prontocardio.biq_hemodinamica import consultar_receita_hemodinamica
 from app_prontocardio.database import get_session_oracle
 from app_prontocardio.models import Usuario
 from app_prontocardio.security import valida_token_usuario_atual
@@ -15,6 +18,39 @@ from app_prontocardio.security import valida_token_usuario_atual
 router = APIRouter(prefix="/biq", tags=["biq"])
 
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
+MAX_CODIGOS_REDE = 500
+USUARIO_MV_PATTERN = re.compile(r'^[A-Z0-9_.-]{2,30}$')
+
+
+CONSULTA_BIQ_CONSULTAS_AMBULATORIAIS_REALIZADAS = text(
+    """
+    SELECT a.CD_PRESTADOR AS "cd_prestador",
+           pr.NM_PRESTADOR AS "nm_prestador",
+           pr.DS_CODIGO_CONSELHO AS "crm",
+           COUNT(CASE
+               WHEN TRUNC(a.HR_ATENDIMENTO) -
+                    TRUNC(a.HR_ATENDIMENTO, 'IW') BETWEEN 0 AND 4
+               THEN 1
+           END) AS "consultas_semana",
+           COUNT(CASE
+               WHEN TRUNC(a.HR_ATENDIMENTO) -
+                    TRUNC(a.HR_ATENDIMENTO, 'IW') NOT BETWEEN 0 AND 4
+               THEN 1
+           END) AS "consultas_fds",
+           COUNT(*) AS "consultas_total"
+      FROM DBAMV.ATENDIME a
+      JOIN DBAMV.PRESTADOR pr
+        ON pr.CD_PRESTADOR = a.CD_PRESTADOR
+     WHERE a.TP_ATENDIMENTO = 'A'
+       AND a.HR_ATENDIMENTO >= :data_inicio
+       AND a.HR_ATENDIMENTO < :data_fim_exclusiva
+       AND a.CD_PRESTADOR IS NOT NULL
+     GROUP BY a.CD_PRESTADOR,
+              pr.NM_PRESTADOR,
+              pr.DS_CODIGO_CONSELHO
+     ORDER BY pr.NM_PRESTADOR
+    """
+)
 
 
 
@@ -28,6 +64,27 @@ def _normalizar_convenios(cd_convenio: str | None):
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail="cd_convenio deve conter apenas números separados por vírgula.",
+        )
+    return ','.join(dict.fromkeys(codigos))
+
+
+def _normalizar_codigos_rede(valor: str | None, campo: str):
+    if not valor:
+        return None
+    codigos = [
+        item.strip() for item in str(valor).split(',') if item.strip()
+    ]
+    if not codigos:
+        return None
+    if len(codigos) > MAX_CODIGOS_REDE or any(
+        not item.isdigit() for item in codigos
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                f'{campo} deve conter até {MAX_CODIGOS_REDE} códigos '
+                'numéricos separados por vírgula.'
+            ),
         )
     return ','.join(dict.fromkeys(codigos))
 
@@ -67,7 +124,78 @@ def _rows_to_dict(rows):
         for row in rows
     ]
 
-CONSULTA_TESTE_ERGOMETRICO = text(
+
+@router.get(
+    '/consultas-ambulatoriais-realizadas',
+    status_code=HTTPStatus.OK,
+)
+def consultar_consultas_ambulatoriais_realizadas(
+    usuario_atual: ValidaUsuarioAtual,
+    data_inicio: date,
+    data_fim: date,
+    session: Session = Depends(get_session_oracle),
+):
+    """Resume atendimentos ambulatoriais realizados por prestador."""
+    del usuario_atual
+    params = _periodo_inclusivo(data_inicio, data_fim)
+    try:
+        rows = session.execute(
+            CONSULTA_BIQ_CONSULTAS_AMBULATORIAIS_REALIZADAS,
+            params,
+        ).mappings().all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail=(
+                'Não foi possível totalizar as consultas ambulatoriais '
+                'realizadas no MV.'
+            ),
+        ) from exc
+
+    consultas = _rows_to_dict(rows)
+    return {
+        'periodo': {
+            'data_inicio': data_inicio.isoformat(),
+            'data_fim': data_fim.isoformat(),
+        },
+        'consultas': consultas,
+        'total_consultas': sum(
+            int(item.get('consultas_total') or 0) for item in consultas
+        ),
+        'total_prestadores': len(consultas),
+    }
+
+def _normalizar_usuario_mv(valor: str) -> str:
+    usuario = str(valor or '').strip().upper()
+    if not USUARIO_MV_PATTERN.fullmatch(usuario):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Usuário MV inválido.',
+        )
+    return usuario
+
+
+def _usuarios_mv_permitidos() -> set[str]:
+    return {
+        usuario.strip().upper()
+        for usuario in os.getenv('PRONTOREDE_MV_ALLOWED_USERS', '').split(',')
+        if usuario.strip()
+    }
+
+
+def _inteiro_positivo(valor: object) -> int | None:
+    if isinstance(valor, bool) or not isinstance(valor, (int, Decimal)):
+        return None
+    inteiro = int(valor)
+    if inteiro <= 0 or Decimal(str(valor)) != Decimal(inteiro):
+        return None
+    return inteiro
+
+
+def _texto_linha(valor: object) -> str:
+    return valor.strip() if isinstance(valor, str) else ''
+
+CONSULTA_TESTE_ERGOMETRICO_AGENDADOS = text(
     """
     SELECT i.CD_IT_AGENDA_CENTRAL AS cd_it_agenda_central,
            a.CD_ATENDIMENTO AS cd_atendimento,
@@ -75,9 +203,9 @@ CONSULTA_TESTE_ERGOMETRICO = text(
            a.HR_ATENDIMENTO AS dt_atendimento,
            i.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
-           a.CD_PRESTADOR AS cd_prestador,
-           p.NM_PRESTADOR AS nm_prestador,
-           p.DS_CODIGO_CONSELHO AS crm,
+           a.CD_PRESTADOR AS cd_prestador_atendimento,
+           p.NM_PRESTADOR AS nm_prestador_atendimento,
+           p.DS_CODIGO_CONSELHO AS crm_atendimento,
            ia.CD_ITEM_AGENDAMENTO AS cd_item_agendamento,
            ia.DS_ITEM_AGENDAMENTO AS ds_item_agendamento,
            i.DS_OBSERVACAO AS ds_observacao,
@@ -102,6 +230,180 @@ CONSULTA_TESTE_ERGOMETRICO = text(
          OR UPPER(NVL(i.DS_OBSERVACAO_GERAL, '')) LIKE '%CONFIRMADO%'
        )
      ORDER BY i.HR_AGENDA, pac.NM_PACIENTE, a.CD_ATENDIMENTO
+    """
+)
+
+CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS = text(
+    """
+    SELECT DISTINCT
+           a.CD_ATENDIMENTO AS cd_atendimento,
+           a.HR_ATENDIMENTO AS dt_atendimento,
+           a.CD_PACIENTE AS cd_paciente,
+           pac.NM_PACIENTE AS nm_paciente,
+           ira.CD_PRO_FAT AS cd_pro_fat,
+           pf.DS_PRO_FAT AS ds_pro_fat,
+           a.CD_PRESTADOR AS cd_prestador_atendimento,
+           p.NM_PRESTADOR AS nm_prestador_atendimento,
+           p.DS_CODIGO_CONSELHO AS crm_atendimento,
+           a.TP_ATENDIMENTO AS tp_atendimento
+      FROM DBAMV.ATENDIME a
+      JOIN DBAMV.ITREG_AMB ira
+        ON ira.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+       AND ira.CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      LEFT JOIN DBAMV.PRO_FAT pf
+        ON pf.CD_PRO_FAT = ira.CD_PRO_FAT
+      LEFT JOIN DBAMV.PACIENTE pac
+        ON pac.CD_PACIENTE = a.CD_PACIENTE
+      LEFT JOIN DBAMV.PRESTADOR p
+        ON p.CD_PRESTADOR = a.CD_PRESTADOR
+     WHERE a.TP_ATENDIMENTO = 'E'
+       AND a.HR_ATENDIMENTO >= :data_inicio
+       AND a.HR_ATENDIMENTO < :data_fim
+     ORDER BY a.HR_ATENDIMENTO, pac.NM_PACIENTE, a.CD_ATENDIMENTO
+    """
+)
+
+CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS_CHECKUP = text(
+    """
+    SELECT DISTINCT
+           a.CD_ATENDIMENTO AS cd_atendimento,
+           ped.HR_PEDIDO AS dt_atendimento,
+           a.CD_PACIENTE AS cd_paciente,
+           pac.NM_PACIENTE AS nm_paciente,
+           exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
+           pf.DS_PRO_FAT AS ds_pro_fat,
+           a.CD_PRESTADOR AS cd_prestador_atendimento,
+           p.NM_PRESTADOR AS nm_prestador_atendimento,
+           p.DS_CODIGO_CONSELHO AS crm_atendimento,
+           a.TP_ATENDIMENTO AS tp_atendimento
+      FROM DBAMV.ATENDIME a
+      JOIN DBAMV.PED_RX ped
+        ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+      JOIN DBAMV.ITPED_RX ipr
+        ON ipr.CD_PED_RX = ped.CD_PED_RX
+      JOIN DBAMV.EXA_RX exa
+        ON exa.CD_EXA_RX = ipr.CD_EXA_RX
+       AND exa.EXA_RX_CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      LEFT JOIN DBAMV.PRO_FAT pf
+        ON pf.CD_PRO_FAT = exa.EXA_RX_CD_PRO_FAT
+      LEFT JOIN DBAMV.PACIENTE pac
+        ON pac.CD_PACIENTE = a.CD_PACIENTE
+      LEFT JOIN DBAMV.PRESTADOR p
+        ON p.CD_PRESTADOR = a.CD_PRESTADOR
+     WHERE a.TP_ATENDIMENTO = 'I'
+       AND a.CD_CONVENIO = 59
+       AND ped.HR_PEDIDO >= :data_inicio
+       AND ped.HR_PEDIDO < :data_fim
+     ORDER BY ped.HR_PEDIDO, pac.NM_PACIENTE, a.CD_ATENDIMENTO
+    """
+)
+
+CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
+    """
+    SELECT DISTINCT
+           a.CD_ATENDIMENTO AS cd_atendimento,
+           a.HR_ATENDIMENTO AS dt_atendimento,
+           a.CD_PACIENTE AS cd_paciente,
+           pac.NM_PACIENTE AS nm_paciente,
+           ira.CD_PRO_FAT AS cd_pro_fat,
+           pf.DS_PRO_FAT AS ds_pro_fat,
+           ped.CD_PED_RX AS cd_ped_rx,
+           ipr.CD_ITPED_RX AS cd_itped_rx,
+           lr.CD_LAUDO AS cd_laudo,
+           lr.DT_LAUDO AS dt_laudo,
+           NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) AS cd_prestador,
+           p.NM_PRESTADOR AS nm_prestador,
+           p.DS_CODIGO_CONSELHO AS crm,
+           a.CD_PRESTADOR AS cd_prestador_atendimento,
+           pa.NM_PRESTADOR AS nm_prestador_atendimento,
+           pa.DS_CODIGO_CONSELHO AS crm_atendimento,
+           a.TP_ATENDIMENTO AS tp_atendimento
+      FROM DBAMV.ATENDIME a
+      JOIN DBAMV.ITREG_AMB ira
+        ON ira.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+       AND ira.CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      LEFT JOIN DBAMV.PRO_FAT pf
+        ON pf.CD_PRO_FAT = ira.CD_PRO_FAT
+      LEFT JOIN DBAMV.PACIENTE pac
+        ON pac.CD_PACIENTE = a.CD_PACIENTE
+      JOIN DBAMV.PED_RX ped
+        ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+      JOIN DBAMV.ITPED_RX ipr
+        ON ipr.CD_PED_RX = ped.CD_PED_RX
+      JOIN DBAMV.LAUDO_RX lr
+        ON lr.CD_LAUDO = ipr.CD_LAUDO
+      LEFT JOIN DBAMV.PRESTADOR p
+        ON p.CD_PRESTADOR = NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR)
+      LEFT JOIN DBAMV.PRESTADOR pa
+        ON pa.CD_PRESTADOR = a.CD_PRESTADOR
+     WHERE a.TP_ATENDIMENTO = 'E'
+       AND a.HR_ATENDIMENTO >= :data_inicio
+       AND a.HR_ATENDIMENTO < :data_fim
+       AND lr.DT_LAUDO >= :data_inicio
+       AND lr.DT_LAUDO < :data_fim
+       AND NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) IS NOT NULL
+     ORDER BY lr.DT_LAUDO, p.NM_PRESTADOR, a.CD_ATENDIMENTO, lr.CD_LAUDO
+    """
+)
+
+CONSULTA_TESTE_ERGOMETRICO_LAUDOS_CHECKUP = text(
+    """
+    SELECT DISTINCT
+           a.CD_ATENDIMENTO AS cd_atendimento,
+           ped.HR_PEDIDO AS dt_atendimento,
+           a.CD_PACIENTE AS cd_paciente,
+           pac.NM_PACIENTE AS nm_paciente,
+           exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
+           pf.DS_PRO_FAT AS ds_pro_fat,
+           ped.CD_PED_RX AS cd_ped_rx,
+           ipr.CD_ITPED_RX AS cd_itped_rx,
+           lr.CD_LAUDO AS cd_laudo,
+           lr.DT_LAUDO AS dt_laudo,
+           NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) AS cd_prestador,
+           p.NM_PRESTADOR AS nm_prestador,
+           p.DS_CODIGO_CONSELHO AS crm,
+           a.CD_PRESTADOR AS cd_prestador_atendimento,
+           pa.NM_PRESTADOR AS nm_prestador_atendimento,
+           pa.DS_CODIGO_CONSELHO AS crm_atendimento,
+           a.TP_ATENDIMENTO AS tp_atendimento
+      FROM DBAMV.ATENDIME a
+      JOIN DBAMV.PED_RX ped
+        ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+      JOIN DBAMV.ITPED_RX ipr
+        ON ipr.CD_PED_RX = ped.CD_PED_RX
+      JOIN DBAMV.EXA_RX exa
+        ON exa.CD_EXA_RX = ipr.CD_EXA_RX
+       AND exa.EXA_RX_CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      LEFT JOIN DBAMV.PRO_FAT pf
+        ON pf.CD_PRO_FAT = exa.EXA_RX_CD_PRO_FAT
+      LEFT JOIN DBAMV.PACIENTE pac
+        ON pac.CD_PACIENTE = a.CD_PACIENTE
+      JOIN DBAMV.LAUDO_RX lr
+        ON lr.CD_LAUDO = ipr.CD_LAUDO
+      LEFT JOIN DBAMV.PRESTADOR p
+        ON p.CD_PRESTADOR = NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR)
+      LEFT JOIN DBAMV.PRESTADOR pa
+        ON pa.CD_PRESTADOR = a.CD_PRESTADOR
+     WHERE a.TP_ATENDIMENTO = 'I'
+       AND a.CD_CONVENIO = 59
+       AND ped.HR_PEDIDO >= :data_inicio
+       AND ped.HR_PEDIDO < :data_fim
+       AND lr.DT_LAUDO >= :data_inicio
+       AND lr.DT_LAUDO < :data_fim
+       AND NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) IS NOT NULL
+     ORDER BY lr.DT_LAUDO, p.NM_PRESTADOR, a.CD_ATENDIMENTO, lr.CD_LAUDO
     """
 )
 
@@ -167,6 +469,58 @@ CONSULTA_INDICADORES_HOSPITALARES_RESUMO = text(
             AND a.dt_atendimento >= :data_inicio
             AND a.dt_atendimento <  :data_fim_exclusiva
             AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(a.cd_convenio) || ',') > 0)) AS internacoes,
+        (SELECT COUNT(*)
+           FROM dbamv.atendime a
+          WHERE a.tp_atendimento = 'A'
+            AND a.dt_atendimento >= :data_inicio
+            AND a.dt_atendimento <  :data_fim_exclusiva
+            AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(a.cd_convenio) || ',') > 0)) AS consultas_ambulatoriais,
+        (SELECT COUNT(*)
+           FROM dbamv.atendime a
+          WHERE a.tp_atendimento = 'U'
+            AND a.dt_atendimento >= :data_inicio
+            AND a.dt_atendimento <  :data_fim_exclusiva
+            AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(a.cd_convenio) || ',') > 0)) AS consultas_emergencia,
+        (SELECT COUNT(*)
+           FROM (
+                SELECT il.cd_itped_lab AS cd_item_exame
+                  FROM dbamv.ped_lab pl
+                  JOIN dbamv.itped_lab il
+                    ON il.cd_ped_lab = pl.cd_ped_lab
+                  LEFT JOIN dbamv.atendime a
+                    ON a.cd_atendimento = pl.cd_atendimento
+                 WHERE pl.cd_atendimento IS NOT NULL
+                   AND NVL(pl.hr_ped_lab, pl.dt_pedido) >= :data_inicio
+                   AND NVL(pl.hr_ped_lab, pl.dt_pedido) <  :data_fim_exclusiva
+                   AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(NVL(pl.cd_convenio, a.cd_convenio)) || ',') > 0)
+                UNION ALL
+                SELECT irx.cd_itped_rx AS cd_item_exame
+                  FROM dbamv.ped_rx prx
+                  JOIN dbamv.itped_rx irx
+                    ON irx.cd_ped_rx = prx.cd_ped_rx
+                  LEFT JOIN dbamv.atendime a
+                    ON a.cd_atendimento = prx.cd_atendimento
+                 WHERE prx.cd_atendimento IS NOT NULL
+                   AND NVL(prx.hr_pedido, prx.dt_pedido) >= :data_inicio
+                   AND NVL(prx.hr_pedido, prx.dt_pedido) <  :data_fim_exclusiva
+                   AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(NVL(prx.cd_convenio, a.cd_convenio)) || ',') > 0)
+           )) AS exames_totais,
+        (SELECT COUNT(*)
+           FROM dbamv.ped_rx prx
+           JOIN dbamv.itped_rx irx
+             ON irx.cd_ped_rx = prx.cd_ped_rx
+           JOIN dbamv.exa_rx erx
+             ON erx.cd_exa_rx = irx.cd_exa_rx
+           LEFT JOIN dbamv.atendime a
+             ON a.cd_atendimento = prx.cd_atendimento
+          WHERE prx.cd_atendimento IS NOT NULL
+            AND NVL(prx.hr_pedido, prx.dt_pedido) >= :data_inicio
+            AND NVL(prx.hr_pedido, prx.dt_pedido) <  :data_fim_exclusiva
+            AND (
+                irx.cd_exa_rx = 14375
+                OR UPPER(erx.ds_exa_rx) LIKE '%ANGIOTOMOGRAFIA CORONARIANA%'
+            )
+            AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(NVL(prx.cd_convenio, a.cd_convenio)) || ',') > 0)) AS exames_angiotc,
         (SELECT COUNT(*)
            FROM dbamv.atendime a
           WHERE a.tp_atendimento = 'I'
@@ -657,6 +1011,163 @@ CONSULTA_INTERNACOES_DETALHADAS = text(
 )
 
 
+CONSULTA_INTERNACOES_ATIVAS_REDE = text(
+    """
+    WITH ult_mov AS (
+        SELECT cd_atendimento, cd_leito
+        FROM (
+            SELECT
+                mi.cd_atendimento,
+                mi.cd_leito,
+                ROW_NUMBER() OVER (
+                    PARTITION BY mi.cd_atendimento
+                    ORDER BY NVL(mi.hr_mov_int, mi.dt_mov_int) DESC,
+                             mi.cd_mov_int DESC
+                ) AS rn
+            FROM dbamv.mov_int mi
+            WHERE mi.cd_leito IS NOT NULL
+        )
+        WHERE rn = 1
+    )
+    SELECT
+        a.cd_atendimento,
+        a.cd_paciente,
+        p.nm_paciente,
+        a.cd_prestador,
+        pr.nm_prestador,
+        TRUNC(a.dt_atendimento) +
+            (NVL(a.hr_atendimento, a.dt_atendimento) -
+             TRUNC(NVL(a.hr_atendimento, a.dt_atendimento)))
+            AS dh_atendimento,
+        a.cd_convenio,
+        c.nm_convenio,
+        a.cd_ori_ate,
+        oa.ds_ori_ate,
+        NVL(
+            lei.ds_leito,
+            TO_CHAR(COALESCE(a.cd_leito, um.cd_leito))
+        ) AS leito,
+        ui.ds_unid_int AS unidade_internacao,
+        sti.nm_setor AS setor_internacao
+    FROM dbamv.atendime a
+    LEFT JOIN dbamv.paciente p ON p.cd_paciente = a.cd_paciente
+    LEFT JOIN dbamv.prestador pr ON pr.cd_prestador = a.cd_prestador
+    LEFT JOIN dbamv.convenio c ON c.cd_convenio = a.cd_convenio
+    LEFT JOIN dbamv.ori_ate oa ON oa.cd_ori_ate = a.cd_ori_ate
+    LEFT JOIN ult_mov um ON um.cd_atendimento = a.cd_atendimento
+    LEFT JOIN dbamv.leito lei ON lei.cd_leito = COALESCE(a.cd_leito, um.cd_leito)
+    LEFT JOIN dbamv.unid_int ui ON ui.cd_unid_int = lei.cd_unid_int
+    LEFT JOIN dbamv.setor sti ON sti.cd_setor = ui.cd_setor
+    WHERE a.tp_atendimento = 'I'
+      AND a.dt_alta IS NULL
+      AND (
+            (
+                :origens IS NOT NULL
+                AND INSTR(
+                    ',' || :origens || ',',
+                    ',' || TO_CHAR(a.cd_ori_ate) || ','
+                ) > 0
+            )
+         OR (
+                :pacientes IS NOT NULL
+                AND INSTR(
+                    ',' || :pacientes || ',',
+                    ',' || TO_CHAR(a.cd_paciente) || ','
+                ) > 0
+            )
+      )
+    ORDER BY dh_atendimento DESC, p.nm_paciente
+    """
+)
+
+
+CONSULTA_CONTEXTO_MEDICO_INTERNACAO_REDE = text(
+    """
+    WITH ult_mov AS (
+        SELECT cd_atendimento, cd_leito
+        FROM (
+            SELECT
+                mi.cd_atendimento,
+                mi.cd_leito,
+                ROW_NUMBER() OVER (
+                    PARTITION BY mi.cd_atendimento
+                    ORDER BY NVL(mi.hr_mov_int, mi.dt_mov_int) DESC,
+                             mi.cd_mov_int DESC
+                ) AS rn
+            FROM dbamv.mov_int mi
+            WHERE mi.cd_leito IS NOT NULL
+        )
+        WHERE rn = 1
+    )
+    SELECT
+        a.cd_atendimento,
+        a.cd_paciente,
+        pac.nm_paciente,
+        TRUNC(a.dt_atendimento) +
+            (NVL(a.hr_atendimento, a.dt_atendimento) -
+             TRUNC(NVL(a.hr_atendimento, a.dt_atendimento)))
+            AS dh_atendimento,
+        NVL(
+            lei.ds_leito,
+            NVL(TO_CHAR(COALESCE(a.cd_leito, um.cd_leito)), 'NAO INFORMADO')
+        ) AS leito,
+        NVL(ui.ds_unid_int, 'NAO INFORMADO') AS unidade_internacao,
+        NVL(sti.nm_setor, 'NAO INFORMADO') AS setor_internacao,
+        u.cd_usuario AS usuario_mv,
+        pmv.cd_prestador,
+        pmv.nm_prestador,
+        co.ds_conselho,
+        pmv.ds_codigo_conselho,
+        pmv.cd_uf_orgao_emissor
+    FROM dbamv.atendime a
+    JOIN dbamv.paciente pac ON pac.cd_paciente = a.cd_paciente
+    JOIN dbasgu.usuarios u ON u.cd_usuario = :usuario_mv
+    JOIN dbamv.prestador pmv ON pmv.cd_prestador = u.cd_prestador
+    LEFT JOIN dbamv.conselho co ON co.cd_conselho = pmv.cd_conselho
+    LEFT JOIN ult_mov um ON um.cd_atendimento = a.cd_atendimento
+    LEFT JOIN dbamv.leito lei
+      ON lei.cd_leito = COALESCE(a.cd_leito, um.cd_leito)
+    LEFT JOIN dbamv.unid_int ui ON ui.cd_unid_int = lei.cd_unid_int
+    LEFT JOIN dbamv.setor sti ON sti.cd_setor = ui.cd_setor
+    WHERE a.cd_atendimento = :cd_atendimento
+      AND a.tp_atendimento = 'I'
+      AND a.dt_alta IS NULL
+      AND NVL(pmv.tp_situacao, 'A') = 'A'
+    """
+)
+
+CONSULTA_CATALOGO_ASSISTENCIAL_INTERNACAO_REDE = text(
+    """
+    SELECT id, label, tipo
+    FROM (
+        SELECT DISTINCT
+            'TIP:' || TO_CHAR(tp.cd_tip_presc) AS id,
+            TRIM(tp.ds_tip_presc) AS label,
+            CASE
+                WHEN tp.cd_exa_rx IS NOT NULL
+                  OR tp.cd_exa_lab IS NOT NULL
+                    THEN 'EXAME'
+                ELSE 'PROCEDIMENTO'
+            END AS tipo
+        FROM dbamv.pre_med pm
+        JOIN dbamv.itpre_med ipm
+          ON ipm.cd_pre_med = pm.cd_pre_med
+        JOIN dbamv.tip_presc tp
+          ON tp.cd_tip_presc = ipm.cd_tip_presc
+        WHERE pm.cd_atendimento = :cd_atendimento
+          AND NVL(ipm.sn_cancelado, 'N') = 'N'
+          AND TRIM(tp.ds_tip_presc) IS NOT NULL
+          AND (
+                tp.sn_solicitacao = 'S'
+             OR tp.cd_exa_rx IS NOT NULL
+             OR tp.cd_exa_lab IS NOT NULL
+          )
+        ORDER BY label, id
+    )
+    WHERE ROWNUM <= 100
+    """
+)
+
 CONSULTA_FLUXO_PA_TEMPOS = text(
     """
     WITH eventos AS (
@@ -987,6 +1498,19 @@ CONSULTA_FATURAMENTO_BASE = """
             NVL(irf.sn_pertence_pacote, 'N') AS sn_pertence_pacote,
             NVL(irf.vl_total_conta, 0) AS vl_total_item_bruto,
             CASE
+                WHEN COUNT(CASE WHEN NVL(irf.sn_pertence_pacote, 'N') = 'S' THEN 1 END)
+                     OVER (PARTITION BY rf.cd_reg_fat) > 0
+                    THEN CASE
+                        WHEN ROW_NUMBER() OVER (
+                            PARTITION BY rf.cd_reg_fat
+                            ORDER BY
+                                CASE WHEN NVL(irf.sn_pertence_pacote, 'N') <> 'S' THEN 0 ELSE 1 END,
+                                irf.dt_lancamento,
+                                irf.cd_lancamento
+                        ) = 1
+                            THEN NVL(rf.vl_total_conta, 0)
+                        ELSE 0
+                    END
                 WHEN NVL(irf.sn_pertence_pacote, 'N') = 'S'
                     THEN 0
                 ELSE NVL(irf.vl_total_conta, 0)
@@ -1071,6 +1595,19 @@ CONSULTA_FATURAMENTO_BASE = """
             NVL(ira.sn_pertence_pacote, 'N') AS sn_pertence_pacote,
             NVL(ira.vl_total_conta, 0) AS vl_total_item_bruto,
             CASE
+                WHEN COUNT(CASE WHEN NVL(ira.sn_pertence_pacote, 'N') = 'S' THEN 1 END)
+                     OVER (PARTITION BY ra.cd_reg_amb) > 0
+                    THEN CASE
+                        WHEN ROW_NUMBER() OVER (
+                            PARTITION BY ra.cd_reg_amb
+                            ORDER BY
+                                CASE WHEN NVL(ira.sn_pertence_pacote, 'N') <> 'S' THEN 0 ELSE 1 END,
+                                ra.dt_lancamento,
+                                ira.cd_lancamento
+                        ) = 1
+                            THEN NVL(ra.vl_total_conta, 0)
+                        ELSE 0
+                    END
                 WHEN NVL(ira.sn_pertence_pacote, 'N') = 'S'
                     THEN 0
                 ELSE NVL(ira.vl_total_conta, 0)
@@ -1167,6 +1704,163 @@ CONSULTA_FATURAMENTO_CONVENIO = text(
     """
 )
 
+CONSULTA_FATURAMENTO_SUS_PBIX = text(
+    """
+    WITH fatusus AS (
+        SELECT
+            rf.cd_atendimento,
+            SUM(NVL(v.vl_linha, 0)) AS vl_linha,
+            CASE
+                WHEN ot.cd_ori_ate = '26' AND s.cd_sub_plano = '300' THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '18' AND s.cd_sub_plano = '300' THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '3' AND s.cd_sub_plano = '300' THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '18' AND s.cd_sub_plano = '200' THEN 'MUNICIPIO'
+                WHEN ot.cd_ori_ate = '3' AND s.cd_sub_plano = '200' THEN 'MUNICIPIO'
+                WHEN ot.cd_ori_ate = '3' AND s.cd_sub_plano IS NULL THEN 'MUNICIPIO'
+                WHEN ot.cd_ori_ate = '18' AND s.cd_sub_plano IS NULL THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '1' AND s.cd_sub_plano IS NULL THEN 'ESTADO'
+                ELSE NVL(s.ds_sub_plano, c.nm_convenio)
+            END AS sub_plano
+        FROM dbamv.v_ffis_valor_prestador_aih v
+        LEFT JOIN dbamv.reg_fat rf
+          ON rf.cd_reg_fat = v.cd_reg_fat
+        LEFT JOIN dbamv.atendime a
+          ON a.cd_atendimento = rf.cd_atendimento
+        LEFT JOIN dbamv.ori_ate ot
+          ON ot.cd_ori_ate = a.cd_ori_ate
+        LEFT JOIN dbamv.convenio c
+          ON c.cd_convenio = a.cd_convenio
+        LEFT JOIN dbamv.sub_plano s
+          ON a.cd_convenio = s.cd_convenio
+         AND s.cd_sub_plano = a.cd_sub_plano
+        WHERE v.dt_competencia >= :data_inicio
+          AND v.dt_competencia < :data_fim_exclusiva
+          AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(a.cd_convenio) || ',') > 0)
+        GROUP BY
+            rf.cd_atendimento,
+            CASE
+                WHEN ot.cd_ori_ate = '26' AND s.cd_sub_plano = '300' THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '18' AND s.cd_sub_plano = '300' THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '3' AND s.cd_sub_plano = '300' THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '18' AND s.cd_sub_plano = '200' THEN 'MUNICIPIO'
+                WHEN ot.cd_ori_ate = '3' AND s.cd_sub_plano = '200' THEN 'MUNICIPIO'
+                WHEN ot.cd_ori_ate = '3' AND s.cd_sub_plano IS NULL THEN 'MUNICIPIO'
+                WHEN ot.cd_ori_ate = '18' AND s.cd_sub_plano IS NULL THEN 'ESTADO'
+                WHEN ot.cd_ori_ate = '1' AND s.cd_sub_plano IS NULL THEN 'ESTADO'
+                ELSE NVL(s.ds_sub_plano, c.nm_convenio)
+            END
+    ),
+    grupos AS (
+        SELECT
+            CASE WHEN sub_plano IN ('ESTADO', 'MUNICIPIO') THEN sub_plano ELSE 'SUS' END AS grupo,
+            cd_atendimento,
+            vl_linha
+        FROM fatusus
+    )
+    SELECT grupo, SUM(vl_linha) AS valor, COUNT(DISTINCT cd_atendimento) AS qtd_pacientes
+      FROM grupos
+     GROUP BY grupo
+    UNION ALL
+    SELECT 'SUS_TOTAL' AS grupo, SUM(vl_linha) AS valor, COUNT(DISTINCT cd_atendimento) AS qtd_pacientes
+      FROM grupos
+    """
+)
+
+CONSULTA_FATURAMENTO_REMESSA_PBIX = text(
+    """
+    WITH fatura_remessa AS (
+        SELECT DISTINCT
+            rf.cd_atendimento AS cod_atend,
+            rf.cd_reg_fat AS conta,
+            a.cd_paciente AS cod_paciente,
+            f.dt_competencia,
+            rf.cd_convenio AS cod_convenio,
+            c.nm_convenio AS nome_convenio,
+            rf.vl_total_conta AS vl_total,
+            CASE
+                WHEN rf.cd_convenio = '3' THEN 'PARTICULAR'
+                WHEN s.cd_sub_plano = '200' OR s.cd_sub_plano = '300' THEN s.ds_sub_plano
+                WHEN rf.cd_convenio = '1' AND ot.cd_ori_ate = '3' THEN 'MUNICIPIO'
+                WHEN rf.cd_convenio = '1' AND ot.cd_ori_ate = '18' THEN 'ESTADO'
+                WHEN s.cd_sub_plano <> '200' OR s.cd_sub_plano <> '300' THEN c.nm_convenio
+                ELSE NVL(s.ds_sub_plano, c.nm_convenio)
+            END AS sub_plano
+        FROM dbamv.reg_fat rf
+        LEFT JOIN dbamv.atendime a ON rf.cd_atendimento = a.cd_atendimento
+        LEFT JOIN dbamv.ori_ate ot ON ot.cd_ori_ate = a.cd_ori_ate
+        LEFT JOIN dbamv.remessa_fatura re ON rf.cd_remessa = re.cd_remessa
+        LEFT JOIN dbamv.fatura f ON re.cd_fatura = f.cd_fatura
+        LEFT JOIN dbamv.convenio c ON rf.cd_convenio = c.cd_convenio
+        LEFT JOIN dbamv.sub_plano s ON s.cd_convenio = c.cd_convenio AND s.cd_sub_plano = a.cd_sub_plano
+        WHERE rf.cd_atendimento IS NOT NULL
+          AND f.dt_competencia >= :data_inicio
+          AND f.dt_competencia < :data_fim_exclusiva
+          AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(rf.cd_convenio) || ',') > 0)
+
+        UNION ALL
+
+        SELECT DISTINCT
+            ib.cd_atendimento AS cod_atend,
+            rb.cd_reg_amb AS conta,
+            a.cd_paciente AS cod_paciente,
+            f.dt_competencia,
+            rb.cd_convenio AS cod_convenio,
+            c.nm_convenio AS nome_convenio,
+            rb.vl_total_conta AS vl_total,
+            CASE
+                WHEN rb.cd_convenio = '3' THEN 'PARTICULAR'
+                WHEN s.cd_sub_plano = '200' OR s.cd_sub_plano = '300' THEN s.ds_sub_plano
+                WHEN rb.cd_convenio = '1' AND ot.cd_ori_ate = '3' THEN 'MUNICIPIO'
+                WHEN rb.cd_convenio = '1' AND ot.cd_ori_ate = '18' THEN 'ESTADO'
+                WHEN s.cd_sub_plano <> '200' OR s.cd_sub_plano <> '300' THEN c.nm_convenio
+                ELSE NVL(s.ds_sub_plano, c.nm_convenio)
+            END AS sub_plano
+        FROM dbamv.reg_amb rb
+        LEFT JOIN dbamv.itreg_amb ib ON rb.cd_reg_amb = ib.cd_reg_amb
+        LEFT JOIN dbamv.atendime a ON ib.cd_atendimento = a.cd_atendimento
+        LEFT JOIN dbamv.ori_ate ot ON ot.cd_ori_ate = a.cd_ori_ate
+        LEFT JOIN dbamv.remessa_fatura re ON rb.cd_remessa = re.cd_remessa
+        LEFT JOIN dbamv.fatura f ON re.cd_fatura = f.cd_fatura
+        LEFT JOIN dbamv.convenio c ON a.cd_convenio = c.cd_convenio
+        LEFT JOIN dbamv.sub_plano s ON a.cd_convenio = s.cd_convenio AND s.cd_sub_plano = a.cd_sub_plano
+        WHERE ib.cd_atendimento IS NOT NULL
+          AND f.dt_competencia >= :data_inicio
+          AND f.dt_competencia < :data_fim_exclusiva
+          AND (:cd_convenio IS NULL OR INSTR(',' || :cd_convenio || ',', ',' || TO_CHAR(rb.cd_convenio) || ',') > 0)
+    ),
+    classificada AS (
+        SELECT
+            cod_atend,
+            conta,
+            cod_paciente,
+            cod_convenio,
+            nome_convenio,
+            vl_total,
+            CASE
+                WHEN sub_plano IN ('SUS - INTERNACAO', 'SUS - AMBULATORIO') THEN 'SUS'
+                WHEN sub_plano = 'ESTADO' THEN 'ESTADO'
+                WHEN sub_plano = 'MUNICIPIO' THEN 'MUNICIPIO'
+                WHEN sub_plano = 'PARTICULAR' THEN 'PARTICULAR'
+                ELSE 'CONVENIO'
+            END AS tipo_con
+        FROM fatura_remessa
+    )
+    SELECT
+        tipo_con AS grupo,
+        cod_convenio,
+        nome_convenio,
+        SUM(NVL(vl_total, 0)) AS valor,
+        COUNT(DISTINCT conta) AS qtd_contas,
+        COUNT(DISTINCT cod_atend) AS qtd_atendimentos,
+        COUNT(DISTINCT cod_paciente) AS qtd_pacientes
+    FROM classificada
+    WHERE tipo_con IN ('CONVENIO', 'PARTICULAR')
+      AND NVL(nome_convenio, '-') <> 'CORTESIA'
+    GROUP BY tipo_con, cod_convenio, nome_convenio
+    ORDER BY tipo_con, valor DESC
+    """
+)
+
 CONSULTA_FATURAMENTO_AGREGADO = text(
     CONSULTA_FATURAMENTO_BASE + """
     SELECT
@@ -1188,6 +1882,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
         qtd_itens,
         qtd_contas,
         qtd_atendimentos,
+        qtd_pacientes,
+        qtd_pacientes_em_remessa,
         qtd_itens_pacote,
         ticket_medio_atendimento,
         ticket_medio_conta,
@@ -1212,6 +1908,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
             COUNT(*) AS qtd_itens,
             COUNT(DISTINCT cd_conta) AS qtd_contas,
             COUNT(DISTINCT cd_atendimento) AS qtd_atendimentos,
+            COUNT(DISTINCT cd_paciente) AS qtd_pacientes,
+            COUNT(DISTINCT CASE WHEN faturado_em_remessa = 'SIM' THEN cd_paciente END) AS qtd_pacientes_em_remessa,
             SUM(CASE WHEN sn_pertence_pacote = 'S' THEN 1 ELSE 0 END) AS qtd_itens_pacote,
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_atendimento), 0), 2) AS ticket_medio_atendimento,
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_conta), 0), 2) AS ticket_medio_conta,
@@ -1239,6 +1937,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
             COUNT(*),
             COUNT(DISTINCT cd_conta),
             COUNT(DISTINCT cd_atendimento),
+            COUNT(DISTINCT cd_paciente),
+            COUNT(DISTINCT CASE WHEN faturado_em_remessa = 'SIM' THEN cd_paciente END),
             SUM(CASE WHEN sn_pertence_pacote = 'S' THEN 1 ELSE 0 END),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_atendimento), 0), 2),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_conta), 0), 2),
@@ -1267,6 +1967,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
             COUNT(*),
             COUNT(DISTINCT cd_conta),
             COUNT(DISTINCT cd_atendimento),
+            COUNT(DISTINCT cd_paciente),
+            COUNT(DISTINCT CASE WHEN faturado_em_remessa = 'SIM' THEN cd_paciente END),
             SUM(CASE WHEN sn_pertence_pacote = 'S' THEN 1 ELSE 0 END),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_atendimento), 0), 2),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_conta), 0), 2),
@@ -1295,6 +1997,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
             COUNT(*),
             COUNT(DISTINCT cd_conta),
             COUNT(DISTINCT cd_atendimento),
+            COUNT(DISTINCT cd_paciente),
+            COUNT(DISTINCT CASE WHEN faturado_em_remessa = 'SIM' THEN cd_paciente END),
             SUM(CASE WHEN sn_pertence_pacote = 'S' THEN 1 ELSE 0 END),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_atendimento), 0), 2),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_conta), 0), 2),
@@ -1323,6 +2027,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
             COUNT(*),
             COUNT(DISTINCT cd_conta),
             COUNT(DISTINCT cd_atendimento),
+            COUNT(DISTINCT cd_paciente),
+            COUNT(DISTINCT CASE WHEN faturado_em_remessa = 'SIM' THEN cd_paciente END),
             SUM(CASE WHEN sn_pertence_pacote = 'S' THEN 1 ELSE 0 END),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_atendimento), 0), 2),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_conta), 0), 2),
@@ -1351,6 +2057,8 @@ CONSULTA_FATURAMENTO_AGREGADO = text(
             COUNT(*),
             COUNT(DISTINCT cd_conta),
             COUNT(DISTINCT cd_atendimento),
+            COUNT(DISTINCT cd_paciente),
+            COUNT(DISTINCT CASE WHEN faturado_em_remessa = 'SIM' THEN cd_paciente END),
             SUM(CASE WHEN sn_pertence_pacote = 'S' THEN 1 ELSE 0 END),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_atendimento), 0), 2),
             ROUND(SUM(vl_total_item) / NULLIF(COUNT(DISTINCT cd_conta), 0), 2),
@@ -1378,11 +2086,35 @@ def consultar_teste_ergometrico(
             detail="data_fim deve ser posterior a data_inicio.",
         )
 
+    params = {"data_inicio": data_inicio, "data_fim": data_fim}
     try:
-        rows = (
+        agenda_rows = (
+            session.execute(CONSULTA_TESTE_ERGOMETRICO_AGENDADOS, params)
+            .mappings()
+            .all()
+        )
+        atendimento_rows = (
+            session.execute(CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS, params)
+            .mappings()
+            .all()
+        )
+        atendimento_checkup_rows = (
             session.execute(
-                CONSULTA_TESTE_ERGOMETRICO,
-                {"data_inicio": data_inicio, "data_fim": data_fim},
+                CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS_CHECKUP,
+                params,
+            )
+            .mappings()
+            .all()
+        )
+        laudo_rows = (
+            session.execute(CONSULTA_TESTE_ERGOMETRICO_LAUDOS, params)
+            .mappings()
+            .all()
+        )
+        laudo_checkup_rows = (
+            session.execute(
+                CONSULTA_TESTE_ERGOMETRICO_LAUDOS_CHECKUP,
+                params,
             )
             .mappings()
             .all()
@@ -1393,9 +2125,21 @@ def consultar_teste_ergometrico(
             detail="Não foi possível consultar os exames de teste ergométrico no MV.",
         ) from exc
 
-    agendados = [dict(row) for row in rows]
-    exames = [row for row in agendados if row.get("cd_atendimento")]
-    pendentes = [row for row in agendados if not row.get("cd_atendimento")]
+    agendados = _rows_to_dict(agenda_rows)
+    atendimentos = _rows_to_dict(atendimento_rows)
+    atendimentos.extend(_rows_to_dict(atendimento_checkup_rows))
+    exames = _rows_to_dict(laudo_rows)
+    exames.extend(_rows_to_dict(laudo_checkup_rows))
+
+    atendimentos_ids = {
+        str(row.get("cd_atendimento"))
+        for row in atendimentos
+        if row.get("cd_atendimento") is not None
+    }
+    pendentes = [
+        row for row in agendados
+        if not row.get("cd_atendimento") or str(row.get("cd_atendimento")) not in atendimentos_ids
+    ]
 
     prestadores = {}
     for row in exames:
@@ -1414,13 +2158,16 @@ def consultar_teste_ergometrico(
     return {
         "resumo": {
             "agendados_confirmados": len(agendados),
-            "atendimentos_realizados": len(exames),
+            "atendimentos_teste": len(atendimentos),
+            "atendimentos_realizados": len(atendimentos),
+            "laudos_assinados": len(exames),
             "conciliados": len(exames),
             "pendentes": len(pendentes),
             "prestadores": len(prestadores),
         },
         "prestadores": list(prestadores.values()),
         "agendados": agendados,
+        "atendimentos": atendimentos,
         "exames": exames,
         "pendentes": pendentes,
         "total": len(exames),
@@ -1667,6 +2414,167 @@ def consultar_indicadores_hospitalares_internacoes_detalhadas(
 
 
 @router.get(
+    "/rede/internacoes-ativas",
+    status_code=HTTPStatus.OK,
+)
+def consultar_internacoes_ativas_rede(
+    usuario_atual: ValidaUsuarioAtual,
+    origens: str | None = Query(default=None),
+    pacientes: str | None = Query(default=None),
+    limite: int = Query(default=500, ge=1, le=1000),
+    session: Session = Depends(get_session_oracle),
+):
+    """Lista somente internações ativas pertencentes ao universo informado.
+
+    O consumidor deve enviar códigos de origem MV, códigos de pacientes já
+    vinculados à rede, ou ambos. A consulta nunca retorna o censo hospitalar
+    completo sem um desses filtros.
+    """
+    del usuario_atual
+    origens_normalizadas = _normalizar_codigos_rede(origens, "origens")
+    pacientes_normalizados = _normalizar_codigos_rede(pacientes, "pacientes")
+    if not origens_normalizadas and not pacientes_normalizados:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'Informe ao menos uma origem ou um paciente vinculado ao '
+                'Prontocardio Rede.'
+            ),
+        )
+    try:
+        rows = session.execute(
+            CONSULTA_INTERNACOES_ATIVAS_REDE,
+            {
+                "origens": origens_normalizadas,
+                "pacientes": pacientes_normalizados,
+            },
+        ).mappings().all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Não foi possível consultar as internações ativas no MV.",
+        ) from exc
+
+    internacoes = _rows_to_dict(rows)[:limite]
+    return {
+        "internacoes": internacoes,
+        "total": len(internacoes),
+        "limite": limite,
+    }
+
+
+@router.get(
+    '/rede/internacoes/{cd_atendimento}/contexto-medico',
+    status_code=HTTPStatus.OK,
+)
+def consultar_contexto_medico_internacao_rede(
+    usuario_atual: ValidaUsuarioAtual,
+    cd_atendimento: int,
+    usuario_mv: str = Query(...),
+    session: Session = Depends(get_session_oracle),
+):
+    """Retorna o contexto mínimo de uma internação ativa para o ProntoRede."""
+    del usuario_atual
+    usuario = _normalizar_usuario_mv(usuario_mv)
+    if usuario not in _usuarios_mv_permitidos():
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Contexto MV não autorizado.',
+        )
+
+    try:
+        row = session.execute(
+            CONSULTA_CONTEXTO_MEDICO_INTERNACAO_REDE,
+            {
+                'cd_atendimento': cd_atendimento,
+                'usuario_mv': usuario,
+            },
+        ).mappings().first()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível consultar o contexto médico no MV.',
+        ) from exc
+
+    if row is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Internação ativa não encontrada no MV.',
+        )
+
+    atendimento = _inteiro_positivo(row.get('cd_atendimento'))
+    paciente = _inteiro_positivo(row.get('cd_paciente'))
+    prestador = _inteiro_positivo(row.get('cd_prestador'))
+    usuario_linha = _texto_linha(row.get('usuario_mv')).upper()
+    conselho = _texto_linha(row.get('ds_conselho')).upper()
+    numero_conselho = _texto_linha(row.get('ds_codigo_conselho')).upper()
+    uf_conselho = _texto_linha(row.get('cd_uf_orgao_emissor')).upper()
+    if (
+        atendimento != cd_atendimento
+        or paciente is None
+        or prestador is None
+        or usuario_linha != usuario
+        or conselho != 'CRM'
+        or not numero_conselho
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Contexto MV não autorizado.',
+        )
+
+    crm = (
+        f'CRM-{uf_conselho} {numero_conselho}'
+        if uf_conselho
+        else f'CRM {numero_conselho}'
+    )
+    try:
+        catalogo_rows = session.execute(
+            CONSULTA_CATALOGO_ASSISTENCIAL_INTERNACAO_REDE,
+            {'cd_atendimento': cd_atendimento},
+        ).mappings().all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível consultar o catálogo assistencial no MV.',
+        ) from exc
+
+    catalogo_assistencial = [
+        {
+            'id': _texto_linha(item.get('id')).upper(),
+            'label': _texto_linha(item.get('label')),
+            'tipo': _texto_linha(item.get('tipo')).upper(),
+        }
+        for item in catalogo_rows
+        if (
+            _texto_linha(item.get('id'))
+            and _texto_linha(item.get('label'))
+            and _texto_linha(item.get('tipo')).upper()
+            in {'EXAME', 'PROCEDIMENTO'}
+        )
+    ]
+
+    return {
+        'contexto': {
+            'cd_atendimento': atendimento,
+            'cd_paciente': paciente,
+            'nm_paciente': _texto_linha(row.get('nm_paciente')),
+            'unidade_internacao': _texto_linha(
+                row.get('unidade_internacao')
+            ),
+            'setor_internacao': _texto_linha(row.get('setor_internacao')),
+            'leito': _texto_linha(row.get('leito')),
+            'usuario_mv': usuario,
+            'cd_prestador': prestador,
+            'nm_prestador': _texto_linha(row.get('nm_prestador')),
+            'crm': crm,
+            'dh_atendimento': _json_value(row.get('dh_atendimento')),
+            'internacao_ativa': True,
+            'pode_atualizar_assistencial': True,
+            'catalogo_assistencial': catalogo_assistencial,
+        }
+    }
+
+@router.get(
     "/indicadores-hospitalares/producao-cirurgica",
     status_code=HTTPStatus.OK,
 )
@@ -1699,6 +2607,40 @@ def consultar_indicadores_hospitalares_producao_cirurgica(
 
 
 @router.get(
+    "/indicadores-hospitalares/receita-hemodinamica",
+    status_code=HTTPStatus.OK,
+)
+def consultar_indicadores_hospitalares_receita_hemodinamica(
+    usuario_atual: ValidaUsuarioAtual,
+    data_inicio: date,
+    data_fim: date,
+    cd_convenio: str | None = Query(default=None),
+    procedimento: str | None = Query(default=None),
+    session: Session = Depends(get_session_oracle),
+):
+    del usuario_atual
+    if data_fim < data_inicio:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail="data_fim deve ser igual ou posterior a data_inicio.",
+        )
+
+    try:
+        return consultar_receita_hemodinamica(
+            session=session,
+            data_inicio=data_inicio,
+            data_fim=data_fim,
+            cd_convenio=_normalizar_convenios(cd_convenio),
+            procedimento=procedimento,
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail="Não foi possível consultar a receita da Hemodinâmica no MV.",
+        ) from exc
+
+
+@router.get(
     "/indicadores-hospitalares/faturamento",
     status_code=HTTPStatus.OK,
 )
@@ -1716,6 +2658,8 @@ def consultar_indicadores_hospitalares_faturamento(
     try:
         rows = session.execute(CONSULTA_FATURAMENTO_CONVENIO, params).mappings().all()
         agregado_rows = session.execute(CONSULTA_FATURAMENTO_AGREGADO, params).mappings().all()
+        sus_pbix_rows = session.execute(CONSULTA_FATURAMENTO_SUS_PBIX, params).mappings().all()
+        remessa_pbix_rows = session.execute(CONSULTA_FATURAMENTO_REMESSA_PBIX, params).mappings().all()
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1724,12 +2668,179 @@ def consultar_indicadores_hospitalares_faturamento(
 
     faturamento = _rows_to_dict(rows)
     agregados = _rows_to_dict(agregado_rows)
+    faturamento_sus_pbix = _rows_to_dict(sus_pbix_rows)
+    faturamento_remessa_pbix = _rows_to_dict(remessa_pbix_rows)
 
     def por_nivel(nivel: str):
         return [row for row in agregados if row.get("nivel") == nivel]
 
     resumo_lista = por_nivel("GERAL")
     resumo_faturamento = resumo_lista[0] if resumo_lista else {}
+    original_convenio_rows = por_nivel("CONVENIO")
+    convenio_rows = [
+        row for row in original_convenio_rows
+        if str(row.get("cd_convenio") or "") != "1"
+        and "SUS" not in str(row.get("nm_convenio") or "").upper()
+    ]
+    sus_total = next(
+        (row for row in faturamento_sus_pbix if row.get("grupo") == "SUS_TOTAL"),
+        None,
+    )
+    if sus_total:
+        def sus_row(grupo: str):
+            return next((row for row in faturamento_sus_pbix if row.get("grupo") == grupo), {})
+
+        valor_estado = float(_json_value(sus_row("ESTADO").get("valor")) or 0)
+        pacientes_estado = int(_json_value(sus_row("ESTADO").get("qtd_pacientes")) or 0)
+        valor_municipio = float(_json_value(sus_row("MUNICIPIO").get("valor")) or 0)
+        pacientes_municipio = int(_json_value(sus_row("MUNICIPIO").get("qtd_pacientes")) or 0)
+        valor_sus_combinado = round(valor_estado + valor_municipio, 2)
+        pacientes_sus_combinado = pacientes_estado + pacientes_municipio
+        faturamento_sus_pbix.append({
+            "grupo": "SUS_TOTAL_ESTADO_MUNICIPIO",
+            "valor": valor_sus_combinado,
+            "qtd_pacientes": pacientes_sus_combinado,
+        })
+
+        def append_sus_convenio(chave: str, nome: str, valor: float, pacientes: int):
+            if valor <= 0 and pacientes <= 0:
+                return
+            convenio_rows.append({
+                "nivel": "CONVENIO",
+                "chave": chave,
+                "descricao": nome,
+                "tp_atendimento": None,
+                "tipo_atendimento": None,
+                "cd_convenio": 1,
+                "nm_convenio": nome,
+                "cd_prestador": None,
+                "nm_prestador": None,
+                "producao_total": valor,
+                "producao_aberta": 0,
+                "contas_fechadas": valor,
+                "em_remessa": valor,
+                "faturado_em_remessa": valor,
+                "valor_bruto_original": valor,
+                "qtd_itens": 0,
+                "qtd_contas": 0,
+                "qtd_atendimentos": pacientes,
+                "qtd_pacientes": pacientes,
+                "qtd_pacientes_em_remessa": pacientes,
+                "qtd_itens_pacote": 0,
+                "ticket_medio_atendimento": None,
+                "ticket_medio_conta": None,
+                "perc_faturado_remessa": 1,
+                "fonte": "PBIX_FATUSUS",
+            })
+
+        append_sus_convenio("SUS_ESTADO_PBIX", "SUS Estado", round(valor_estado, 2), pacientes_estado)
+        append_sus_convenio("SUS_MUNICIPIO_PBIX", "SUS Município", round(valor_municipio, 2), pacientes_municipio)
+
+    def pbix_convenio_row(row):
+        valor = float(_json_value(row.get("valor")) or 0)
+        pacientes = int(_json_value(row.get("qtd_pacientes")) or 0)
+        return {
+            "nivel": "CONVENIO",
+            "chave": str(row.get("cod_convenio") or row.get("grupo") or ""),
+            "descricao": row.get("nome_convenio") or row.get("grupo"),
+            "tp_atendimento": None,
+            "tipo_atendimento": None,
+            "cd_convenio": row.get("cod_convenio"),
+            "nm_convenio": row.get("nome_convenio") or row.get("grupo"),
+            "cd_prestador": None,
+            "nm_prestador": None,
+            "producao_total": valor,
+            "producao_aberta": 0,
+            "contas_fechadas": valor,
+            "em_remessa": valor,
+            "faturado_em_remessa": valor,
+            "valor_bruto_original": valor,
+            "qtd_itens": 0,
+            "qtd_contas": int(_json_value(row.get("qtd_contas")) or 0),
+            "qtd_atendimentos": int(_json_value(row.get("qtd_atendimentos")) or 0),
+            "qtd_pacientes": pacientes,
+            "qtd_pacientes_em_remessa": pacientes,
+            "qtd_itens_pacote": 0,
+            "ticket_medio_atendimento": None,
+            "ticket_medio_conta": None,
+            "perc_faturado_remessa": 1,
+            "fonte": "PBIX_FATURA_REMESSA",
+        }
+
+    faturamento_pbix_por_convenio = [
+        pbix_convenio_row(row)
+        for row in faturamento_remessa_pbix
+    ]
+
+    def append_pbix_sus(chave: str, nome: str, valor: float, pacientes: int):
+        if valor <= 0 and pacientes <= 0:
+            return
+        faturamento_pbix_por_convenio.append(pbix_convenio_row({
+            "grupo": chave,
+            "cod_convenio": 1,
+            "nome_convenio": nome,
+            "valor": round(valor, 2),
+            "qtd_contas": 0,
+            "qtd_atendimentos": pacientes,
+            "qtd_pacientes": pacientes,
+        }))
+
+    sus_pbix_total_row = next(
+        (row for row in faturamento_sus_pbix if row.get("grupo") == "SUS_TOTAL"),
+        {},
+    )
+    sus_pbix_estado_row = next(
+        (row for row in faturamento_sus_pbix if row.get("grupo") == "ESTADO"),
+        {},
+    )
+    sus_pbix_municipio_row = next(
+        (row for row in faturamento_sus_pbix if row.get("grupo") == "MUNICIPIO"),
+        {},
+    )
+    valor_pbix_estado = float(_json_value(sus_pbix_estado_row.get("valor")) or 0)
+    valor_pbix_municipio = float(_json_value(sus_pbix_municipio_row.get("valor")) or 0)
+    valor_pbix_sus_total = float(_json_value(sus_pbix_total_row.get("valor")) or 0)
+    valor_pbix_sus_residual = round(
+        valor_pbix_sus_total - valor_pbix_estado - valor_pbix_municipio,
+        2,
+    )
+    pacientes_pbix_estado = int(_json_value(sus_pbix_estado_row.get("qtd_pacientes")) or 0)
+    pacientes_pbix_municipio = int(_json_value(sus_pbix_municipio_row.get("qtd_pacientes")) or 0)
+    pacientes_pbix_sus_total = int(_json_value(sus_pbix_total_row.get("qtd_pacientes")) or 0)
+    pacientes_pbix_sus_residual = max(
+        pacientes_pbix_sus_total - pacientes_pbix_estado - pacientes_pbix_municipio,
+        0,
+    )
+    append_pbix_sus("SUS_PBIX", "SUS", valor_pbix_sus_residual, pacientes_pbix_sus_residual)
+    append_pbix_sus("SUS_ESTADO_PBIX", "SUS Estado", valor_pbix_estado, pacientes_pbix_estado)
+    append_pbix_sus("SUS_MUNICIPIO_PBIX", "SUS Município", valor_pbix_municipio, pacientes_pbix_municipio)
+
+    resumo_faturamento_pbix = {
+        "nivel": "GERAL",
+        "chave": "GERAL",
+        "descricao": "Geral",
+        "producao_total": round(
+            sum(float(_json_value(row.get("producao_total")) or 0) for row in faturamento_pbix_por_convenio),
+            2,
+        ),
+        "producao_aberta": 0,
+        "contas_fechadas": round(
+            sum(float(_json_value(row.get("contas_fechadas")) or 0) for row in faturamento_pbix_por_convenio),
+            2,
+        ),
+        "em_remessa": round(
+            sum(float(_json_value(row.get("em_remessa")) or 0) for row in faturamento_pbix_por_convenio),
+            2,
+        ),
+        "faturado_em_remessa": round(
+            sum(float(_json_value(row.get("faturado_em_remessa")) or 0) for row in faturamento_pbix_por_convenio),
+            2,
+        ),
+        "qtd_contas": sum(int(_json_value(row.get("qtd_contas")) or 0) for row in faturamento_pbix_por_convenio),
+        "qtd_atendimentos": sum(int(_json_value(row.get("qtd_atendimentos")) or 0) for row in faturamento_pbix_por_convenio),
+        "qtd_pacientes": sum(int(_json_value(row.get("qtd_pacientes")) or 0) for row in faturamento_pbix_por_convenio),
+        "fonte": "PBIX",
+    }
 
     return {
         "periodo": {
@@ -1737,11 +2848,15 @@ def consultar_indicadores_hospitalares_faturamento(
             "data_fim": data_fim.isoformat(),
         },
         "resumo_faturamento": resumo_faturamento,
+        "resumo_faturamento_pbix": resumo_faturamento_pbix,
         "faturamento_por_tipo_atendimento": por_nivel("TIPO_ATENDIMENTO"),
-        "faturamento_por_convenio": por_nivel("CONVENIO"),
+        "faturamento_por_convenio": convenio_rows,
+        "faturamento_pbix_por_convenio": faturamento_pbix_por_convenio,
+        "faturamento_remessa_pbix": faturamento_remessa_pbix,
         "faturamento_por_prestador": por_nivel("PRESTADOR"),
         "faturamento_por_tipo_convenio": por_nivel("TIPO_CONVENIO"),
         "faturamento_por_tipo_prestador": por_nivel("TIPO_PRESTADOR"),
+        "faturamento_sus_pbix": faturamento_sus_pbix,
         "faturamento": faturamento,
         "total": len(faturamento),
         "limite": limite,

@@ -1,7 +1,7 @@
 """create manual IPM item links
 
 Revision ID: 20260903_051
-Revises: 20260826_048
+Revises: 20260827_050
 Create Date: 2026-09-03 10:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = '20260903_051'
-down_revision: Union[str, Sequence[str], None] = '20260826_048'
+down_revision: Union[str, Sequence[str], None] = '20260827_050'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

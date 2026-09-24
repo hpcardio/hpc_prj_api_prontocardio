@@ -83,6 +83,7 @@ class FilterPage(BaseModel):
 
 
 class FilterSearch(FilterPage):
+    processo: str | None = None
     cd_remessa: int | None = None
     cd_atendimento: int | None = None
     cd_reg: int | None = None
@@ -593,6 +594,7 @@ class RegistroGlosaCreate(BaseModel):
     valor: Decimal
     processo_controle_fatura_gab: str
     processo_recurso: str | None = None
+    numero_lote: str | None = Field(default=None, max_length=255)
     data_glosa: date
     motivo_glosa: str
     descricao_glosa: str
@@ -647,6 +649,12 @@ class RegistroGlosaCreate(BaseModel):
     @field_validator('processo_recurso', mode='before')
     @classmethod
     def normalize_optional_processo_recurso(cls, value):
+        text = str(value or '').strip()
+        return text or None
+
+    @field_validator('numero_lote', mode='before')
+    @classmethod
+    def normalize_optional_numero_lote(cls, value):
         text = str(value or '').strip()
         return text or None
 
@@ -744,6 +752,7 @@ class RegistroGlosaPublic(BaseModel):
     valor: Decimal
     processo_controle_fatura_gab: str
     processo_recurso: str | None = None
+    numero_lote: str | None = None
     data_glosa: date
     motivo_glosa: str | None
     descricao_glosa: str
@@ -1536,6 +1545,7 @@ class ItemFollowUpGlosaPublic(BaseModel):
     cd_tuss: str | None = None
     codigo_servico: str
     numero_protocolo: str | None = None
+    numero_lote: str | None = None
     codigo_beneficiario: str | None = None
     referencia: date | None = None
     valor_protocolo: Decimal | None = None
@@ -1614,6 +1624,7 @@ class CardFollowUpGlosaPublic(BaseModel):
     valor_glosa_pendente: Decimal
     valor_total_tratado: Decimal
     possui_recurso: bool = False
+    possui_pendencia_associacao_manual: bool = False
     processo: ProcessoFollowUpGlosaPublic
     recebimentos: list[RecebimentoFollowUpGlosaPublic] = Field(
         default_factory=list
@@ -1629,6 +1640,22 @@ class FollowUpGlosasList(BaseModel):
     valor_total_glosado: Decimal
     valor_total_pendente: Decimal
     valor_total_tratado: Decimal
+    limit: int
+    offset: int
+
+
+class ProcessoRecursosPublic(BaseModel):
+    processo_original: str
+    processo_recurso: str | None = None
+    cards: list[CardFollowUpGlosaPublic]
+    detalhes_carregados: bool
+
+
+class ProcessosRecursosList(BaseModel):
+    processos: list[ProcessoRecursosPublic]
+    total: int
+    quantidade_com_processo_recurso: int
+    quantidade_sem_processo_recurso: int
     limit: int
     offset: int
 

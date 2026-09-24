@@ -1,26 +1,125 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import base64
+import hashlib
+import hmac
 from http import HTTPStatus
+import json
+import os
+import secrets
 import threading
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_oracle
+from app_prontocardio.settings import Settings
 
 router = APIRouter(prefix='/farmacia', tags=['farmacia'])
 
-FARMACIA_ESTOQUE_ID = 2
+ESTOQUE_BY_PROFILE = {
+    'FARMACIA': 2,
+    'CAFA': 1,
+}
+PANEL_USERS_ENV = 'PAINEL_SUPRI_FARM_USERS'
+PANEL_TOKEN_TTL_SECONDS = 12 * 60 * 60
+REQUEST_TYPE_DESCRIPTIONS = {
+    'C': 'Devolução/Paciente',
+    'D': 'Devolução/Setores',
+    'E': 'Pedido/Estoque',
+    'P': 'Pedido/Paciente',
+    'S': 'Pedido/Setores',
+    'T': 'Pedido/Empresa',
+}
+
+settings = Settings()
 
 _cache_lock = threading.Lock()
-_last_rows: list[dict] = []
-_last_success_at: datetime | None = None
+_last_rows_by_profile: dict[str, list[dict]] = {}
+_last_success_at_by_profile: dict[str, datetime] = {}
+
+
+class PainelLoginRequest(BaseModel):
+    usuario: str
+    senha: str
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat()
+
+
+def _normalize_profile(profile: str | None) -> str:
+    profile_key = str(profile or '').strip().upper()
+    if profile_key in ESTOQUE_BY_PROFILE:
+        return profile_key
+
+    return 'FARMACIA'
+
+
+def _urlsafe_json(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(',', ':')).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+
+
+def _sign_token(payload: dict) -> str:
+    body = _urlsafe_json(payload)
+    signature = hmac.new(
+        settings.SECRET_KEY.encode(),
+        body.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f'{body}.{signature}'
+
+
+def _panel_users() -> dict[str, dict[str, str]]:
+    raw = os.getenv(PANEL_USERS_ENV, '')
+    users = {}
+    for entry in raw.split(','):
+        parts = [part.strip() for part in entry.split(':')]
+        if len(parts) < 3:
+            continue
+
+        username, password, profile = parts[:3]
+        display_name = parts[3] if len(parts) > 3 and parts[3] else profile
+        if username and password and profile:
+            users[username.lower()] = {
+                'username': username,
+                'password': password,
+                'profile': profile.upper(),
+                'display_name': display_name,
+            }
+
+    return users
+
+
+@router.post('/auth/login', status_code=HTTPStatus.OK)
+def login_painel_farmacia(payload: PainelLoginRequest):
+    users = _panel_users()
+    user = users.get(payload.usuario.strip().lower())
+    if not user or not secrets.compare_digest(user['password'], payload.senha):
+        raise HTTPException(
+            status_code=HTTPStatus.UNAUTHORIZED,
+            detail='Usuario ou senha invalidos.',
+        )
+
+    expires_at = int(time.time()) + PANEL_TOKEN_TTL_SECONDS
+    token_payload = {
+        'sub': user['username'],
+        'profile': user['profile'],
+        'exp': expires_at,
+    }
+
+    return {
+        'usuario': user['username'],
+        'profile': user['profile'],
+        'profileName': user['display_name'],
+        'accessToken': _sign_token(token_payload),
+        'expiresAt': datetime.fromtimestamp(expires_at).isoformat(),
+    }
 
 
 def _first_value(row: dict, *names: str, default=None):
@@ -137,8 +236,18 @@ def _cancellation_reason(row: dict) -> str:
 def _normalize_row(row) -> dict:
     row = dict(row)
     data_solicitacao = _first_value(row, 'data_solicitacao')
+    data_atendimento = _first_value(row, 'data_atendimento')
     data_cancelamento = _first_value(row, 'data_cancelamento')
     paciente = _first_value(row, 'paciente', default='')
+    request_type = _text_value(
+        _first_value(
+            row,
+            'tipo_solicitacao',
+            'tp_solsai_pro',
+            'tp_sol_sai_pro',
+            default='',
+        )
+    ).upper()
 
     return {
         'solicitacao': _first_value(row, 'solicitacao'),
@@ -157,7 +266,22 @@ def _normalize_row(row) -> dict:
         'setorInternacao': _first_value(row, 'setor_internacao', default=''),
         'paciente': paciente or 'REPOSIÇÃO AUTOMÁTICA / COTAS',
         'prescricao': _first_value(row, 'prescricao', default=''),
+        'tipoSolicitacao': request_type,
+        'descricaoTipoSolicitacao': REQUEST_TYPE_DESCRIPTIONS.get(
+            request_type, ''
+        ),
+        'codigoUsuarioSolicitante': _first_value(
+            row, 'codigo_usuario_solicitante', default=''
+        ),
+        'usuarioSolicitante': _first_value(
+            row, 'usuario_solicitante', default=''
+        ),
+        'codigoUsuarioAtendente': _first_value(
+            row, 'codigo_usuario_atendente', default=''
+        ),
+        'usuarioAtendente': _first_value(row, 'usuario_atendente', default=''),
         'dataSolicitacao': _date_to_iso(data_solicitacao),
+        'dataAtendimento': _date_to_iso(data_atendimento),
         'dataCancelamento': _date_to_iso(data_cancelamento),
         'codigoMotivoCancelamento': _code_value(
             _first_value(row, 'codigo_motivo_cancelamento', default='')
@@ -400,6 +524,7 @@ def _query_soulmv(
     include_atendidas: bool,
     date_from: date,
     date_to: date,
+    estoque_id: int,
     search: str = '',
 ) -> list[dict]:
     max_rows = min(1000, max(1, max_rows))
@@ -445,6 +570,49 @@ def _query_soulmv(
                       ) as rn
                     from dbamv.mov_int mi
                    where mi.cd_leito is not null
+                  )
+               where rn = 1
+            ),
+            solicitacoes_base as (
+              select sp_base.cd_solsai_pro
+                from dbamv.solsai_pro sp_base
+               where cast(nvl(sp_base.hr_solsai_pro, sp_base.dt_solsai_pro) as date)
+                     >= to_date(:date_from, 'YYYY-MM-DD')
+                 and cast(nvl(sp_base.hr_solsai_pro, sp_base.dt_solsai_pro) as date)
+                     < to_date(:date_to, 'YYYY-MM-DD') + 1
+                 and sp_base.cd_estoque = :estoque_id
+            ),
+            ult_atendimento as (
+              select cd_solsai_pro, codigo_usuario_atendente, data_atendimento
+                from (
+                  select
+                      me.cd_solsai_pro,
+                      nvl(me.cd_usuario_entrega, me.cd_usuario)
+                        as codigo_usuario_atendente,
+                      coalesce(
+                        me.hr_entrega,
+                        me.dt_entrega,
+                        me.hr_mvto_estoque,
+                        me.dt_mvto_estoque
+                      ) as data_atendimento,
+                      row_number() over (
+                        partition by me.cd_solsai_pro
+                        order by coalesce(
+                                   me.hr_entrega,
+                                   me.dt_entrega,
+                                   me.hr_mvto_estoque,
+                                   me.dt_mvto_estoque
+                                 ) desc nulls last,
+                                 me.cd_mvto_estoque desc
+                      ) as rn
+                    from dbamv.mvto_estoque me
+                    join solicitacoes_base sb
+                      on sb.cd_solsai_pro = me.cd_solsai_pro
+                   where me.cd_solsai_pro is not null
+                     and (
+                          me.cd_usuario is not null
+                       or me.cd_usuario_entrega is not null
+                     )
                 )
                where rn = 1
             )
@@ -472,8 +640,15 @@ def _query_soulmv(
                 sti.nm_setor as setor_internacao,
                 pac.nm_paciente as paciente,
                 sp.cd_pre_med as prescricao,
+                sp.tp_solsai_pro as tipo_solicitacao,
+                sp.cd_usuario as codigo_usuario_solicitante,
+                nvl(usu_sol.nm_usuario, sp.cd_usuario) as usuario_solicitante,
+                uat.codigo_usuario_atendente as codigo_usuario_atendente,
+                nvl(usu_at.nm_usuario, uat.codigo_usuario_atendente)
+                  as usuario_atendente,
                 cast(nvl(sp.hr_solsai_pro, sp.dt_solsai_pro) as date)
                   as data_solicitacao,
+                uat.data_atendimento as data_atendimento,
                 sp.dt_cancelamento as data_cancelamento,
                 sp.cd_motivo_canc as codigo_motivo_cancelamento,
                 {cancel_description},
@@ -503,6 +678,12 @@ def _query_soulmv(
                 on lei.cd_leito = coalesce(atd.cd_leito, um.cd_leito)
               left join dbamv.unid_int ui on ui.cd_unid_int = lei.cd_unid_int
               left join dbamv.setor sti on sti.cd_setor = ui.cd_setor
+              left join ult_atendimento uat
+                on uat.cd_solsai_pro = sp.cd_solsai_pro
+              left join dbasgu.usuarios usu_sol
+                on usu_sol.cd_usuario = sp.cd_usuario
+              left join dbasgu.usuarios usu_at
+                on usu_at.cd_usuario = uat.codigo_usuario_atendente
               {cancel_join}
              where cast(nvl(sp.hr_solsai_pro, sp.dt_solsai_pro) as date)
                    >= to_date(:date_from, 'YYYY-MM-DD')
@@ -545,7 +726,7 @@ def _query_soulmv(
                 'date_to': date_to.isoformat(),
                 'max_rows': max_rows,
                 'search': search,
-                'estoque_id': FARMACIA_ESTOQUE_ID,
+                'estoque_id': estoque_id,
             },
         )
         .mappings()
@@ -571,9 +752,11 @@ def listar_solicitacoes_farmacia(
     date_to: date | None = Query(default=None),
     include_atendidas: bool = Query(default=True),
     search: str = Query(default=''),
+    profile: str = Query(default='FARMACIA'),
     session: Session = Depends(get_session_oracle),
 ):
-    global _last_rows, _last_success_at
+    profile_key = _normalize_profile(profile)
+    estoque_id = ESTOQUE_BY_PROFILE[profile_key]
     try:
         if date_from is None:
             if lookback_hours:
@@ -589,17 +772,19 @@ def listar_solicitacoes_farmacia(
             include_atendidas=include_atendidas,
             date_from=date_from,
             date_to=date_to,
+            estoque_id=estoque_id,
             search=search,
         )
     except SQLAlchemyError as exc:
         with _cache_lock:
-            cached_rows = list(_last_rows)
-            cached_at = _last_success_at
+            cached_rows = list(_last_rows_by_profile.get(profile_key, []))
+            cached_at = _last_success_at_by_profile.get(profile_key)
 
         if cached_rows:
             return {
                 'source': 'cache',
                 'updatedAt': cached_at.isoformat() if cached_at else _now_iso(),
+                'profile': profile_key,
                 'warning': (
                     'Nao foi possivel consultar o SoulMV. '
                     'Exibindo ultimo retorno valido.'
@@ -613,10 +798,15 @@ def listar_solicitacoes_farmacia(
         ) from exc
 
     with _cache_lock:
-        _last_rows = rows
-        _last_success_at = datetime.now()
+        _last_rows_by_profile[profile_key] = rows
+        _last_success_at_by_profile[profile_key] = datetime.now()
 
-    return {'source': 'soulmv', 'updatedAt': _now_iso(), 'rows': rows}
+    return {
+        'source': 'soulmv',
+        'updatedAt': _now_iso(),
+        'profile': profile_key,
+        'rows': rows,
+    }
 
 
 @router.get('/health', status_code=HTTPStatus.OK)

@@ -11,3 +11,15 @@ __pycache__
 *.sqlite3
 *.db
 .env
+.env.*
+.codex*
+*.bak*
+*.backup-*
+*.before-*
+*.orig
+backups
+data
+htmlcov
+mobile-auth-release-*
+relatorios
+server

@@ -24,9 +24,11 @@ RUN pip install \
     --index-url "${PIP_INDEX_URL}" \
     "poetry==${POETRY_VERSION}" \
     && poetry config installer.max-workers 10 \
-    && poetry install --no-interaction --no-ansi --without dev --no-root
+    && poetry install --no-interaction --no-ansi --without dev --no-root \
+    && pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
+        "pillow==12.3.0" "reportlab==4.5.1"
 
 COPY . .
 
 EXPOSE 8000
-CMD ["sh", "-c", "poetry run uvicorn --host 0.0.0.0 --port ${PORT:-8000} app_prontocardio.app:app"]
+CMD ["sh", "-c", "exec poetry run uvicorn --host 0.0.0.0 --port ${PORT:-8000} app_prontocardio.app:app"]

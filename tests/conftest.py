@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app_prontocardio import security as security_module
 from app_prontocardio.app import app
 from app_prontocardio.app import settings as app_settings
 from app_prontocardio.database import get_session_postgres
@@ -15,7 +16,7 @@ app_settings.RUN_MIGRATIONS_ON_STARTUP = False
 
 
 @pytest.fixture
-def session():
+def session(monkeypatch):
     """Sessão da engine para realizar transações"""
 
     engine = create_engine(
@@ -29,6 +30,7 @@ def session():
         table.schema = None
 
     table_registry.metadata.create_all(engine)
+    monkeypatch.setattr(security_module, 'postgres_engine', engine)
 
     with Session(engine) as session:
         yield session
