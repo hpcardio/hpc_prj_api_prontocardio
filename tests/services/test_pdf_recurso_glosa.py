@@ -11,7 +11,7 @@ from app_prontocardio.services.pdf_recurso_glosa import (
 QUANTIDADE_LINHAS_ESPERADA = 2
 QUANTIDADE_LINHAS_DUAS_REMESSAS = 4
 TAMANHO_MINIMO_PDF = 1000
-QUANTIDADE_COLUNAS_CAFAZ = 12
+QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO = 12
 
 
 def _card_recurso():
@@ -25,6 +25,7 @@ def _card_recurso():
     }
     itens = [
         {
+            'conta': '22040',
             'nm_paciente': 'Paciente Um',
             'numero_protocolo': '5519206',
             'dt_alta': '2026-04-18T10:00:00',
@@ -37,6 +38,7 @@ def _card_recurso():
             'registro_recusa': registro,
         },
         {
+            'conta': '22040',
             'nm_paciente': 'Paciente Um',
             'numero_protocolo': '5519206',
             'dt_alta': '2026-04-18T10:00:00',
@@ -157,7 +159,7 @@ def test_pdf_cafaz_exibe_layout_especifico_sem_remessa_ou_lote(monkeypatch):
     gerar_pdf_recurso_glosa(card)
 
     assert tabelas[0][0][0].getPlainText() == 'RECURSO DE GLOSA CAFAZ 2026'
-    assert len(tabelas[1][0]) == QUANTIDADE_COLUNAS_CAFAZ
+    assert len(tabelas[1][0]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
     assert tabelas[1][0][0].getPlainText() == 'CNPJ'
     assert tabelas[1][0][2].getPlainText() == 'PRESTADOR'
     assert tabelas[1][2][0].getPlainText() == 'PESSOA / FONE / E-MAIL'
@@ -170,8 +172,43 @@ def test_pdf_cafaz_exibe_layout_especifico_sem_remessa_ou_lote(monkeypatch):
         'VALOR GLOSADO', 'MOTIVO DA GLOSA', 'VALOR DO RECURSO',
         'JUSTIFICATIVA',
     ]
-    assert len(tabela_itens[1]) == QUANTIDADE_COLUNAS_CAFAZ
+    assert len(tabela_itens[1]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
     assert tabela_itens[1][0].getPlainText() == 'P193251/2026'
+    assert tabela_itens[1][1].getPlainText() == 'Paciente Um'
+    assert tabela_itens[1][2].getPlainText() == '18/04/2026'
+    assert tabela_itens[-1][9].getPlainText() == 'TOTAL'
+    assert tabela_itens[-1][10].getPlainText() == 'R$ 520,14'
+
+
+def test_pdf_fusex_exibe_layout_com_numero_da_fatura(monkeypatch):
+    tabelas = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        tabelas.append(dados)
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+    card = _card_recurso()
+    card['convenio'] = 'FUSEX'
+    gerar_pdf_recurso_glosa(card)
+
+    assert tabelas[0][0][0].getPlainText() == 'RECURSO DE GLOSA FUSEX 2026'
+    assert len(tabelas[1][0]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
+    assert tabelas[1][0][0].getPlainText() == 'CNPJ'
+    assert tabelas[1][0][2].getPlainText() == 'PRESTADOR'
+    assert tabelas[1][2][0].getPlainText() == 'PESSOA / FONE / E-MAIL'
+    assert tabelas[1][2][6].getPlainText() == 'DATA DO RECURSO'
+    assert tabelas[1][2][9].getPlainText() == 'VALOR TOTAL DO RECURSO'
+    tabela_itens = tabelas[-1]
+    assert [celula.getPlainText() for celula in tabela_itens[0]] == [
+        'Nº DA FATURA', 'PACIENTE', 'DATA', 'ITEM GLOSADO',
+        'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES', 'VALOR PAGO',
+        'VALOR GLOSADO', 'MOTIVO DA GLOSA', 'VALOR DO RECURSO',
+        'JUSTIFICATIVA',
+    ]
+    assert len(tabela_itens[1]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
+    assert tabela_itens[1][0].getPlainText() == '22040'
     assert tabela_itens[1][1].getPlainText() == 'Paciente Um'
     assert tabela_itens[1][2].getPlainText() == '18/04/2026'
     assert tabela_itens[-1][9].getPlainText() == 'TOTAL'

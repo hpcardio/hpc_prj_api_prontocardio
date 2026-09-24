@@ -815,6 +815,7 @@ def _cards_recursos_triagem(
             {
                 'nm_paciente': registro.nm_paciente,
                 'nm_convenio': registro.convenio,
+                'conta': registro.conta,
                 'numero_lote': registro.numero_lote,
                 'dt_alta': registro.data_alta,
                 'dt_atendimento': registro.data_atendimento,
