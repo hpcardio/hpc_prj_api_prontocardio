@@ -6,6 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.dialects import oracle
 
 from app_prontocardio.models import (
     ModelContaAtendimento,
@@ -14,11 +16,16 @@ from app_prontocardio.models import (
     RegistroGlosaDemonstrativoIpm,
 )
 from app_prontocardio.routers.app_glosas import (
+    _aplicar_filtros_conta_atendimento,
     _executar_conta_atendimento_sem_duplicidade,
+    _filtrar_linhas_por_guia,
+    _resolver_filtro_guia,
+    _resolver_filtro_processo,
     consultar_convenios,
     consultar_glosas_registradas,
     deletar_glosa,
     editar_glosa,
+    gerar_pdf_recurso_triagem,
     registrar_glosa,
     registrar_recebimento_glosa,
     salvar_descricoes_agrupadas_glosa,
@@ -113,6 +120,108 @@ def test_conta_atendimento_remove_identidades_repetidas_da_view():
     session.execute.assert_called_once_with('consulta')
     resultado.unique.assert_called_once_with()
     assert linhas == ['linha-unica']
+
+
+def test_filtro_por_guia_aplica_busca_exata_na_view_oracle():
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        {'nr_guia': 'GUIA-ABC'},
+    )
+    sql = str(
+        query.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'NR_GUIA' in sql
+    assert "NR_GUIA = 'GUIA-ABC'" in sql
+
+
+def test_filtro_guia_restringe_view_aos_atendimentos_da_tabela_guia():
+    session = Mock()
+    session.scalars.return_value = [313840, 313841]
+
+    filtros = _resolver_filtro_guia(session, {'nr_guia': '363150'})
+
+    assert filtros == {
+        'guia_resolvida': '363150',
+        'cd_atendimento': (313840, 313841),
+    }
+    consulta, parametros = session.scalars.call_args.args
+    assert 'FROM dbamv.guia' in str(consulta)
+    assert parametros == {'nr_guia': '363150'}
+
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        filtros,
+    )
+    sql = str(
+        query.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'CD_ATENDIMENTO IN (313840, 313841)' in sql
+    assert 'NR_GUIA =' not in sql
+
+
+def test_filtro_guia_descarta_outras_guias_do_mesmo_atendimento():
+    guia_correta = Mock(nr_guia='363150')
+    outra_guia = Mock(nr_guia='999999')
+
+    assert _filtrar_linhas_por_guia(
+        [guia_correta, outra_guia],
+        '363150',
+    ) == [guia_correta]
+
+
+def test_filtro_processo_resolve_tratativas_em_identidades_exatas():
+    session = Mock()
+    session.execute.return_value.all.return_value = [
+        (18289, 313840, 23475, 51),
+        (18289, 313840, 23475, 52),
+    ]
+
+    filtros = _resolver_filtro_processo(
+        session,
+        {'processo': ' P239088/2026 ', 'nm_convenio': 'IPM'},
+    )
+
+    assert filtros == {
+        'nm_convenio': 'IPM',
+        'identidades_processo': (
+            (18289, 313840, 23475, 51),
+            (18289, 313840, 23475, 52),
+        ),
+    }
+    sql_postgres = str(session.execute.call_args.args[0]).lower()
+    assert 'processo_controle_fatura_gab' in sql_postgres
+    assert 'origem_registro' in sql_postgres
+    assert 'dt_recurso is not null' in sql_postgres
+
+
+def test_filtro_processo_aplica_itens_exatos_na_view_oracle():
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        {
+            'identidades_processo': (
+                (18289, 313840, 23475, 51),
+                (18289, 313840, 23475, 52),
+            )
+        },
+    )
+    sql = str(query.compile(
+        dialect=oracle.dialect(),
+        compile_kwargs={'literal_binds': True},
+    )).upper()
+
+    assert 'CD_REMESSA = 18289' in sql
+    assert 'CD_ATENDIMENTO = 313840' in sql
+    assert 'CD_REG = 23475' in sql
+    assert 'CD_LANCAMENTO = 51' in sql
+    assert 'CD_LANCAMENTO = 52' in sql
 def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
     payload = registro_glosa_payload(sn_ativo='not')
 
@@ -149,6 +258,66 @@ def test_registro_triagem_preserva_contrato_dos_indicadores(
     assert registro.origem_registro == 'triagem'
     assert registro.status_tratativa == 'recurso'
     assert registro.valor_indicador == Decimal('12.31')
+
+
+def test_lote_opcional_e_persistido_no_registro(session, usuario_teste):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(numero_lote='  LOTE-MAIDA-42  ')
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert registro.numero_lote == 'LOTE-MAIDA-42'
+    assert RegistroGlosaCreate(
+        **registro_glosa_payload(numero_lote='  ')
+    ).numero_lote is None
+
+
+def test_pdf_da_triagem_usa_mesmo_gerador_e_inclui_lote(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                convenio='ISSEC',
+                numero_lote='LOTE-MAIDA-42',
+                processo_controle_fatura_gab='PROC-TRIAGEM/2026',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    cards_recebidos = []
+
+    def gerar_pdf_fake(cards):
+        cards_recebidos.extend(cards)
+        return b'%PDF-1.7\ntriagem'
+
+    monkeypatch.setattr(
+        'app_prontocardio.routers.app_glosas.gerar_pdf_recurso_glosa',
+        gerar_pdf_fake,
+    )
+
+    response = gerar_pdf_recurso_triagem(
+        usuario_atual=usuario_teste,
+        session=session,
+        processo_original=' proc-triagem/2026 ',
+        download=False,
+    )
+
+    item = cards_recebidos[0]['pacientes'][0]['itens'][0]
+    assert cards_recebidos[0]['convenio'] == 'ISSEC'
+    assert item['nm_convenio'] == 'ISSEC'
+    assert item['registro_recusa'].id == registro.id
+    assert item['numero_lote'] == 'LOTE-MAIDA-42'
+    assert response.body == b'%PDF-1.7\ntriagem'
+    assert response.headers['content-disposition'] == (
+        'inline; filename="recurso-glosa-proc-triagem-2026.pdf"'
+    )
 
 
 def test_desfazer_registro_independente_mantem_exclusao_logica(
@@ -193,6 +362,38 @@ def test_filtra_glosas_de_convenio_desabilitado(session):
         incluir_inativos=False,
     )
     assert response['glosas'] == []
+
+
+def test_filtra_glosas_registradas_por_guia_exata(session, usuario_teste):
+    registro_encontrado = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(guia='GUIA-ABC-123')
+        ),
+        usuario_teste,
+        session,
+    )
+    registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                conta=333710,
+                guia='OUTRA-GUIA',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    response = consultar_glosas_registradas(
+        usuario_atual=None,
+        campos_pesquisados=FilterSearch(nr_guia='GUIA-ABC-123'),
+        session=session,
+        tp_atendimento=None,
+        incluir_inativos=False,
+    )
+
+    assert [registro.id for registro in response['glosas']] == [
+        registro_encontrado.id
+    ]
 
 
 def test_convenio_habilitado_por_padrao(session):
@@ -442,6 +643,186 @@ def test_vinculo_da_linha_do_demonstrativo_migra_de_forma_idempotente(
     assert mesma_tratativa.id == tratativa.id
     assert vinculo.registro_glosa_id == tratativa.id
     assert outro_vinculo.registro_glosa_id == origem.id
+
+
+def test_tratativas_de_linhas_duplicadas_nao_somam_quantidades(
+    session,
+    usuario_teste,
+):
+    origem = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                valor='394.52',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    origem.processo_recurso = None
+    origem.qtd_recursado = None
+    origem.valor_recursado = None
+    origem.dt_recurso = None
+    linha_303 = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-demonstrativo-30348',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    linha_303.data_importacao = datetime(2026, 6, 10, 10, 0)
+    linha_91 = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-demonstrativo-91-04',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    linha_91.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add_all([linha_303, linha_91])
+    session.commit()
+
+    tratativa_303 = editar_glosa(
+        origem.id,
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='303.48',
+                demonstrativo_id_registro=linha_303.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    tratativa_91 = editar_glosa(
+        origem.id,
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='91.04',
+                demonstrativo_id_registro=linha_91.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert tratativa_303.id != tratativa_91.id
+    assert tratativa_303.valor_recursado == Decimal('303.48')
+    assert tratativa_91.valor_recursado == Decimal('91.04')
+    assert linha_303.registro_glosa_id == tratativa_303.id
+    assert linha_91.registro_glosa_id == tratativa_91.id
+
+
+def test_nova_tratativa_isola_e_migra_linha_do_demonstrativo(
+    session,
+    usuario_teste,
+):
+    origem = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                valor='394.52',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    origem.processo_recurso = None
+    origem.qtd_recursado = None
+    origem.valor_recursado = None
+    origem.dt_recurso = None
+    outra_tratativa = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='303.48',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    linha = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-pendente-91-04',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    linha.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add(linha)
+    session.commit()
+
+    tratativa = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='91.04',
+                demonstrativo_id_registro=linha.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    session.refresh(linha)
+    assert outra_tratativa.valor_recursado == Decimal('303.48')
+    assert tratativa.valor_recursado == Decimal('91.04')
+    assert linha.registro_glosa_id == tratativa.id
+
+
+def test_post_repetido_da_mesma_linha_atualiza_sem_somar_quantidade(
+    session,
+    usuario_teste,
+):
+    existente = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='303.48',
+                valor_glosado='303.48',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    linha = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-ja-tratada-303-48',
+        registro_glosa_id=existente.id,
+        criterio_correspondencia='teste',
+    )
+    linha.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add(linha)
+    session.commit()
+
+    atualizado = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='303.48',
+                valor_glosado='303.48',
+                descricao_glosa='descricao atualizada',
+                demonstrativo_id_registro=linha.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert atualizado.id == existente.id
+    assert atualizado.descricao_glosa == 'descricao atualizada'
 
 
 def test_salva_descricoes_agrupadas_separadas_por_tipo(

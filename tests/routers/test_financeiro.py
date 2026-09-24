@@ -35,6 +35,7 @@ from app_prontocardio.schema import (
     ConciliacaoRemessaPublic,
     ConciliacoesGerenciamentoList,
     ConciliacoesSemRecebimentoList,
+    ItemFollowUpGlosaPublic,
     RecebimentoRemessaCreate,
     RecebimentoRemessaUpdate,
     RegistroGlosaCreate,
@@ -86,6 +87,29 @@ def test_schema_do_card_preserva_indicacao_de_recurso():
     )
 
     assert card.possui_recurso is True
+
+
+def test_schema_do_item_follow_up_preserva_numero_lote_do_demonstrativo():
+    item = financeiro._item_demonstrativo_follow_up(
+        {
+            'id_registro': 'linha-lote-1',
+            'numero_lote': 'LOTE-MAIDA-42',
+            'valor_processado': Decimal('100.00'),
+            'valor_glosa': Decimal('10.00'),
+        },
+        {
+            'cd_remessa': 987,
+            'cd_reg': 456,
+            'cd_lancamento': 3,
+            'dt_lancamento': datetime(2026, 7, 2, 9, 30),
+        },
+        None,
+        None,
+    )
+
+    serializado = ItemFollowUpGlosaPublic.model_validate(item).model_dump()
+
+    assert serializado['numero_lote'] == 'LOTE-MAIDA-42'
 
 
 def test_protocolo_cogestao_completa_card_sem_demonstrativo(monkeypatch):
@@ -323,6 +347,30 @@ def test_resumo_da_cogestao_nao_confunde_acato_com_recurso():
 
     assert valor == Decimal('564.36')
     assert possui_recurso is False
+
+
+def test_resumo_da_cogestao_limita_tratado_ao_valor_glosado():
+    tratativas = {
+        ('p239088/2026', 18358, 1, 2, 3): [
+            SimpleNamespace(
+                sn_ativo='true',
+                status_tratativa='recurso',
+                valor_recursado=Decimal('4062.11'),
+            )
+        ]
+    }
+
+    valor, possui_recurso = (
+        financeiro._resumo_tratativas_cogestao_remessa(
+            tratativas,
+            'P239088/2026',
+            18358,
+            Decimal('3223.12'),
+        )
+    )
+
+    assert valor == Decimal('3223.12')
+    assert possui_recurso is True
 
 
 def test_marca_recurso_no_card_resumido_sem_carregar_pacientes():
@@ -699,6 +747,39 @@ def test_distribui_recurso_parcial_sem_duplicar_valor_tratado():
     ) == Decimal('200.00')
 
 
+def test_atribui_recurso_exato_apenas_a_linha_com_mesma_glosa():
+    pendente = SimpleNamespace(
+        id=1,
+        sn_ativo='true',
+        status_tratativa='pendente',
+        valor_recursado=None,
+    )
+    recurso = SimpleNamespace(
+        id=2,
+        sn_ativo='true',
+        status_tratativa='recurso',
+        valor_recursado=Decimal('303.48'),
+    )
+    registros = [pendente, recurso]
+    itens = [
+        ({'valor_glosa': Decimal('303.48')}, registros),
+        ({'valor_glosa': Decimal('91.04')}, registros),
+    ]
+
+    financeiro._distribuir_tratativas_itens_demonstrativo(itens)
+
+    assert [item['valor_total_tratado'] for item, _ in itens] == [
+        Decimal('303.48'),
+        Decimal('0.00'),
+    ]
+    assert itens[0][0]['registro_recusa'] is recurso
+    assert itens[1][0]['registro_recusa'] is None
+    assert all(
+        item['valor_total_tratado'] <= item['valor_glosa']
+        for item, _ in itens
+    )
+
+
 def test_tratativa_conciliada_participa_do_detalhamento_demonstrativo(
     session,
     usuario_teste,
@@ -799,6 +880,55 @@ def test_busca_tratativa_pela_identidade_exata_do_demonstrativo():
     )
 
     assert registros == [exata, legada]
+
+
+def test_busca_tratativa_do_demonstrativo_preserva_processo_historico():
+    historica = SimpleNamespace(id=3)
+    chave_atual = ('p142201/2026', 17372, 293592, 123, 51)
+    tratativas = {
+        (
+            'p129288/2026',
+            17372,
+            293592,
+            123,
+            51,
+            'linha-5027964',
+        ): [historica],
+    }
+
+    registros = financeiro._tratativas_da_linha_demonstrativo(
+        tratativas,
+        chave_atual,
+        'linha-5027964',
+    )
+
+    assert registros == [historica]
+
+
+def test_mapeia_processo_canonico_por_protocolo(monkeypatch):
+    class Resultado:
+        def mappings(self):
+            return self
+
+        def __iter__(self):
+            return iter([{
+                'protocolo': '5027964',
+                'numero_processo': 'P142201/2026',
+            }])
+
+    class Sessao:
+        def execute(self, _query, params):
+            assert params == {'protocolos': ['5027964']}
+            return Resultado()
+
+    monkeypatch.setattr(financeiro, '_tabela_ipm_existe', lambda *_: True)
+
+    processos = financeiro._processos_canonicos_por_protocolo_follow_up(
+        Sessao(),
+        {' 5027964 '},
+    )
+
+    assert processos == {'5027964': 'p142201/2026'}
 
 
 def test_lista_apenas_nfse_nao_conciliada(
@@ -1642,6 +1772,103 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
         'processo_sem_glosa_like': '%P058752/2026%',
     }
 
+    chamadas_detalhamento = []
+    monkeypatch.setattr(
+        financeiro,
+        '_remessas_cogestao_persistidas',
+        lambda *_args: {
+            Decimal('7298.14'): [{
+                'cd_remessa': cd_remessa,
+                'cnpj_convenio': '',
+                'convenio': 'IPM',
+                'valor_total': Decimal('7298.14'),
+                'data_competencia': date(2025, 12, 1),
+            }],
+            Decimal('999.99'): [{
+                'cd_remessa': cd_remessa + 1,
+                'cnpj_convenio': '',
+                'convenio': 'IPM',
+                'valor_total': Decimal('999.99'),
+                'data_competencia': date(2025, 12, 1),
+            }],
+        },
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_pacientes_demonstrativo_conciliado',
+        lambda *args: chamadas_detalhamento.append(args) or [],
+    )
+
+    financeiro._cards_cogestao_follow_up(
+        Sessao(),
+        object(),
+        set(),
+        incluir_detalhes=True,
+        q=None,
+        numero_nfse=None,
+        numero_protocolo='4123928',
+        cd_remessa=None,
+        convenio=None,
+        processo_original='P058752/2026',
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+    )
+
+    assert chamadas_detalhamento[0][2:] == (
+        cd_remessa,
+        'P058752/2026',
+        Decimal('7298.14'),
+        Decimal('0.00'),
+        '4123928',
+    )
+
+
+def test_marca_pendencia_manual_apenas_no_mesmo_processo_e_protocolo(
+    monkeypatch,
+):
+    class Sessao:
+        def execute(self, _query, params):
+            assert params == {
+                'processos': ['P129288/2026', 'P142201/2026'],
+            }
+            return [
+                ('P142201/2026', '5027380'),
+                ('P129288/2026', 'OUTRO-PROTOCOLO'),
+            ]
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda _session, tabela: tabela == 'glossas_nao_vinculadas_ipm',
+    )
+    cards = [
+        {
+            'cd_remessa': 17372,
+            'numero_protocolo': '5027964',
+            'processo': {'numero_processo': 'P142201/2026'},
+        },
+        {
+            'cd_remessa': 17372,
+            'numero_protocolo': '5027380',
+            'processo': {'numero_processo': 'P142201/2026'},
+        },
+        {
+            'cd_remessa': 17372,
+            'numero_protocolo': '5027964',
+            'processo': {'numero_processo': 'P129288/2026'},
+        },
+    ]
+
+    financeiro._marcar_cards_com_pendencia_associacao_manual(
+        Sessao(), cards
+    )
+
+    assert [
+        card['possui_pendencia_associacao_manual'] for card in cards
+    ] == [False, True, False]
+
 
 def test_marca_pendencia_manual_apenas_no_mesmo_processo_e_protocolo(
     monkeypatch,
@@ -2169,10 +2396,16 @@ def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
             }
         ],
     }
+    parametros_cogestao = {}
+
+    def cards_cogestao(*_args, **kwargs):
+        parametros_cogestao.update(kwargs)
+        return [card_ipm]
+
     monkeypatch.setattr(
         financeiro,
         '_cards_cogestao_follow_up',
-        lambda *_args, **_kwargs: [card_ipm],
+        cards_cogestao,
     )
 
     follow_up = financeiro.consultar_follow_up_glosas(
@@ -2200,6 +2433,7 @@ def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
     assert follow_up['valor_total_glosado'] == Decimal('55.00')
     assert follow_up['valor_total_pendente'] == Decimal('45.00')
     assert follow_up['valor_total_tratado'] == Decimal('10.00')
+    assert parametros_cogestao['incluir_detalhes'] is True
 
 
 def test_follow_up_exibe_registro_analitico_sem_conciliacao_ou_relatorio(
