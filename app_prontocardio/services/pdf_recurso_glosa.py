@@ -164,6 +164,13 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
         linhas.append(
             {
                 'processo_inicial': processo or '-',
+                'numero_fatura': (
+                    item.get('numero_fatura')
+                    or item.get('nr_fatura')
+                    or item.get('conta')
+                    or item.get('cd_reg')
+                    or '-'
+                ),
                 'convenio': (
                     item.get('nm_convenio')
                     or card.get('convenio')
@@ -237,8 +244,11 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     ]
     data_recurso = max(datas_recurso) if datas_recurso else date.today()
     convenio = str(linhas[0].get('convenio') or 'IPM').strip().upper()
-    is_issec = 'ISSEC' in convenio
-    is_cafaz = 'CAFAZ' in convenio
+    is_issec, is_cafaz, is_fusex = (
+        nome_convenio in convenio
+        for nome_convenio in ('ISSEC', 'CAFAZ', 'FUSEX')
+    )
+    is_layout_12_colunas = is_cafaz or is_fusex
     processo_recurso = str(
         cards_processo[0].get('processo_recurso') or ''
     ).strip()
@@ -266,6 +276,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         title=(
             'Recurso de Glosa ISSEC'
             if is_issec
+            else 'Recurso de Glosa FUSEX'
+            if is_fusex
             else 'Recurso de Glosa CAFAZ'
             if is_cafaz
             else 'Recurso de Glosa IPM'
@@ -299,6 +311,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                     f'RECURSO DE GLOSA ISSEC {data_recurso.year}/ '
                     f'PROCESSO DE RECURSO: {processo_recurso}'
                     if is_issec
+                    else f'RECURSO DE GLOSA FUSEX {data_recurso.year}'
+                    if is_fusex
                     else f'RECURSO DE GLOSA CAFAZ {data_recurso.year}'
                     if is_cafaz
                     else f'RECURSO DE GLOSA IPM {data_recurso.year}'
@@ -318,7 +332,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             ]
         )
     )
-    if is_cafaz:
+    if is_layout_12_colunas:
         vazio = _paragrafo('', estilo)
         cabecalho = Table(
             [
@@ -437,9 +451,10 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             'VALOR APRES', 'VALOR PAGO', 'VALOR GLOSADO',
             'MOTIVO DA GLOSA', 'VALOR DO RECURSO', 'JUSTIFICATIVA',
         )
-    elif is_cafaz:
+    elif is_layout_12_colunas:
         titulos = (
-            'PROCESSO', 'PACIENTE', 'DATA', 'ITEM GLOSADO',
+            'Nº DA FATURA' if is_fusex else 'PROCESSO',
+            'PACIENTE', 'DATA', 'ITEM GLOSADO',
             'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES',
             'VALOR PAGO', 'VALOR GLOSADO', 'MOTIVO DA GLOSA',
             'VALOR DO RECURSO', 'JUSTIFICATIVA',
@@ -461,9 +476,14 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 _paragrafo(linha['atend_alta'], estilo),
                 _paragrafo(linha['lote'], estilo),
             ]
-        elif is_cafaz:
+        elif is_layout_12_colunas:
             identificacao = [
-                _paragrafo(linha['processo_inicial'], estilo),
+                _paragrafo(
+                    linha['numero_fatura']
+                    if is_fusex
+                    else linha['processo_inicial'],
+                    estilo,
+                ),
                 _paragrafo(linha['paciente'], estilo),
                 _paragrafo(linha['atend_alta'], estilo),
             ]
@@ -488,7 +508,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 _paragrafo(linha['justificativa'], estilo),
             ]
         )
-    indice_motivo = 9 if is_cafaz else 10
+    indice_motivo = 9 if is_layout_12_colunas else 10
     dados.append([
         *([''] * indice_motivo),
         _paragrafo('TOTAL', estilo_negrito),
@@ -507,7 +527,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 0.075, 0.095, 0.065, 0.16, 0.05, 0.06,
                 0.07, 0.065, 0.07, 0.105, 0.075, 0.11,
             )
-            if is_cafaz
+            if is_layout_12_colunas
             else (
                 0.07, 0.065, 0.095, 0.065, 0.14, 0.045, 0.055,
                 0.065, 0.06, 0.065, 0.105, 0.065, 0.10,
