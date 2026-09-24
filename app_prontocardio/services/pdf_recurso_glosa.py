@@ -238,6 +238,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     data_recurso = max(datas_recurso) if datas_recurso else date.today()
     convenio = str(linhas[0].get('convenio') or 'IPM').strip().upper()
     is_issec = 'ISSEC' in convenio
+    is_cafaz = 'CAFAZ' in convenio
     processo_recurso = str(
         cards_processo[0].get('processo_recurso') or ''
     ).strip()
@@ -262,7 +263,13 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         rightMargin=5 * mm,
         topMargin=5 * mm,
         bottomMargin=5 * mm,
-        title=f'Recurso de Glosa {"ISSEC" if is_issec else "IPM"}',
+        title=(
+            'Recurso de Glosa ISSEC'
+            if is_issec
+            else 'Recurso de Glosa CAFAZ'
+            if is_cafaz
+            else 'Recurso de Glosa IPM'
+        ),
         author=NOME_PRESTADOR,
     )
     estilo = ParagraphStyle(
@@ -292,6 +299,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                     f'RECURSO DE GLOSA ISSEC {data_recurso.year}/ '
                     f'PROCESSO DE RECURSO: {processo_recurso}'
                     if is_issec
+                    else f'RECURSO DE GLOSA CAFAZ {data_recurso.year}'
+                    if is_cafaz
                     else f'RECURSO DE GLOSA IPM {data_recurso.year}'
                 ),
                 estilo_titulo,
@@ -309,41 +318,104 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             ]
         )
     )
-    cabecalho = Table(
-        [
+    if is_cafaz:
+        vazio = _paragrafo('', estilo)
+        cabecalho = Table(
             [
-                _paragrafo('CNPJ', estilo_negrito),
-                _paragrafo('PRESTADOR', estilo_negrito),
-                _paragrafo(
-                    'DATA DO PAGAMENTO' if is_issec else '',
-                    estilo_negrito,
-                ),
+                [
+                    _paragrafo('CNPJ', estilo_negrito), vazio,
+                    _paragrafo('PRESTADOR', estilo_negrito),
+                    vazio, vazio, vazio, vazio, vazio, vazio,
+                    vazio, vazio, vazio,
+                ],
+                [
+                    _paragrafo(CNPJ_PRESTADOR, estilo), vazio,
+                    _paragrafo(NOME_PRESTADOR, estilo),
+                    vazio, vazio, vazio, vazio, vazio, vazio,
+                    vazio, vazio, vazio,
+                ],
+                [
+                    _paragrafo('PESSOA / FONE / E-MAIL', estilo_negrito),
+                    vazio, vazio, vazio, vazio, vazio,
+                    _paragrafo('DATA DO RECURSO', estilo_negrito),
+                    vazio, vazio,
+                    _paragrafo(
+                        'VALOR TOTAL DO RECURSO',
+                        estilo_negrito,
+                    ),
+                    vazio, vazio,
+                ],
+                [
+                    _paragrafo(CONTATO_FATURAMENTO, estilo),
+                    vazio, vazio, vazio, vazio, vazio,
+                    _paragrafo(_formatar_data(data_recurso), estilo),
+                    vazio, vazio,
+                    _paragrafo(
+                        _formatar_reais(total_recurso),
+                        estilo_negrito,
+                    ),
+                    vazio, vazio,
+                ],
             ],
+            colWidths=[largura_util / 12] * 12,
+        )
+        spans_cabecalho = [
+            ('SPAN', (0, 0), (1, 0)),
+            ('SPAN', (2, 0), (8, 0)),
+            ('SPAN', (9, 0), (11, 0)),
+            ('SPAN', (0, 1), (1, 1)),
+            ('SPAN', (2, 1), (8, 1)),
+            ('SPAN', (9, 1), (11, 1)),
+            ('SPAN', (0, 2), (5, 2)),
+            ('SPAN', (6, 2), (8, 2)),
+            ('SPAN', (9, 2), (11, 2)),
+            ('SPAN', (0, 3), (5, 3)),
+            ('SPAN', (6, 3), (8, 3)),
+            ('SPAN', (9, 3), (11, 3)),
+        ]
+    else:
+        cabecalho = Table(
             [
-                _paragrafo(CNPJ_PRESTADOR, estilo),
-                _paragrafo(NOME_PRESTADOR, estilo),
-                _paragrafo(
-                    _formatar_data(data_pagamento) if is_issec else '',
-                    estilo,
-                ),
+                [
+                    _paragrafo('CNPJ', estilo_negrito),
+                    _paragrafo('PRESTADOR', estilo_negrito),
+                    _paragrafo(
+                        'DATA DO PAGAMENTO' if is_issec else '',
+                        estilo_negrito,
+                    ),
+                ],
+                [
+                    _paragrafo(CNPJ_PRESTADOR, estilo),
+                    _paragrafo(NOME_PRESTADOR, estilo),
+                    _paragrafo(
+                        _formatar_data(data_pagamento) if is_issec else '',
+                        estilo,
+                    ),
+                ],
+                [
+                    _paragrafo('PESSOA / FONE / E-MAIL', estilo_negrito),
+                    _paragrafo('DATA DO RECURSO', estilo_negrito),
+                    _paragrafo(
+                        'VALOR TOTAL DO RECURSO',
+                        estilo_negrito,
+                    ),
+                ],
+                [
+                    _paragrafo(CONTATO_FATURAMENTO, estilo),
+                    _paragrafo(_formatar_data(data_recurso), estilo),
+                    _paragrafo(
+                        _formatar_reais(total_recurso),
+                        estilo_negrito,
+                    ),
+                ],
             ],
-            [
-                _paragrafo('PESSOA / FONE / E-MAIL', estilo_negrito),
-                _paragrafo('DATA DO RECURSO', estilo_negrito),
-                _paragrafo('VALOR TOTAL DO RECURSO', estilo_negrito),
+            colWidths=[
+                largura_util * 0.52,
+                largura_util * 0.24,
+                largura_util * 0.24,
             ],
-            [
-                _paragrafo(CONTATO_FATURAMENTO, estilo),
-                _paragrafo(_formatar_data(data_recurso), estilo),
-                _paragrafo(_formatar_reais(total_recurso), estilo_negrito),
-            ],
-        ],
-        colWidths=[
-            largura_util * 0.52,
-            largura_util * 0.24,
-            largura_util * 0.24,
-        ],
-    )
+        )
+        spans_cabecalho = []
     cabecalho.setStyle(
         TableStyle(
             [
@@ -353,43 +425,55 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('TOPPADDING', (0, 0), (-1, -1), 2),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                *spans_cabecalho,
             ]
         )
     )
 
-    titulos = (
-        (
+    if is_issec:
+        titulos = (
             'PROCESSO', 'PACIENTE', 'DATA', 'LOTE MAIDA',
             'ITEM GLOSADO', 'QTDE APRE', 'QTDE GLOSADA',
             'VALOR APRES', 'VALOR PAGO', 'VALOR GLOSADO',
             'MOTIVO DA GLOSA', 'VALOR DO RECURSO', 'JUSTIFICATIVA',
         )
-        if is_issec
-        else (
+    elif is_cafaz:
+        titulos = (
+            'PROCESSO', 'PACIENTE', 'DATA', 'ITEM GLOSADO',
+            'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES',
+            'VALOR PAGO', 'VALOR GLOSADO', 'MOTIVO DA GLOSA',
+            'VALOR DO RECURSO', 'JUSTIFICATIVA',
+        )
+    else:
+        titulos = (
             'PROCESSO<br/>INICIAL', 'REMESSA', 'PACIENTE',
             'ATEND.<br/>ALTA', 'ITEM GLOSADO', 'QTDE<br/>APRE',
             'QTDE<br/>GLOSADA', 'VALOR<br/>APRES', 'VALOR<br/>PAGO',
             'VALOR<br/>GLOSADO', 'MOTIVO DA GLOSA',
             'VALOR DO<br/>RECURSO', 'JUSTIFICATIVA',
         )
-    )
     dados = [[Paragraph(titulo, estilo_negrito) for titulo in titulos]]
     for linha in linhas:
-        identificacao = (
-            [
+        if is_issec:
+            identificacao = [
                 _paragrafo(linha['processo_inicial'], estilo),
                 _paragrafo(linha['paciente'], estilo),
                 _paragrafo(linha['atend_alta'], estilo),
                 _paragrafo(linha['lote'], estilo),
             ]
-            if is_issec
-            else [
+        elif is_cafaz:
+            identificacao = [
+                _paragrafo(linha['processo_inicial'], estilo),
+                _paragrafo(linha['paciente'], estilo),
+                _paragrafo(linha['atend_alta'], estilo),
+            ]
+        else:
+            identificacao = [
                 _paragrafo(linha['processo_inicial'], estilo),
                 _paragrafo(linha['remessa'], estilo),
                 _paragrafo(linha['paciente'], estilo),
                 _paragrafo(linha['atend_alta'], estilo),
             ]
-        )
         dados.append(
             [
                 *identificacao,
@@ -404,14 +488,13 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 _paragrafo(linha['justificativa'], estilo),
             ]
         )
-    dados.append(
-        [
-            '', '', '', '', '', '', '', '', '', '',
-            _paragrafo('TOTAL', estilo_negrito),
-            _paragrafo(_formatar_reais(total_recurso), estilo_negrito),
-            '',
-        ]
-    )
+    indice_motivo = 9 if is_cafaz else 10
+    dados.append([
+        *([''] * indice_motivo),
+        _paragrafo('TOTAL', estilo_negrito),
+        _paragrafo(_formatar_reais(total_recurso), estilo_negrito),
+        '',
+    ])
     larguras = [
         largura_util * proporcao
         for proporcao in (
@@ -420,6 +503,11 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 0.065, 0.06, 0.065, 0.09, 0.065, 0.105,
             )
             if is_issec
+            else (
+                0.075, 0.095, 0.065, 0.16, 0.05, 0.06,
+                0.07, 0.065, 0.07, 0.105, 0.075, 0.11,
+            )
+            if is_cafaz
             else (
                 0.07, 0.065, 0.095, 0.065, 0.14, 0.045, 0.055,
                 0.065, 0.06, 0.065, 0.105, 0.065, 0.10,
@@ -432,8 +520,13 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             [
                 ('GRID', (0, 0), (-1, -1), 0.7, colors.black),
                 ('BACKGROUND', (0, 0), (-1, 0), FUNDO_CABECALHO),
-                ('BACKGROUND', (10, -1), (11, -1), FUNDO_CABECALHO),
-                ('SPAN', (0, -1), (9, -1)),
+                (
+                    'BACKGROUND',
+                    (indice_motivo, -1),
+                    (indice_motivo + 1, -1),
+                    FUNDO_CABECALHO,
+                ),
+                ('SPAN', (0, -1), (indice_motivo - 1, -1)),
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('TOPPADDING', (0, 0), (-1, -1), 3),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
