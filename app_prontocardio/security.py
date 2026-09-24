@@ -3,12 +3,12 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from jwt import DecodeError, decode, encode
+from jwt import DecodeError, InvalidTokenError, decode, encode
 from pwdlib import PasswordHash
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app_prontocardio.database import get_session_postgres
+from app_prontocardio.database import get_session_postgres, postgres_engine
 from app_prontocardio.models import Usuario
 from app_prontocardio.settings import Settings
 
@@ -25,6 +25,30 @@ def gera_hash_senha(senha_cru: str):
 
 def valida_senha_cru_x_senha_hash_db(senha_cru: str, senha_hash_db: str):
     return pwd_context.verify(senha_cru, senha_hash_db)
+
+
+def usuario_token_somente_leitura(token: str) -> bool:
+    try:
+        payload = decode(
+            token, settings.SECRET_KEY, algorithms=settings.ALGORITHM
+        )
+    except InvalidTokenError:
+        return False
+
+    subject_email = payload.get('sub')
+    if not subject_email or postgres_engine is None:
+        return False
+
+    with Session(postgres_engine) as session:
+        usuario = session.scalar(
+            select(Usuario).where(Usuario.email == subject_email)
+        )
+
+    return bool(
+        usuario
+        and usuario.ativo
+        and usuario.perfil.casefold() == 'leitura'
+    )
 
 
 def criar_token(claim: dict):
@@ -68,5 +92,16 @@ def valida_usuario_ti(usuario: Usuario = Depends(valida_token_usuario_atual)):
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail='Acesso restrito à equipe de TI.',
+        )
+    return usuario
+
+
+def valida_acesso_ecg_worklist(
+    usuario: Usuario = Depends(valida_token_usuario_atual),
+) -> Usuario:
+    if 'ecg_worklist' not in usuario.telas_permitidas:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Permissão insuficiente.',
         )
     return usuario

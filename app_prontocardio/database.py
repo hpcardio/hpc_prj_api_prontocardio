@@ -18,6 +18,19 @@ oracle_engine = create_engine(
     thick_mode=oracle_thick_mode,
     pool_pre_ping=True,
     pool_recycle=300,
+    pool_timeout=5,
+    pool_use_lifo=True,
+)
+
+oracle_readonly_engine = create_engine(
+    settings.ORACLE_READONLY_DATABASE_URL or settings.ORACLE_DATABASE_URL,
+    thick_mode=oracle_thick_mode,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_timeout=5,
+    pool_use_lifo=True,
+    pool_size=settings.ORACLE_READONLY_POOL_SIZE,
+    max_overflow=settings.ORACLE_READONLY_MAX_OVERFLOW,
 )
 
 postgres_engine = (

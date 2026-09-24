@@ -340,7 +340,7 @@ def test_desfazer_registro_independente_mantem_exclusao_logica(
 def test_filtra_glosas_de_convenio_desabilitado(session):
     payload = RegistroGlosaCreate(**registro_glosa_payload())
     registro = RegistroGlosa(
-        **payload.model_dump(),
+        **payload.model_dump(exclude={'demonstrativo_id_registro'}),
         sn_ativo='true',
     )
     prazo = PrazoRecursoConvenio(

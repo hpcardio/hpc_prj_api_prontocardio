@@ -20,12 +20,16 @@ TELAS_SISTEMA = (
     'solicitacoes_recusas',
     'configuracao_convenio',
     'empresas_nfse',
+    'ecg_worklist',
 )
-TELAS_PADRAO_JSON = json.dumps(list(TELAS_SISTEMA))
+TELAS_PADRAO = tuple(
+    tela for tela in TELAS_SISTEMA if tela != 'ecg_worklist'
+)
+TELAS_PADRAO_JSON = json.dumps(list(TELAS_PADRAO))
 
 
 def telas_padrao() -> list[str]:
-    return list(TELAS_SISTEMA)
+    return list(TELAS_PADRAO)
 
 
 def normalizar_telas(telas: list[str]) -> list[str]:

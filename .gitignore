@@ -219,3 +219,15 @@ server/**/*.pem
 
 # Relatórios locais de auditoria com dados assistenciais
 /relatorios/
+
+# Artefatos operacionais e cópias locais de produção
+/.codex*/
+/.env.*
+/data/
+/mobile-auth-release-*/
+*.bak*
+*.backup-*
+*.before-*
+*.orig
+
+# Estado e certificados do proxy permanecem externos ao código

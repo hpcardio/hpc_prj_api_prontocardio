@@ -451,6 +451,11 @@ files = [
     {file = "charset_normalizer-3.5.1.tar.gz", hash = "sha256:6117b84ea48435e5356dc737f5121485c30920ba43375fa7b434fd753df0eac3"},
 ]
 
+[package.source]
+type = "legacy"
+url = "https://mirrors.aliyun.com/pypi/simple"
+reference = "docker-pypi"
+
 [[package]]
 name = "click"
 version = "8.4.0"
@@ -1674,6 +1679,11 @@ test-arrow = ["arro3-compute", "arro3-core", "nanoarrow", "pyarrow"]
 tests = ["coverage (>=7.4.2)", "defusedxml", "markdown2", "olefile", "packaging", "pytest", "pytest-cov", "pytest-timeout", "pytest-xdist", "setuptools", "trove-classifiers (>=2024.10.12)"]
 xmp = ["defusedxml"]
 
+[package.source]
+type = "legacy"
+url = "https://mirrors.aliyun.com/pypi/simple"
+reference = "docker-pypi"
+
 [[package]]
 name = "pluggy"
 version = "1.6.0"
@@ -2101,6 +2111,30 @@ url = "https://mirrors.aliyun.com/pypi/simple"
 reference = "docker-pypi"
 
 [[package]]
+name = "pydicom"
+version = "3.0.2"
+description = "A pure Python package for reading and writing DICOM data"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pydicom-3.0.2-py3-none-any.whl", hash = "sha256:abf971a5440f84dbaf42c4b6758e30e62480902584f8b270b9a5d146e278a07b"},
+    {file = "pydicom-3.0.2.tar.gz", hash = "sha256:5942bfc2d72c6fa4b3b5b62c527f54b7f2355f21d6f5d296df6bb30188df6a4f"},
+]
+
+[package.extras]
+basic = ["numpy", "types-pydicom"]
+dev = ["black (==24.8.0)", "mypy (==1.11.2)", "pre-commit", "pydicom-data", "pyfakefs (>=6.1.6)", "pytest", "pytest-cov", "ruff (==0.6.3)", "types-requests"]
+docs = ["matplotlib", "numpy", "numpydoc", "pillow", "sphinx", "sphinx-copybutton", "sphinx-gallery", "sphinx_rtd_theme", "sphinxcontrib-jquery", "sphinxcontrib-napoleon"]
+gpl-license = ["pylibjpeg[libjpeg]"]
+pixeldata = ["numpy", "pillow", "pyjpegls", "pylibjpeg[openjpeg]", "pylibjpeg[rle]", "python-gdcm"]
+
+[package.source]
+type = "legacy"
+url = "https://mirrors.aliyun.com/pypi/simple"
+reference = "docker-pypi"
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 description = "Pygments is a syntax highlighting package written in Python."
@@ -2134,6 +2168,32 @@ files = [
 
 [package.extras]
 crypto = ["cryptography (>=3.4.0)"]
+
+[package.source]
+type = "legacy"
+url = "https://mirrors.aliyun.com/pypi/simple"
+reference = "docker-pypi"
+
+[[package]]
+name = "pynetdicom"
+version = "3.0.4"
+description = "A Python implementation of the DICOM networking protocol"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "pynetdicom-3.0.4-py3-none-any.whl", hash = "sha256:bc3f8869db4c90634336dfb02d7b6c249771e8b167e841254997a315d8e16f72"},
+    {file = "pynetdicom-3.0.4.tar.gz", hash = "sha256:567ef761d73b34a380a4350e0d10ae549d749c66da4f1bdf8793cab9a6a326e4"},
+]
+
+[package.dependencies]
+pydicom = ">=3,<4"
+
+[package.extras]
+apps = ["sqlalchemy"]
+dev = ["asv (>=0.6)", "black (>=23.1)", "codespell (>=2.2)", "coverage (>=7.3)", "mypy (>=1.11)", "pyfakefs (>=5.3)", "pytest (>=7.4)", "pytest-cov (>=4.1)", "pytest-xdist (>=3.7)", "ruff (>=0.1)", "sqlalchemy (>=2.0)"]
+docs = ["numpydoc (>=1.6)", "pydata-sphinx-theme (>=0.16.1)", "sphinx (>=7.2)", "sphinx-copybutton (>=0.5)", "sphinxcontrib-jquery (>=4.1)"]
+tests = ["coverage (>=7.3)", "pyfakefs (>=5.3)", "pytest (>=7.4)", "pytest-cov (>=4.1)", "pytest-xdist (>=3.7)", "sqlalchemy (>=2.0)"]
 
 [package.source]
 type = "legacy"
@@ -2342,7 +2402,7 @@ name = "reportlab"
 version = "4.5.1"
 description = "The Reportlab Toolkit"
 optional = false
-python-versions = "<4,>=3.9"
+python-versions = ">=3.9,<4"
 groups = ["main"]
 files = [
     {file = "reportlab-4.5.1-py3-none-any.whl", hash = "sha256:06fce8cb56c83307cfa4909cdf4e6a2ddbb44e5d6ef4d2edca896d7e9769f091"},
@@ -2359,6 +2419,11 @@ bidi = ["rlbidi"]
 pycairo = ["freetype-py (>=2.3.0,<2.4)", "rlPyCairo (>=0.2.0,<1)"]
 renderpm = ["rl_renderPM (>=4.0.3,<4.1)"]
 shaping = ["uharfbuzz"]
+
+[package.source]
+type = "legacy"
+url = "https://mirrors.aliyun.com/pypi/simple"
+reference = "docker-pypi"
 
 [[package]]
 name = "rich"
@@ -3316,4 +3381,4 @@ reference = "docker-pypi"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "20d6582fc129425b4eef2bcd23faac973c61e81aaeaf8ed3d6928fb042391cb8"
+content-hash = "5857d3664c08fb162d4fac9d8efbc271500ea534e72485255558567b615e8c9d"

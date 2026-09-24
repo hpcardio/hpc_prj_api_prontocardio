@@ -16,7 +16,9 @@ dependencies = [
     "pwdlib[argon2] (>=0.3.0,<0.4.0)",
     "pyjwt (>=2.13.0,<3.0.0)",
     "alembic (>=1.18.4,<2.0.0)",
-    "reportlab (==4.5.1)"
+    "reportlab (==4.5.1)",
+    "pydicom (>=3.0.2,<4.0.0)",
+    "pynetdicom (>=3.0.4,<4.0.0)"
 ]
 
 

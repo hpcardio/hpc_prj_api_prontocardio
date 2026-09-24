@@ -1,5 +1,19 @@
 # API Prontocardio
 
+## Comprovante de agendamento por WhatsApp
+
+O endpoint autenticado `POST /whatsapp/enviar-comprovante` recebe um PNG de até 5 MiB e envia o template com cabeçalho de imagem de forma idempotente. A chave não pode ser reutilizada para um segundo envio.
+
+Configuração segura, desativada por padrão:
+
+```env
+WHATSAPP_COMPROVANTE_ENABLED=false
+WHATSAPP_COMPROVANTE_TEMPLATE=confirmacao_agendamento_rede
+WHATSAPP_COMPROVANTE_MAX_BYTES=5242880
+```
+
+Ative somente após criar e homologar na Meta o template com cabeçalho de imagem. O endpoint registra apenas a chave, o estado, o identificador externo e os quatro últimos dígitos do telefone; não persiste o PNG.
+
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.136.1-009688?logo=fastapi&logoColor=white)
 ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-1F425F?logo=sqlalchemy&logoColor=white)
 ![Oracle Thick Mode](https://img.shields.io/badge/Oracle-Driver%20Thick%20Mode-F80000?logo=oracle&logoColor=white)

@@ -1070,6 +1070,22 @@ def registrar_glosa(
         session,
         payload.demonstrativo_id_registro,
     )
+    candidatos_idempotentes = [
+        registro
+        for registro in registros_item
+        if registro.sn_ativo == 'true'
+        and registro.status_tratativa != 'pendente'
+        and registro.sn_glosado == payload.sn_glosado
+        and registro.qtd_recursado == payload.qtd_recursado
+        and registro.valor_recursado == payload.valor_recursado
+    ]
+    if len(candidatos_idempotentes) == 1:
+        return editar_glosa(
+            candidatos_idempotentes[0].id,
+            payload,
+            usuario_atual,
+            session,
+        )
     _validar_limites_tratativas_item(
         None,
         payload,
