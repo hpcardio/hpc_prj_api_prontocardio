@@ -71,6 +71,7 @@ def test_pdf_rateia_recurso_sem_duplicar_itens_desmembrados():
         linha['valor_recurso'] for linha in linhas
     ) == Decimal('520.14')
     assert {linha['lote'] for linha in linhas} == {'LOTE-MAIDA-42'}
+    assert {linha['periodo_producao'] for linha in linhas} == {'04/2026'}
 
 
 def test_gera_pdf_com_layout_de_recurso():
@@ -246,6 +247,42 @@ def test_pdf_fusma_exibe_layout_com_numero_de_controle(monkeypatch):
     assert tabela_itens[1][0].getPlainText() == 'P193251/2026'
     assert tabela_itens[1][1].getPlainText() == 'Paciente Um'
     assert tabela_itens[1][2].getPlainText() == '18/04/2026'
+    assert tabela_itens[-1][9].getPlainText() == 'TOTAL'
+    assert tabela_itens[-1][10].getPlainText() == 'R$ 520,14'
+
+
+def test_pdf_funsa_exibe_layout_independente_com_periodo_producao(monkeypatch):
+    tabelas = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        tabelas.append(dados)
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+    card = _card_recurso()
+    card['convenio'] = 'FUNSA'
+    card['data_competencia'] = '2026-03-01'
+    gerar_pdf_recurso_glosa(card)
+
+    assert tabelas[0][0][0].getPlainText() == 'GLOSAS FUNSA 2026'
+    assert len(tabelas[1][0]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
+    assert tabelas[1][0][0].getPlainText() == 'CNPJ'
+    assert tabelas[1][0][2].getPlainText() == 'PRESTADOR'
+    assert tabelas[1][2][0].getPlainText() == 'PESSOA / FONE / E-MAIL'
+    assert tabelas[1][2][6].getPlainText() == 'DATA DO RECURSO'
+    assert tabelas[1][2][9].getPlainText() == 'VALOR TOTAL DO RECURSO'
+    tabela_itens = tabelas[-1]
+    assert [celula.getPlainText() for celula in tabela_itens[0]] == [
+        'Nº GAB', 'PACIENTE', 'PERIODO PRODUÇÃO', 'ITEM GLOSADO',
+        'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES', 'VALOR PAGO',
+        'VALOR GLOSADO', 'MOTIVO DA GLOSA', 'VALOR RECURSO',
+        'JUSTIFICATIVA',
+    ]
+    assert len(tabela_itens[1]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
+    assert tabela_itens[1][0].getPlainText() == 'P193251/2026'
+    assert tabela_itens[1][1].getPlainText() == 'Paciente Um'
+    assert tabela_itens[1][2].getPlainText() == '03/2026'
     assert tabela_itens[-1][9].getPlainText() == 'TOTAL'
     assert tabela_itens[-1][10].getPlainText() == 'R$ 520,14'
 
