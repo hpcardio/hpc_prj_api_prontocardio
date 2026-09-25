@@ -244,11 +244,11 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     ]
     data_recurso = max(datas_recurso) if datas_recurso else date.today()
     convenio = str(linhas[0].get('convenio') or 'IPM').strip().upper()
-    is_issec, is_cafaz, is_fusex = (
+    is_issec, is_cafaz, is_fusex, is_fusma = (
         nome_convenio in convenio
-        for nome_convenio in ('ISSEC', 'CAFAZ', 'FUSEX')
+        for nome_convenio in ('ISSEC', 'CAFAZ', 'FUSEX', 'FUSMA')
     )
-    is_layout_12_colunas = is_cafaz or is_fusex
+    is_layout_12_colunas = is_cafaz or is_fusex or is_fusma
     processo_recurso = str(
         cards_processo[0].get('processo_recurso') or ''
     ).strip()
@@ -276,6 +276,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         title=(
             'Recurso de Glosa ISSEC'
             if is_issec
+            else 'Recurso de Glosa FUSMA'
+            if is_fusma
             else 'Recurso de Glosa FUSEX'
             if is_fusex
             else 'Recurso de Glosa CAFAZ'
@@ -311,6 +313,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                     f'RECURSO DE GLOSA ISSEC {data_recurso.year}/ '
                     f'PROCESSO DE RECURSO: {processo_recurso}'
                     if is_issec
+                    else f'RECURSO DE GLOSA FUSMA {data_recurso.year}'
+                    if is_fusma
                     else f'RECURSO DE GLOSA FUSEX {data_recurso.year}'
                     if is_fusex
                     else f'RECURSO DE GLOSA CAFAZ {data_recurso.year}'
@@ -453,8 +457,16 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         )
     elif is_layout_12_colunas:
         titulos = (
-            'Nº DA FATURA' if is_fusex else 'PROCESSO',
-            'PACIENTE', 'DATA', 'ITEM GLOSADO',
+            (
+                'Nº CONTROLE'
+                if is_fusma
+                else 'Nº DA FATURA'
+                if is_fusex
+                else 'PROCESSO'
+            ),
+            'PACIENTE',
+            'ATEND. ALTA' if is_fusma else 'DATA',
+            'ITEM GLOSADO',
             'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES',
             'VALOR PAGO', 'VALOR GLOSADO', 'MOTIVO DA GLOSA',
             'VALOR DO RECURSO', 'JUSTIFICATIVA',

@@ -215,6 +215,41 @@ def test_pdf_fusex_exibe_layout_com_numero_da_fatura(monkeypatch):
     assert tabela_itens[-1][10].getPlainText() == 'R$ 520,14'
 
 
+def test_pdf_fusma_exibe_layout_com_numero_de_controle(monkeypatch):
+    tabelas = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        tabelas.append(dados)
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+    card = _card_recurso()
+    card['convenio'] = 'FUSMA'
+    gerar_pdf_recurso_glosa(card)
+
+    assert tabelas[0][0][0].getPlainText() == 'RECURSO DE GLOSA FUSMA 2026'
+    assert len(tabelas[1][0]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
+    assert tabelas[1][0][0].getPlainText() == 'CNPJ'
+    assert tabelas[1][0][2].getPlainText() == 'PRESTADOR'
+    assert tabelas[1][2][0].getPlainText() == 'PESSOA / FONE / E-MAIL'
+    assert tabelas[1][2][6].getPlainText() == 'DATA DO RECURSO'
+    assert tabelas[1][2][9].getPlainText() == 'VALOR TOTAL DO RECURSO'
+    tabela_itens = tabelas[-1]
+    assert [celula.getPlainText() for celula in tabela_itens[0]] == [
+        'Nº CONTROLE', 'PACIENTE', 'ATEND. ALTA', 'ITEM GLOSADO',
+        'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES', 'VALOR PAGO',
+        'VALOR GLOSADO', 'MOTIVO DA GLOSA', 'VALOR DO RECURSO',
+        'JUSTIFICATIVA',
+    ]
+    assert len(tabela_itens[1]) == QUANTIDADE_COLUNAS_LAYOUT_ESPECIFICO
+    assert tabela_itens[1][0].getPlainText() == 'P193251/2026'
+    assert tabela_itens[1][1].getPlainText() == 'Paciente Um'
+    assert tabela_itens[1][2].getPlainText() == '18/04/2026'
+    assert tabela_itens[-1][9].getPlainText() == 'TOTAL'
+    assert tabela_itens[-1][10].getPlainText() == 'R$ 520,14'
+
+
 @pytest.mark.parametrize('numero_recurso', ['', '2600099999', 'XPTO & 123'])
 def test_titulo_issec_usa_processo_recurso_e_preserva_processo_original(
     monkeypatch, numero_recurso
