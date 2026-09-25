@@ -21,6 +21,7 @@ from sqlalchemy import select
 from app_prontocardio.models import ProcessoRecursoGlosa
 
 CENTAVOS = Decimal('0.01')
+TAMANHO_COMPETENCIA = 7
 FUNDO_CABECALHO = colors.HexColor('#ffff99')
 CNPJ_PRESTADOR = '08.711.085/0001-28'
 NOME_PRESTADOR = 'HOSPITAL PRONTOCARDIO'
@@ -92,6 +93,20 @@ def _data(valor) -> date | None:
 def _formatar_data(valor) -> str:
     data = _data(valor)
     return data.strftime('%d/%m/%Y') if data else '-'
+
+
+def _formatar_competencia(valor) -> str:
+    data = _data(valor)
+    if data:
+        return data.strftime('%m/%Y')
+    texto = str(valor or '').strip()
+    if (
+        len(texto) == TAMANHO_COMPETENCIA
+        and texto[2] == '/'
+        and texto.replace('/', '').isdigit()
+    ):
+        return texto
+    return '-'
 
 
 def _formatar_decimal(valor) -> str:
@@ -188,6 +203,12 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
                     or '-'
                 ),
                 'paciente': item.get('nm_paciente') or '-',
+                'periodo_producao': _formatar_competencia(
+                    item.get('dt_competencia')
+                    or card.get('data_competencia')
+                    or item.get('dt_atendimento')
+                    or item.get('dt_alta')
+                ),
                 'atend_alta': _formatar_data(
                     item.get('dt_alta') or item.get('dt_atendimento')
                 ),
@@ -244,11 +265,13 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     ]
     data_recurso = max(datas_recurso) if datas_recurso else date.today()
     convenio = str(linhas[0].get('convenio') or 'IPM').strip().upper()
-    is_issec, is_cafaz, is_fusex, is_fusma = (
+    is_issec, is_cafaz, is_fusex, is_fusma, is_funsa = (
         nome_convenio in convenio
-        for nome_convenio in ('ISSEC', 'CAFAZ', 'FUSEX', 'FUSMA')
+        for nome_convenio in (
+            'ISSEC', 'CAFAZ', 'FUSEX', 'FUSMA', 'FUNSA'
+        )
     )
-    is_layout_12_colunas = is_cafaz or is_fusex or is_fusma
+    is_layout_12_colunas = is_cafaz or is_fusex or is_fusma or is_funsa
     processo_recurso = str(
         cards_processo[0].get('processo_recurso') or ''
     ).strip()
@@ -276,6 +299,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         title=(
             'Recurso de Glosa ISSEC'
             if is_issec
+            else 'Glosas FUNSA'
+            if is_funsa
             else 'Recurso de Glosa FUSMA'
             if is_fusma
             else 'Recurso de Glosa FUSEX'
@@ -313,6 +338,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                     f'RECURSO DE GLOSA ISSEC {data_recurso.year}/ '
                     f'PROCESSO DE RECURSO: {processo_recurso}'
                     if is_issec
+                    else f'GLOSAS FUNSA {data_recurso.year}'
+                    if is_funsa
                     else f'RECURSO DE GLOSA FUSMA {data_recurso.year}'
                     if is_fusma
                     else f'RECURSO DE GLOSA FUSEX {data_recurso.year}'
@@ -458,18 +485,25 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     elif is_layout_12_colunas:
         titulos = (
             (
-                'Nº CONTROLE'
+                'Nº GAB'
+                if is_funsa
+                else 'Nº CONTROLE'
                 if is_fusma
                 else 'Nº DA FATURA'
                 if is_fusex
                 else 'PROCESSO'
             ),
             'PACIENTE',
-            'ATEND. ALTA' if is_fusma else 'DATA',
+            (
+                'PERIODO PRODUÇÃO'
+                if is_funsa
+                else 'ATEND. ALTA' if is_fusma else 'DATA'
+            ),
             'ITEM GLOSADO',
             'QTDE APRE', 'QTDE GLOSADA', 'VALOR APRES',
             'VALOR PAGO', 'VALOR GLOSADO', 'MOTIVO DA GLOSA',
-            'VALOR DO RECURSO', 'JUSTIFICATIVA',
+            'VALOR RECURSO' if is_funsa else 'VALOR DO RECURSO',
+            'JUSTIFICATIVA',
         )
     else:
         titulos = (
@@ -497,7 +531,12 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                     estilo,
                 ),
                 _paragrafo(linha['paciente'], estilo),
-                _paragrafo(linha['atend_alta'], estilo),
+                _paragrafo(
+                    linha['periodo_producao']
+                    if is_funsa
+                    else linha['atend_alta'],
+                    estilo,
+                ),
             ]
         else:
             identificacao = [
