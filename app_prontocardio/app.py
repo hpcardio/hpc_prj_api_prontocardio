@@ -15,6 +15,7 @@ from app_prontocardio.routers import (
     app_glosas,
     autenticacao,
     biq,
+    biq_admissoes_eletivas,
     contas_pagar,
     cuidados_paciente,
     ecg_worklist,
@@ -27,6 +28,7 @@ from app_prontocardio.routers import (
     operacional,
     origens_mv,
     paciente_auth,
+    painel_hemodinamica,
     painel_senhas_soulmv,
     painel_senhas_soulmv_clinica1,
     painel_senhas_soulmv_emergencia,
@@ -115,10 +117,12 @@ app.include_router(painel_senhas_soulmv_clinica1.router)
 app.include_router(painel_senhas_soulmv_emergencia.router)
 app.include_router(painel_leitos.router)
 app.include_router(painel_leitos_soulmv.router)
+app.include_router(painel_hemodinamica.router)
 app.include_router(resultados.router)
 app.include_router(resultados_laboratoriais.router)
 app.include_router(faturamento_rede.router)
 app.include_router(biq.router)
+app.include_router(biq_admissoes_eletivas.router)
 app.include_router(farmacia.router)
 app.include_router(whatsapp.router)
 app.include_router(institucional.router)

@@ -22,33 +22,78 @@ MAX_CODIGOS_REDE = 500
 USUARIO_MV_PATTERN = re.compile(r'^[A-Z0-9_.-]{2,30}$')
 
 
+# Cada atendimento realizado e vinculado a uma unica agenda antes de formar
+# o turno. Isso evita fan-out de IT_AGENDA_CENTRAL e nao depende de SN_ATIVO.
 CONSULTA_BIQ_CONSULTAS_AMBULATORIAIS_REALIZADAS = text(
     """
-    SELECT a.CD_PRESTADOR AS "cd_prestador",
-           pr.NM_PRESTADOR AS "nm_prestador",
-           pr.DS_CODIGO_CONSELHO AS "crm",
-           COUNT(CASE
-               WHEN TRUNC(a.HR_ATENDIMENTO) -
-                    TRUNC(a.HR_ATENDIMENTO, 'IW') BETWEEN 0 AND 4
-               THEN 1
-           END) AS "consultas_semana",
-           COUNT(CASE
-               WHEN TRUNC(a.HR_ATENDIMENTO) -
-                    TRUNC(a.HR_ATENDIMENTO, 'IW') NOT BETWEEN 0 AND 4
-               THEN 1
-           END) AS "consultas_fds",
-           COUNT(*) AS "consultas_total"
-      FROM DBAMV.ATENDIME a
-      JOIN DBAMV.PRESTADOR pr
-        ON pr.CD_PRESTADOR = a.CD_PRESTADOR
-     WHERE a.TP_ATENDIMENTO = 'A'
-       AND a.HR_ATENDIMENTO >= :data_inicio
-       AND a.HR_ATENDIMENTO < :data_fim_exclusiva
-       AND a.CD_PRESTADOR IS NOT NULL
-     GROUP BY a.CD_PRESTADOR,
-              pr.NM_PRESTADOR,
-              pr.DS_CODIGO_CONSELHO
-     ORDER BY pr.NM_PRESTADOR
+    WITH atendimentos_unicos AS (
+        SELECT a.CD_ATENDIMENTO,
+               a.CD_PRESTADOR,
+               pr.NM_PRESTADOR,
+               pr.DS_CODIGO_CONSELHO AS CRM,
+               ac.DT_AGENDA,
+               ac.HR_INICIO,
+               ROW_NUMBER() OVER (
+                   PARTITION BY a.CD_ATENDIMENTO
+                   ORDER BY i.CD_IT_AGENDA_CENTRAL
+               ) AS RN
+          FROM DBAMV.IT_AGENDA_CENTRAL i
+          JOIN DBAMV.AGENDA_CENTRAL ac
+            ON ac.CD_AGENDA_CENTRAL = i.CD_AGENDA_CENTRAL
+          JOIN DBAMV.ATENDIME a
+            ON a.CD_ATENDIMENTO = i.CD_ATENDIMENTO
+           AND a.TP_ATENDIMENTO = 'A'
+          JOIN DBAMV.PRESTADOR pr
+            ON pr.CD_PRESTADOR = a.CD_PRESTADOR
+         WHERE ac.TP_AGENDA = 'A'
+           AND ac.DT_AGENDA >= :data_inicio
+           AND ac.DT_AGENDA < :data_fim_exclusiva
+           AND a.CD_PRESTADOR IS NOT NULL
+    )
+    SELECT TO_CHAR(CD_PRESTADOR) || ':' ||
+           TO_CHAR(TRUNC(DT_AGENDA), 'YYYYMMDD') || ':' ||
+           CASE
+               WHEN TO_NUMBER(TO_CHAR(HR_INICIO, 'HH24')) < 12 THEN 'MANHA'
+               WHEN TO_NUMBER(TO_CHAR(HR_INICIO, 'HH24')) < 18 THEN 'TARDE'
+               ELSE 'NOITE'
+           END AS "turno_id",
+           CD_PRESTADOR AS "cd_prestador",
+           NM_PRESTADOR AS "nm_prestador",
+           CRM AS "crm",
+           TRUNC(DT_AGENDA) AS "data",
+           CASE
+               WHEN TO_NUMBER(TO_CHAR(HR_INICIO, 'HH24')) < 12 THEN 'MANHA'
+               WHEN TO_NUMBER(TO_CHAR(HR_INICIO, 'HH24')) < 18 THEN 'TARDE'
+               ELSE 'NOITE'
+           END AS "periodo",
+           MIN(HR_INICIO) AS "hora_inicio",
+           MAX(HR_INICIO) AS "hora_fim",
+           COUNT(DISTINCT CD_ATENDIMENTO) AS "consultas",
+           CASE
+               WHEN TRUNC(DT_AGENDA) - TRUNC(DT_AGENDA, 'IW')
+                    BETWEEN 0 AND 4
+                   THEN 'semana'
+               ELSE 'fim_semana'
+           END AS "dia_tipo",
+           'MV/AGENDA_CENTRAL+ATENDIME' AS "origem"
+      FROM atendimentos_unicos
+     WHERE RN = 1
+     GROUP BY CD_PRESTADOR,
+              NM_PRESTADOR,
+              CRM,
+              TRUNC(DT_AGENDA),
+              CASE
+                  WHEN TO_NUMBER(TO_CHAR(HR_INICIO, 'HH24')) < 12 THEN 'MANHA'
+                  WHEN TO_NUMBER(TO_CHAR(HR_INICIO, 'HH24')) < 18 THEN 'TARDE'
+                  ELSE 'NOITE'
+              END,
+              CASE
+                  WHEN TRUNC(DT_AGENDA) - TRUNC(DT_AGENDA, 'IW')
+                       BETWEEN 0 AND 4
+                      THEN 'semana'
+                  ELSE 'fim_semana'
+              END
+     ORDER BY NM_PRESTADOR, TRUNC(DT_AGENDA), "periodo"
     """
 )
 
@@ -152,13 +197,40 @@ def consultar_consultas_ambulatoriais_realizadas(
             ),
         ) from exc
 
-    consultas = _rows_to_dict(rows)
+    turnos_detalhados = _rows_to_dict(rows)
+    por_prestador = {}
+    for turno in turnos_detalhados:
+        prestador_id = turno['cd_prestador']
+        resumo = por_prestador.setdefault(
+            prestador_id,
+            {
+                'cd_prestador': prestador_id,
+                'nm_prestador': turno['nm_prestador'],
+                'crm': turno['crm'],
+                'turnos_semana': 0,
+                'turnos_fds': 0,
+                'consultas_semana': 0,
+                'consultas_fds': 0,
+                'consultas_total': 0,
+            },
+        )
+        consultas_turno = int(turno.get('consultas') or 0)
+        if turno['dia_tipo'] == 'semana':
+            resumo['turnos_semana'] += 1
+            resumo['consultas_semana'] += consultas_turno
+        else:
+            resumo['turnos_fds'] += 1
+            resumo['consultas_fds'] += consultas_turno
+        resumo['consultas_total'] += consultas_turno
+
+    consultas = list(por_prestador.values())
     return {
         'periodo': {
             'data_inicio': data_inicio.isoformat(),
             'data_fim': data_fim.isoformat(),
         },
         'consultas': consultas,
+        'turnos_detalhados': turnos_detalhados,
         'total_consultas': sum(
             int(item.get('consultas_total') or 0) for item in consultas
         ),
@@ -3049,4 +3121,118 @@ def consultar_indicadores_hospitalares(
             "producao_cirurgica": len(producao_cirurgica),
             "faturamento": len(faturamento),
         },
+    }
+
+VALOR_UNITARIO_ALTA = Decimal('70.00')
+
+CONSULTA_BIQ_ALTAS_HOSPITALARES = text(
+    """
+    WITH documentos_validos AS (
+        SELECT d.CD_DOCUMENTO_CLINICO,
+               d.CD_ATENDIMENTO,
+               d.CD_PRESTADOR,
+               pr.NM_PRESTADOR,
+               pr.DS_CODIGO_CONSELHO AS CRM,
+               a.CD_PACIENTE,
+               pac.NM_PACIENTE,
+               a.DT_ATENDIMENTO,
+               a.DT_ALTA,
+               d.DH_FECHAMENTO,
+               ROW_NUMBER() OVER (
+                   PARTITION BY d.CD_ATENDIMENTO
+                   ORDER BY d.DH_FECHAMENTO DESC,
+                            d.CD_DOCUMENTO_CLINICO DESC
+               ) AS RN
+          FROM DBAMV.PW_DOCUMENTO_CLINICO d
+          JOIN DBAMV.ATENDIME a
+            ON a.CD_ATENDIMENTO = d.CD_ATENDIMENTO
+          JOIN DBAMV.PRESTADOR pr
+            ON pr.CD_PRESTADOR = d.CD_PRESTADOR
+          JOIN DBAMV.PACIENTE pac
+            ON pac.CD_PACIENTE = a.CD_PACIENTE
+         WHERE d.CD_TIPO_DOCUMENTO = 51
+           AND d.TP_STATUS = 'FECHADO'
+           AND d.CD_PRESTADOR IS NOT NULL
+           AND a.TP_ATENDIMENTO = 'I'
+           AND a.DT_ALTA IS NOT NULL
+           AND a.DT_ALTA >= :data_inicio
+           AND a.DT_ALTA < :data_fim_exclusiva
+    )
+    SELECT CD_DOCUMENTO_CLINICO AS "cd_documento_clinico",
+           CD_ATENDIMENTO AS "cd_atendimento",
+           CD_PRESTADOR AS "cd_prestador",
+           NM_PRESTADOR AS "nm_prestador",
+           CRM AS "crm",
+           CD_PACIENTE AS "cd_paciente",
+           NM_PACIENTE AS "nm_paciente",
+           DT_ATENDIMENTO AS "dt_atendimento",
+           DT_ALTA AS "dt_alta",
+           DH_FECHAMENTO AS "dh_fechamento"
+      FROM documentos_validos
+     WHERE RN = 1
+     ORDER BY DT_ALTA DESC, NM_PACIENTE
+    """
+)
+
+
+
+@router.get('/altas-hospitalares', status_code=HTTPStatus.OK)
+def consultar_altas_hospitalares(
+    usuario_atual: ValidaUsuarioAtual,
+    data_inicio: date,
+    data_fim: date,
+    session: Session = Depends(get_session_oracle),
+):
+    """Lista altas hospitalares fechadas e deduplicadas por atendimento."""
+    del usuario_atual
+    params = _periodo_inclusivo(data_inicio, data_fim)
+    try:
+        rows = session.execute(
+            CONSULTA_BIQ_ALTAS_HOSPITALARES,
+            params,
+        ).mappings().all()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível consultar as altas hospitalares no MV.',
+        ) from exc
+
+    altas = _rows_to_dict(rows)
+    medicos_por_codigo: dict[int, dict] = {}
+    for alta in altas:
+        alta['valor'] = float(VALOR_UNITARIO_ALTA)
+        codigo = int(alta['cd_prestador'])
+        medico = medicos_por_codigo.setdefault(
+            codigo,
+            {
+                'cd_prestador': codigo,
+                'nm_prestador': alta.get('nm_prestador'),
+                'crm': alta.get('crm'),
+                'quantidade_altas': 0,
+                'valor_total': 0.0,
+            },
+        )
+        medico['quantidade_altas'] += 1
+        medico['valor_total'] = float(
+            Decimal(str(medico['valor_total'])) + VALOR_UNITARIO_ALTA
+        )
+
+    medicos = sorted(
+        medicos_por_codigo.values(),
+        key=lambda item: (
+            -item['quantidade_altas'],
+            item['nm_prestador'] or '',
+        ),
+    )
+    total_altas = len(altas)
+    return {
+        'periodo': {
+            'data_inicio': data_inicio.isoformat(),
+            'data_fim': data_fim.isoformat(),
+        },
+        'valor_unitario': float(VALOR_UNITARIO_ALTA),
+        'total_altas': total_altas,
+        'valor_total': float(VALOR_UNITARIO_ALTA * total_altas),
+        'medicos': medicos,
+        'altas': altas,
     }

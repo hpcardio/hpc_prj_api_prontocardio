@@ -408,6 +408,7 @@ class ConfirmarAgendamentoInput(PreValidacaoAgendamentoInput):
     usuario_mv: str | None = Field(default=None, max_length=60)
     nome_operador: str | None = Field(default=None, max_length=120)
     observacao: str | None = Field(default=None, max_length=600)
+    confirmar_duplicidade: bool = False
 
 
 class AgendamentoConfirmado(BaseModel):
