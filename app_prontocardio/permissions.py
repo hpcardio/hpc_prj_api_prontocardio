@@ -18,6 +18,7 @@ TELAS_SISTEMA = (
     'solicitar_nota',
     'solicitacoes_cadastradas',
     'solicitacoes_recusas',
+    'fornecedores_criticos',
     'configuracao_convenio',
     'empresas_nfse',
     'ecg_worklist',
