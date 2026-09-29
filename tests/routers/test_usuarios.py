@@ -55,6 +55,24 @@ def test_criar_usuario(cliente, token_teste):
     }
 
 
+def test_criar_usuario_com_acesso_a_fornecedores_criticos(
+    cliente, token_teste
+):
+    response = cliente.post(
+        '/usuarios/',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json={
+            'nome': 'usuario_fornecedores',
+            'email': 'usuario_fornecedores@teste.com',
+            'senha': 'testes123',
+            'telas_permitidas': ['fornecedores_criticos'],
+        },
+    )
+
+    assert response.status_code == HTTPStatus.CREATED
+    assert response.json()['telas_permitidas'] == ['fornecedores_criticos']
+
+
 def test_criar_usuario_com_mesmo_nome(cliente, usuario_teste, token_teste):
     """Testando a criação de usuários com mesmo nome"""
 
