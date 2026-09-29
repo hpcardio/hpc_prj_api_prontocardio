@@ -58,6 +58,9 @@ from app_prontocardio.agendamento_schema import (
 from app_prontocardio.agendamento_contatos import (
     sincronizar_contatos_agendamento,
 )
+from app_prontocardio.agendamento_duplicidade import (
+    duplicidade_exige_confirmacao,
+)
 from app_prontocardio.agendamento_erros import (
     detalhe_seguro_atualizacao_paciente,
 )
@@ -1007,6 +1010,34 @@ def confirmar_agendamento(
             detail='Gravacao do MV desabilitada neste ambiente.',
         )
 
+    _validar_regras_agenda_mv(session, payload)
+
+    duplicado = (
+        session
+        .execute(
+            CONSULTA_AGENDAMENTO_DUPLICADO,
+            {
+                'cd_paciente': payload.cd_paciente,
+                'cd_item_agendamento': payload.cd_item_agendamento,
+                'cd_it_agenda_central': payload.cd_it_agenda_central,
+            },
+        )
+        .mappings()
+        .first()
+    )
+    if duplicidade_exige_confirmacao(
+        duplicado,
+        payload.confirmar_duplicidade,
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'O paciente possui outro agendamento ativo para este item. '
+                'Revise o agendamento existente e confirme explicitamente '
+                'se deseja continuar mesmo assim.'
+            ),
+        )
+
     if payload.cd_tip_mar is not None:
         tipo_compativel = session.scalar(
             CONSULTA_SLOT_TIPO_COMPATIVEL,
@@ -1253,19 +1284,7 @@ def reagendar_agendamento(
             detail='O item do reagendamento difere do agendamento atual.',
         )
 
-    parametros_novo = payload.model_dump()
-    parametros_novo.pop('reserva_token', None)
-    compativel = session.execute(
-        CONSULTA_PRE_VALIDACAO, parametros_novo
-    ).first()
-    if compativel is None:
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail=(
-                'O novo horario nao pertence a uma agenda compativel com '
-                'este item. Atualize os horarios e tente novamente.'
-            ),
-        )
+    _validar_regras_agenda_mv(session, payload)
 
     novo = session.execute(
         text(
@@ -1649,8 +1668,6 @@ CONSULTA_PROCEDIMENTOS_MV = text(
 _FILTRO_IDADE_PACIENTE_SQL = """
            AND (
                :cd_paciente IS NULL
-               OR ac.NR_IDADE_MINIMA IS NULL
-               OR ac.NR_IDADE_MAXIMA IS NULL
                OR NOT EXISTS (
                    SELECT 1
                      FROM DBAMV.PACIENTE pac_idade
@@ -1667,7 +1684,13 @@ _FILTRO_IDADE_PACIENTE_SQL = """
                               TRUNC(SYSDATE),
                               TRUNC(pac_idade.DT_NASCIMENTO)
                           ) / 12
-                      ) BETWEEN ac.NR_IDADE_MINIMA AND ac.NR_IDADE_MAXIMA
+                      ) >= NVL(ac.NR_IDADE_MINIMA, 0)
+                      AND TRUNC(
+                          MONTHS_BETWEEN(
+                              TRUNC(SYSDATE),
+                              TRUNC(pac_idade.DT_NASCIMENTO)
+                          ) / 12
+                      ) <= NVL(ac.NR_IDADE_MAXIMA, 999)
                )
            )
 """
@@ -1753,6 +1776,8 @@ CONSULTA_PRE_VALIDACAO = text(
       FROM DBAMV.IT_AGENDA_CENTRAL iac
       JOIN DBAMV.AGENDA_CENTRAL ac
         ON ac.CD_AGENDA_CENTRAL = iac.CD_AGENDA_CENTRAL
+      LEFT JOIN DBAMV.ESCALA_CENTRAL esc
+        ON esc.CD_ESCALA_CENTRAL = ac.CD_ESCALA_CENTRAL
       LEFT JOIN DBAMV.AGENDA_CENTRAL_ITEM_AGENDA acia
         ON acia.CD_AGENDA_CENTRAL = ac.CD_AGENDA_CENTRAL
        AND acia.CD_ITEM_AGENDAMENTO = :cd_item_agendamento
@@ -1771,8 +1796,14 @@ CONSULTA_PRE_VALIDACAO = text(
         ON ua.CD_UNIDADE_ATENDIMENTO = ac.CD_UNIDADE_ATENDIMENTO
       LEFT JOIN DBAMV.RECURSO_CENTRAL rc
         ON rc.CD_RECURSO_CENTRAL = ac.CD_RECURSO_CENTRAL
+      LEFT JOIN DBAMV.RECURSO_CENTRAL rc_esc
+        ON rc_esc.CD_RECURSO_CENTRAL = esc.CD_RECURSO_CENTRAL
       LEFT JOIN DBAMV.SETOR st
         ON st.CD_SETOR = ac.CD_SETOR
+      LEFT JOIN DBAMV.SETOR st_esc
+        ON st_esc.CD_SETOR = esc.CD_SETOR
+      LEFT JOIN DBAMV.CONVENIO conv_filtro
+        ON conv_filtro.CD_CONVENIO = :cd_convenio
      WHERE iac.CD_IT_AGENDA_CENTRAL = :cd_it_agenda_central
        AND (
            acia.CD_ITEM_AGENDAMENTO IS NOT NULL
@@ -1780,9 +1811,39 @@ CONSULTA_PRE_VALIDACAO = text(
                ia.TP_ITEM = 'L'
                AND (
                    ac.TP_AGENDA = 'L'
+                   OR esc.TP_ESCALA = 'L'
                    OR UPPER(NVL(rc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+                   OR UPPER(NVL(rc_esc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
                    OR UPPER(NVL(st.NM_SETOR, '')) LIKE '%LAB%'
+                   OR UPPER(NVL(st_esc.NM_SETOR, '')) LIKE '%LAB%'
                )
+           )
+       )
+       AND iac.HR_AGENDA >= SYSDATE
+       AND iac.CD_PACIENTE IS NULL
+       AND iac.DT_GRAVACAO IS NULL
+       AND NVL(iac.SN_BLOQUEADO, 'N') <> 'S'
+       AND NVL(iac.SN_ENCAIXE, 'N') <> 'S'
+       AND NVL(iac.TP_SITUACAO, 'M') <> 'C'
+       AND ac.DT_LIBERACAO < SYSDATE
+       AND NVL(ac.SN_ATIVO, 'S') <> 'N'
+       AND NVL(ac.SN_FALTA, 'N') <> 'S'
+       AND NVL(ac.QT_MARCADOS, 0) < ac.QT_ATENDIMENTO
+       AND (
+           pac.DT_NASCIMENTO IS NULL
+           OR (
+               TRUNC(
+                   MONTHS_BETWEEN(
+                       TRUNC(SYSDATE),
+                       TRUNC(pac.DT_NASCIMENTO)
+                   ) / 12
+               ) >= NVL(ac.NR_IDADE_MINIMA, 0)
+               AND TRUNC(
+                   MONTHS_BETWEEN(
+                       TRUNC(SYSDATE),
+                       TRUNC(pac.DT_NASCIMENTO)
+                   ) / 12
+               ) <= NVL(ac.NR_IDADE_MAXIMA, 999)
            )
        )
        AND (
@@ -1807,8 +1868,133 @@ CONSULTA_PRE_VALIDACAO = text(
                    )
                )
            )
+       AND (
+           ac.CD_COR_AREA_FAMILIA IS NULL
+           OR pac.CD_COR_AREA_FAMILIA = ac.CD_COR_AREA_FAMILIA
+       )
+       AND (
+           ia.TP_ITEM = 'L'
+           AND (
+               ac.TP_AGENDA = 'L'
+               OR esc.TP_ESCALA = 'L'
+               OR UPPER(NVL(rc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+               OR UPPER(NVL(rc_esc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+               OR UPPER(NVL(st.NM_SETOR, '')) LIKE '%LAB%'
+               OR UPPER(NVL(st_esc.NM_SETOR, '')) LIKE '%LAB%'
+           )
+           OR EXISTS (
+               SELECT 1
+                 FROM DBAMV.EMPRESA_CONVENIO ec
+                WHERE ec.CD_MULTI_EMPRESA = ac.CD_MULTI_EMPRESA
+                  AND ec.CD_CONVENIO = :cd_convenio
+                  AND ec.SN_ATIVO = 'S'
+           )
+       )
+       AND (
+           ia.TP_ITEM = 'L'
+           AND (
+               ac.TP_AGENDA = 'L'
+               OR esc.TP_ESCALA = 'L'
+               OR UPPER(NVL(rc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+               OR UPPER(NVL(rc_esc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+               OR UPPER(NVL(st.NM_SETOR, '')) LIKE '%LAB%'
+               OR UPPER(NVL(st_esc.NM_SETOR, '')) LIKE '%LAB%'
+           )
+           OR NVL(ac.SN_SIA, 'A') = 'A'
+           OR (NVL(ac.SN_SIA, 'A') = 'S' AND conv_filtro.TP_CONVENIO = 'A')
+           OR (
+               NVL(ac.SN_SIA, 'A') = 'N'
+               AND conv_filtro.TP_CONVENIO IN ('C', 'P')
+           )
+       )
+       AND (
+           ia.TP_ITEM = 'L'
+           AND (
+               ac.TP_AGENDA = 'L'
+               OR esc.TP_ESCALA = 'L'
+               OR UPPER(NVL(rc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+               OR UPPER(NVL(rc_esc.DS_RECURSO_CENTRAL, '')) LIKE '%LAB%'
+               OR UPPER(NVL(st.NM_SETOR, '')) LIKE '%LAB%'
+               OR UPPER(NVL(st_esc.NM_SETOR, '')) LIKE '%LAB%'
+           )
+           OR NOT EXISTS (
+               SELECT 1
+                 FROM DBAMV.AGENDA_CENTRAL_CONVENIO acc
+                WHERE acc.CD_AGENDA_CENTRAL = ac.CD_AGENDA_CENTRAL
+           )
+           OR EXISTS (
+               SELECT 1
+                 FROM DBAMV.AGENDA_CENTRAL_CONVENIO acc
+                WHERE acc.CD_AGENDA_CENTRAL = ac.CD_AGENDA_CENTRAL
+                  AND acc.CD_CONVENIO = :cd_convenio
+           )
+       )
     """
 )
+
+
+def _validar_regras_agenda_mv(
+    session: Session,
+    payload: PreValidacaoAgendamentoInput,
+) -> dict:
+    """Repete no servidor as regras do MV imediatamente antes da escrita."""
+    parametros = {
+        'cd_it_agenda_central': payload.cd_it_agenda_central,
+        'cd_item_agendamento': payload.cd_item_agendamento,
+        'cd_paciente': payload.cd_paciente,
+        'cd_convenio': payload.cd_convenio,
+        'cd_con_pla': payload.cd_con_pla,
+        'cd_tip_mar': payload.cd_tip_mar,
+    }
+    try:
+        row = (
+            session
+            .execute(CONSULTA_PRE_VALIDACAO, parametros)
+            .mappings()
+            .one_or_none()
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Nao foi possivel validar as regras da agenda no MV.',
+        ) from exc
+
+    if row is None:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'O MV nao permite este agendamento para o paciente e o '
+                'convenio/plano informados. Verifique faixa etaria, convenio, '
+                'plano, item e tipo de atendimento.'
+            ),
+        )
+
+    dados = dict(row)
+    cd_agenda_payload = getattr(payload, 'cd_agenda_central', None)
+    if (
+        cd_agenda_payload is not None
+        and dados['cd_agenda_central'] != cd_agenda_payload
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'O horario pertence a outra agenda do MV. '
+                'Atualize a disponibilidade.'
+            ),
+        )
+
+    prestador_agenda = dados['cd_prestador']
+    if prestador_agenda is not None and payload.cd_prestador is None:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Selecione o medico/prestador da agenda.',
+        )
+    if payload.cd_prestador != prestador_agenda:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='O horario pertence a outro medico/prestador.',
+        )
+    return dados
 
 CONSULTA_SLOT_TIPO_COMPATIVEL = text(
     """
@@ -1846,11 +2032,21 @@ CONSULTA_AGENDAMENTO_DUPLICADO = text(
     SELECT *
       FROM (
         SELECT iac.CD_IT_AGENDA_CENTRAL AS cd_it_agenda_central,
-               iac.HR_AGENDA AS horario
+               iac.HR_AGENDA AS horario,
+               im.TP_STATUS AS status
           FROM DBAMV.IT_AGENDA_CENTRAL iac
+          JOIN DBAMV.IT_MOVIMENTO_AGENDA_CENTRAL im
+            ON im.CD_IT_AGENDA_CENTRAL = iac.CD_IT_AGENDA_CENTRAL
+           AND im.CD_IT_MOVIMENTO_AGENDA_CENTRAL = (
+               SELECT MAX(im_ult.CD_IT_MOVIMENTO_AGENDA_CENTRAL)
+                 FROM DBAMV.IT_MOVIMENTO_AGENDA_CENTRAL im_ult
+                WHERE im_ult.CD_IT_AGENDA_CENTRAL = iac.CD_IT_AGENDA_CENTRAL
+           )
          WHERE iac.CD_PACIENTE = :cd_paciente
            AND iac.CD_ITEM_AGENDAMENTO = :cd_item_agendamento
-           AND iac.HR_AGENDA >= SYSDATE
+           AND iac.CD_IT_AGENDA_CENTRAL <> :cd_it_agenda_central
+           AND iac.HR_AGENDA >= SYSDATE - 1
+           AND im.TP_STATUS NOT IN ('E', 'C', 'P', 'T')
          ORDER BY iac.HR_AGENDA
       )
      WHERE ROWNUM = 1
@@ -4378,22 +4574,7 @@ def pre_validar_agendamento(
     parametros.pop('reserva_token', None)
 
     try:
-        row = (
-            session
-            .execute(CONSULTA_PRE_VALIDACAO, parametros)
-            .mappings()
-            .one_or_none()
-        )
-        if row is None:
-            raise HTTPException(
-                status_code=HTTPStatus.CONFLICT,
-                detail=(
-                    'O horario nao corresponde aos dados selecionados. '
-                    'Atualize a disponibilidade.'
-                ),
-            )
-
-        dados = dict(row)
+        dados = _validar_regras_agenda_mv(session, payload)
         if (
             dados['slot_cd_paciente'] is not None
             or dados['slot_dt_gravacao'] is not None
@@ -4405,18 +4586,6 @@ def pre_validar_agendamento(
                 detail='O horario nao esta mais disponivel.',
             )
 
-        prestador_agenda = dados['cd_prestador']
-        if prestador_agenda is not None and payload.cd_prestador is None:
-            raise HTTPException(
-                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-                detail='Selecione o medico/prestador da agenda.',
-            )
-        if payload.cd_prestador != prestador_agenda:
-            raise HTTPException(
-                status_code=HTTPStatus.CONFLICT,
-                detail='O horario pertence a outro medico/prestador.',
-            )
-
         duplicado = (
             session
             .execute(
@@ -4424,6 +4593,7 @@ def pre_validar_agendamento(
                 {
                     'cd_paciente': payload.cd_paciente,
                     'cd_item_agendamento': payload.cd_item_agendamento,
+                    'cd_it_agenda_central': payload.cd_it_agenda_central,
                 },
             )
             .mappings()
@@ -4440,7 +4610,7 @@ def pre_validar_agendamento(
     alertas = []
     if duplicado:
         alertas.append(
-            'O paciente ja possui agendamento futuro para este item.'
+            'O paciente ja possui outro agendamento ativo para este item.'
         )
 
     for campo in (
