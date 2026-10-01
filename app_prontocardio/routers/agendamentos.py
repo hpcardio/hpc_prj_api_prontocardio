@@ -48,6 +48,7 @@ from app_prontocardio.agendamento_schema import (
     PlanosDisponiveis,
     PrestadoresAgendamento,
     TiposMarcacaoConsulta,
+    UltimoAtendimentoProcedimento,
     PreValidacaoAgendamento,
     PreValidacaoAgendamentoInput,
     ReagendarAgendamentoInput,
@@ -84,6 +85,10 @@ from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.agendamento_historico import (
     RepositorioHistoricoAgendamento,
 )
+from app_prontocardio.services.agendamento_ultimo_atendimento import (
+    consultar_ultimo_atendimento_procedimento,
+    exigir_permissao_ultimo_atendimento,
+)
 from app_prontocardio.services.agendamento_origens import (
     AgendamentoOrigemService,
     EvidenciaOrigem,
@@ -96,6 +101,10 @@ from app_prontocardio.settings import Settings
 from app_prontocardio.whatsapp_service import enviar_template_whatsapp
 
 router = APIRouter(prefix='/agendamentos', tags=['agendamentos'])
+
+from app_prontocardio.routers.agenda_rede_checkup import router as agenda_rede_checkup_router
+
+router.include_router(agenda_rede_checkup_router)
 logger = logging.getLogger(__name__)
 settings = Settings()
 
@@ -4701,6 +4710,42 @@ def consultar_horarios(  # noqa: PLR0913
         elif unidade == 'UNIDADE DIAGNOSTICO 2':
             horario['ds_unidade_atendimento'] = 'CLÍNICA DIAGNÓSTICA 02'
     return {'horarios': horarios, 'total': len(horarios)}
+
+
+@router.get(
+    '/pacientes/{cd_paciente}/ultimo-atendimento',
+    status_code=HTTPStatus.OK,
+    response_model=UltimoAtendimentoProcedimento,
+    response_model_exclude_none=True,
+)
+def consultar_ultimo_atendimento_externo(
+    usuario_atual: ValidaUsuarioAtual,
+    cd_paciente: int,
+    cd_item_agendamento: Annotated[int, Query(gt=0)],
+    oracle: Session = Depends(get_session_oracle),
+    postgres: Session = Depends(get_session_postgres),
+):
+    """Retorna somente o último atendimento médico efetivo do procedimento."""
+    if cd_paciente <= 0:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Código do paciente inválido.',
+        )
+    usuario = exigir_permissao_ultimo_atendimento(usuario_atual)
+    try:
+        return consultar_ultimo_atendimento_procedimento(
+            oracle=oracle,
+            postgres=postgres,
+            usuario=usuario,
+            cd_paciente=cd_paciente,
+            cd_item_agendamento=cd_item_agendamento,
+        )
+    except SQLAlchemyError as exc:
+        postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível consultar o último atendimento no MV.',
+        ) from exc
 
 
 @router.get(

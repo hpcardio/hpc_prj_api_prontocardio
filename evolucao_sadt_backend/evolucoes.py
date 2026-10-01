@@ -19,7 +19,7 @@ from evolucao_sadt_backend.evolucao_schema import (
     EvolucoesMv,
     LinhasCuidadoEvolucao,
 )
-from evolucao_sadt_backend.lc_dac_support import load_lc_dac_support
+from evolucao_sadt_backend.care_support import load_care_support
 from app_prontocardio.evolucao_service import (
     ConfiguracaoEvolucaoMv,
     EvolucaoMvConfiguracaoInvalida,
@@ -737,10 +737,11 @@ def consultar_evolucoes(
 
 
 @router.get('/apoio-clinico/{cd_atendimento}')
-def consultar_apoio_clinico_lc_dac(
+def consultar_apoio_clinico(
     cd_atendimento: int,
     session: SessionOracle,
     _: UsuarioTi,
+    linha_cuidado: str = 'LC-DAC',
 ):
     if cd_atendimento <= 0:
         raise HTTPException(
@@ -748,7 +749,12 @@ def consultar_apoio_clinico_lc_dac(
             detail='Atendimento inválido.',
         )
     try:
-        return load_lc_dac_support(session, cd_atendimento)
+        return load_care_support(session, cd_atendimento, linha_cuidado)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except SQLAlchemyError as exc:
         raise _mapear_erro(exc) from exc
 
