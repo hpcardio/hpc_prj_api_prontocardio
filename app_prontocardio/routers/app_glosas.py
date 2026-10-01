@@ -57,6 +57,7 @@ TEXT_FILTER_FIELDS = {'nm_paciente', 'nm_convenio', 'descricao'}
 ORACLE_IN_MAX_VALUES = 1000
 HONORARIOS_QUERY_CHUNK_SIZE = 250
 HONORARIOS_MINIMO_DETALHES = 2
+MAX_PROCESSOS_PDF_TRIAGEM = 100
 HONORARIOS_TOLERANCIA = Decimal('0.02')
 REGISTRO_GLOSA_PAYLOAD_EXCLUDE = {'demonstrativo_id_registro'}
 
@@ -915,17 +916,19 @@ def _cards_recursos_triagem(
     registros: list[RegistroGlosa],
     descricoes_tiss: dict[str, str],
 ) -> list[dict]:
-    cards_por_remessa: dict[int, dict] = {}
+    cards_por_remessa: dict[tuple[int, str], dict] = {}
     for registro in registros:
+        processo_original = str(
+            registro.processo_controle_fatura_gab or ''
+        ).strip()
+        chave_card = (registro.cd_remessa, processo_original.casefold())
         card = cards_por_remessa.setdefault(
-            registro.cd_remessa,
+            chave_card,
             {
                 'cd_remessa': registro.cd_remessa,
                 'convenio': registro.convenio,
                 'processo': {
-                    'numero_processo': (
-                        registro.processo_controle_fatura_gab
-                    )
+                    'numero_processo': processo_original
                 },
                 'pacientes': [],
             },
@@ -972,31 +975,69 @@ def _cards_recursos_triagem(
 
 
 @router.get('/glosas/recurso.pdf', status_code=HTTPStatus.OK)
-def gerar_pdf_recurso_triagem(
+def gerar_pdf_recurso_triagem(  # noqa: PLR0913
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
-    processo_original: str = Query(min_length=1, max_length=100),
+    processo_original: Annotated[
+        str | None,
+        Query(min_length=1, max_length=100),
+    ] = None,
     download: bool = True,
+    processos_originais: Annotated[
+        list[str] | None,
+        Query(),
+    ] = None,
+    codigo_paciente: Annotated[int | None, Query(gt=0)] = None,
 ):
-    processo_normalizado = processo_original.strip()
+    processos_informados = processos_originais or []
+    if processo_original:
+        processos_informados.append(processo_original)
+    processos_normalizados = list(dict.fromkeys(
+        processo.strip().casefold()
+        for processo in processos_informados
+        if processo and processo.strip()
+    ))
+    if not processos_normalizados:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail='Informe ao menos um processo original para gerar o PDF.',
+        )
+    if len(processos_normalizados) > MAX_PROCESSOS_PDF_TRIAGEM:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST,
+            detail='Informe no máximo 100 processos por PDF.',
+        )
+
+    filtros = [
+        func.lower(
+            func.trim(RegistroGlosa.processo_controle_fatura_gab)
+        ).in_(processos_normalizados),
+        RegistroGlosa.origem_registro == 'triagem',
+        RegistroGlosa.sn_glosado == 'true',
+        RegistroGlosa.sn_ativo == 'true',
+        RegistroGlosa.valor_recursado.is_not(None),
+        RegistroGlosa.valor_recursado > 0,
+    ]
+    if codigo_paciente is not None:
+        filtros.append(RegistroGlosa.codigo_paciente == codigo_paciente)
     registros = session.scalars(
         select(RegistroGlosa)
-        .where(
-            func.lower(
-                func.trim(RegistroGlosa.processo_controle_fatura_gab)
-            ) == processo_normalizado.casefold(),
-            RegistroGlosa.origem_registro == 'triagem',
-            RegistroGlosa.sn_glosado == 'true',
-            RegistroGlosa.sn_ativo == 'true',
-            RegistroGlosa.valor_recursado.is_not(None),
-            RegistroGlosa.valor_recursado > 0,
+        .where(*filtros)
+        .order_by(
+            RegistroGlosa.cd_remessa,
+            RegistroGlosa.processo_controle_fatura_gab,
+            RegistroGlosa.id,
         )
-        .order_by(RegistroGlosa.cd_remessa, RegistroGlosa.id)
     ).all()
     if not registros:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
-            detail='O processo da Triagem não possui recursos registrados.',
+            detail=(
+                'O paciente não possui recursos registrados nos processos '
+                'informados.'
+                if codigo_paciente is not None
+                else 'O processo da Triagem não possui recursos registrados.'
+            ),
         )
     codigos_tiss = {
         str(registro.motivo_glosa or '')
@@ -1012,9 +1053,14 @@ def gerar_pdf_recurso_triagem(
     cards = _cards_recursos_triagem(registros, descricoes_tiss)
     preencher_processo_recurso_issec(session, cards)
     conteudo = gerar_pdf_recurso_glosa(cards)
+    identificador_arquivo = (
+        f'paciente-{codigo_paciente}'
+        if codigo_paciente is not None
+        else processos_normalizados[0]
+    )
     processo_arquivo = ''.join(
         caractere if caractere.isalnum() else '-'
-        for caractere in processo_normalizado
+        for caractere in identificador_arquivo
     ).strip('-')
     disposicao = 'attachment' if download else 'inline'
     return Response(
