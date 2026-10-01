@@ -14,6 +14,24 @@ VALUE = Decimal('70.00')
 HEADER = '### ADMISSAO MEDICA PARA PROCEDIMENTO ELETIVO ###'
 
 QUERY = text("""
+WITH remessas_distintas AS (
+    SELECT DISTINCT rf.CD_ATENDIMENTO, rf.CD_REMESSA
+      FROM DBAMV.REG_FAT rf
+     WHERE rf.CD_REMESSA IS NOT NULL
+), remessas AS (
+    SELECT rd.CD_ATENDIMENTO,
+           LISTAGG(TO_CHAR(rd.CD_REMESSA), ', ') WITHIN GROUP (ORDER BY rd.CD_REMESSA) AS REMESSA
+      FROM remessas_distintas rd
+     GROUP BY rd.CD_ATENDIMENTO
+), faturamento AS (
+    SELECT rf.CD_ATENDIMENTO,
+           CASE WHEN COUNT(rf.CD_REMESSA) > 0 THEN 1 ELSE 0 END AS EM_REMESSA_FATURAMENTO,
+           MAX(r.REMESSA) AS REMESSA,
+           MAX(rf.CD_REG_FAT) AS CONTA_FATURAMENTO
+      FROM DBAMV.REG_FAT rf
+      LEFT JOIN remessas r ON r.CD_ATENDIMENTO = rf.CD_ATENDIMENTO
+     GROUP BY rf.CD_ATENDIMENTO
+)
 SELECT p.CD_PRE_MED AS "cd_pre_med",
        p.CD_DOCUMENTO_CLINICO AS "cd_documento_clinico",
        p.CD_ATENDIMENTO AS "cd_atendimento",
@@ -22,17 +40,23 @@ SELECT p.CD_PRE_MED AS "cd_pre_med",
        pr.DS_CODIGO_CONSELHO AS "crm",
        a.CD_PACIENTE AS "cd_paciente",
        pac.NM_PACIENTE AS "nm_paciente",
+       a.CD_CONVENIO AS "cd_convenio",
+       (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS "nm_convenio",
        a.DT_ATENDIMENTO AS "dt_atendimento",
        d.DH_FECHAMENTO AS "dh_fechamento",
        p.SN_FECHADO AS "sn_fechado",
        d.TP_STATUS AS "tp_status",
-       p.DS_EVOLUCAO AS "texto"
+       p.DS_EVOLUCAO AS "texto",
+       NVL(f.EM_REMESSA_FATURAMENTO, 0) AS "em_remessa_faturamento",
+       f.REMESSA AS "remessa",
+       f.CONTA_FATURAMENTO AS "conta_faturamento"
   FROM DBAMV.PRE_MED p
   JOIN DBAMV.PW_DOCUMENTO_CLINICO d
     ON d.CD_DOCUMENTO_CLINICO = p.CD_DOCUMENTO_CLINICO
   JOIN DBAMV.ATENDIME a ON a.CD_ATENDIMENTO = p.CD_ATENDIMENTO
   JOIN DBAMV.PRESTADOR pr ON pr.CD_PRESTADOR = p.CD_PRESTADOR
   JOIN DBAMV.PACIENTE pac ON pac.CD_PACIENTE = a.CD_PACIENTE
+  LEFT JOIN faturamento f ON f.CD_ATENDIMENTO = a.CD_ATENDIMENTO
  WHERE d.DH_FECHAMENTO >= :data_inicio
    AND d.DH_FECHAMENTO < :data_fim_exclusiva
    AND d.CD_TIPO_DOCUMENTO = 36

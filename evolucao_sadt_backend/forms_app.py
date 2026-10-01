@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 LIMITE_TEXTO_MV = 4000
 FORM_VERSION = '3.1'
-SUPPORTED_FORM_VERSIONS = {'1.0', '2.0', '3.0', '3.1'}
+SUPPORTED_FORM_VERSIONS = {'1.0', '2.0', '3.0', '3.1', '4.0'}
 SUPPORTED_LINES = {'LC-DAC', 'LC-IC', 'LC-PREVENCAO'}
 
 default_data_dir = (
@@ -1142,6 +1142,229 @@ def _render_dac_v2(data: dict[str, Any], version: str = '2.0') -> str:
     return '\n'.join(lines).strip()
 
 
+def _human(value: str) -> str:
+    return value.replace('_', ' ').strip().upper()
+
+
+def _confirmed_items(data: dict[str, Any], key: str) -> str:
+    return '; '.join(_human(str(item)) for item in _items(data, key))
+
+
+def _render_prevent_current(data: dict[str, Any]) -> str:
+    consultation = _text(data, 'tipo_consulta') or (
+        'CIR' if _text(data, 'tempo').startswith('cir') else 'CAL'
+    )
+    lines = [
+        'LINHA DE CUIDADO — PREVENÇÃO CARDIOVASCULAR E CARDIOMETABÓLICA',
+        'FORMULÁRIO CLÍNICO: LC-PREVENCAO v4.0',
+        f'Consulta atual: {consultation}.',
+    ]
+    if consultation == 'CIR':
+        lines.extend(['', '14. CIR — CONSULTA DE INTEGRAÇÃO DE RESULTADOS'])
+        change = _text(data, 'mudanca_clinica_cir')
+        if change:
+            lines.extend([
+                '14.2. MUDANÇA CLÍNICA DESDE A CAL',
+                'Houve mudança clínica relevante: '
+                f'{"Sim" if change == "sim" else "Não"}.',
+            ])
+            if change == 'sim' and _text(data, 'mudanca_clinica_descricao'):
+                lines.append(_text(data, 'mudanca_clinica_descricao'))
+        if _text(data, 'decisoes_cir'):
+            lines.extend([
+                '', '14.5. DECISÃO CLÍNICA', _text(data, 'decisoes_cir')
+            ])
+        if _text(data, 'conduta_adicional'):
+            lines.extend([
+                '', '18. VISÃO FINAL DA TELA — CIR',
+                _text(data, 'conduta_adicional'),
+            ])
+        return '\n'.join(lines).strip()
+
+    if _text(data, 'intercorrencia'):
+        lines.extend([
+            '', '4. EVOLUÇÃO CLÍNICA DESDE A ÚLTIMA AVALIAÇÃO',
+            'Houve intercorrência clínica: '
+            f'{"Sim" if _text(data, "intercorrencia") == "sim" else "Não"}.',
+        ])
+        if _items(data, 'intercorrencias'):
+            lines.append(_confirmed_items(data, 'intercorrencias') + '.')
+        if _text(data, 'intercorrencia_conduta'):
+            lines.append(_text(data, 'intercorrencia_conduta'))
+
+    pa_situation = _text(data, 'pa_situacao')
+    if pa_situation:
+        lines.extend(['', '6.1. PRESSÃO ARTERIAL'])
+        systolic = _text(data, 'pa_sistolica')
+        diastolic = _text(data, 'pa_diastolica')
+        if systolic or diastolic:
+            lines.append(f'PA atual: {systolic or "?"}/{diastolic or "?"} mmHg.')
+        lines.append(f'Situação: {_human(pa_situation)}.')
+        if _items(data, 'pa_condutas'):
+            lines.append('Conduta: ' + _confirmed_items(data, 'pa_condutas') + '.')
+        if _text(data, 'pa_conduta_outra'):
+            lines.append('Outra conduta: ' + _text(data, 'pa_conduta_outra'))
+
+    ldl_situation = _text(data, 'ldl_situacao')
+    ldl_repeat = _text(data, 'ldl_nova_dosagem')
+    if ldl_situation or ldl_repeat:
+        lines.extend(['', '6.2. LDL-C E RISCO ATEROSCLERÓTICO'])
+        ldl = _text(data, 'ldl_resultado')
+        ldl_date = _text(data, 'ldl_data')
+        if ldl:
+            lines.append(
+                f'LDL-C: {ldl} mg/dL{f" em {ldl_date}" if ldl_date else ""}.'
+            )
+        if ldl_situation:
+            lines.append(f'Situação: {_human(ldl_situation)}.')
+        if ldl_repeat:
+            lines.append(f'Nova dosagem: {_human(ldl_repeat)}.')
+
+    for heading, prefix in (
+        ('6.3. CONTROLE GLICÊMICO', 'hba1c'),
+        ('6.5. FUNÇÃO RENAL E ALBUMINÚRIA', 'renal'),
+    ):
+        situation = _text(data, f'{prefix}_situacao')
+        repeat = _text(data, f'{prefix}_nova_dosagem') or _text(
+            data, f'{prefix}_novo_controle'
+        )
+        if situation or repeat:
+            lines.extend(['', heading])
+            if situation:
+                lines.append(f'Situação: {_human(situation)}.')
+            if repeat:
+                lines.append(f'Nova avaliação: {_human(repeat)}.')
+
+    if _text(data, 'conduta_adicional'):
+        lines.extend([
+            '', '11. PLANO TERAPÊUTICO CONSOLIDADO',
+            _text(data, 'conduta_adicional'),
+        ])
+    if _items(data, 'prioridades'):
+        lines.extend([
+            '', '12. PRIORIDADES ATÉ A PRÓXIMA AVALIAÇÃO',
+            _confirmed_items(data, 'prioridades') + '.',
+        ])
+    return '\n'.join(lines).strip()
+
+
+def _render_ic_current(data: dict[str, Any]) -> str:
+    consultation = _text(data, 'tipo_consulta') or (
+        'CIR' if _text(data, 'tempo').startswith('cir') else 'CAL'
+    )
+    lines = [
+        'LINHA DE CUIDADO — INSUFICIÊNCIA CARDÍACA',
+        'FORMULÁRIO CLÍNICO: LC-IC v4.0',
+        f'Consulta atual: {consultation}.',
+    ]
+    if consultation == 'CIR':
+        lines.extend(['', '18. CIR — CONSULTA DE INTEGRAÇÃO DE RESULTADOS'])
+        change = _text(data, 'mudanca_clinica_cir')
+        if change:
+            lines.extend([
+                '18.2. Mudança clínica desde a CAL',
+                'Houve mudança clínica relevante: '
+                f'{"Sim" if change == "sim" else "Não"}.',
+            ])
+        if _text(data, 'mudanca_clinica_descricao'):
+            lines.append(_text(data, 'mudanca_clinica_descricao'))
+        if _text(data, 'decisoes_cir'):
+            lines.extend([
+                '', '18.3. Integração dos resultados',
+                _text(data, 'decisoes_cir'),
+            ])
+        if _text(data, 'observacao_decisao_adicional'):
+            lines.extend([
+                '', '18.4. Fechamento da CIR',
+                _text(data, 'observacao_decisao_adicional'),
+            ])
+        return '\n'.join(lines).strip()
+
+    phenotype = _text(data, 'fenotipo_atual')
+    feve = _text(data, 'feve')
+    feve_date = _text(data, 'feve_data')
+    if phenotype or feve:
+        lines.extend(['', '6. FENÓTIPO DA INSUFICIÊNCIA CARDÍACA'])
+        if feve:
+            lines.append(
+                f'FEVE: {feve}%{f" em {feve_date}" if feve_date else ""}.'
+            )
+        if phenotype:
+            lines.append(f'Fenótipo atual: {phenotype}.')
+
+    risk = _text(data, 'risco_situacao')
+    if risk:
+        lines.extend([
+            '', '7. ESTRATIFICAÇÃO DE RISCO',
+            f'Situação: {_human(risk)}.',
+        ])
+        if _items(data, 'criterios_alto_risco'):
+            lines.append(
+                'Critérios identificados: '
+                + '; '.join(str(item) for item in _items(data, 'criterios_alto_risco'))
+                + '.'
+            )
+
+    phenotype_heading = {
+        'ICFEr': '10. TRATAMENTO — ICFEr',
+        'icfer': '10. TRATAMENTO — ICFEr',
+        'ICFEmi': '11. TRATAMENTO — ICFEmi',
+        'icfemi': '11. TRATAMENTO — ICFEmi',
+        'ICFEP': '12. TRATAMENTO — ICFEP',
+        'icfep': '12. TRATAMENTO — ICFEP',
+    }.get(phenotype)
+    treatment_lines: list[str] = []
+    if phenotype_heading == '10. TRATAMENTO — ICFEr':
+        labels = {
+            'arni': 'ARNI/IECA/BRA',
+            'betabloqueador': 'Betabloqueador',
+            'arm': 'ARM',
+            'isglt2': 'iSGLT2',
+        }
+        decisions = {
+            'manter': 'Manter', 'iniciar': 'Iniciar', 'titular': 'Titular',
+            'contraindicacao': 'Contraindicação/intolerância',
+        }
+        for key, label in labels.items():
+            decision = _text(data, f'pilar_{key}_decisao')
+            if decision:
+                treatment_lines.append(
+                    f'{label}: {decisions.get(decision, decision)}.'
+                )
+    elif phenotype_heading == '11. TRATAMENTO — ICFEmi':
+        if _text(data, 'icfemi_isglt2'):
+            treatment_lines.append(
+                'iSGLT2: ' + _human(_text(data, 'icfemi_isglt2')) + '.'
+            )
+    elif phenotype_heading == '12. TRATAMENTO — ICFEP':
+        if _text(data, 'icfep_isglt2'):
+            treatment_lines.append(
+                'iSGLT2: ' + _human(_text(data, 'icfep_isglt2')) + '.'
+            )
+    if phenotype_heading and treatment_lines:
+        lines.extend(['', phenotype_heading, *treatment_lines])
+
+    if _text(data, 'ferro_endovenoso_decisao'):
+        lines.extend([
+            '', '13. DEFICIÊNCIA DE FERRO',
+            'Decisão médica: '
+            + _human(_text(data, 'ferro_endovenoso_decisao')) + '.',
+        ])
+    if _text(data, 'cdi_decisao') or _text(data, 'trc_decisao'):
+        lines.append('')
+        lines.append('14. DISPOSITIVOS — CDI E TRC')
+        if _text(data, 'cdi_decisao'):
+            lines.append('CDI: ' + _human(_text(data, 'cdi_decisao')) + '.')
+        if _text(data, 'trc_decisao'):
+            lines.append('TRC: ' + _human(_text(data, 'trc_decisao')) + '.')
+    if _text(data, 'observacao_decisao_adicional'):
+        lines.extend([
+            '', '17. PLANO TERAPÊUTICO CONSOLIDADO',
+            _text(data, 'observacao_decisao_adicional'),
+        ])
+    return '\n'.join(lines).strip()
+
+
 def render_form(payload: FormInput) -> str:
     if payload.versao not in SUPPORTED_FORM_VERSIONS:
         raise HTTPException(
@@ -1152,7 +1375,11 @@ def render_form(payload: FormInput) -> str:
         'LC-IC': _render_ic,
         'LC-PREVENCAO': _render_prevent,
     }
-    if payload.linha_cuidado == 'LC-DAC' and payload.versao in {'2.0', '3.0', '3.1'}:
+    if payload.versao == '4.0' and payload.linha_cuidado == 'LC-IC':
+        text = _render_ic_current(payload.dados)
+    elif payload.versao == '4.0' and payload.linha_cuidado == 'LC-PREVENCAO':
+        text = _render_prevent_current(payload.dados)
+    elif payload.linha_cuidado == 'LC-DAC' and payload.versao in {'2.0', '3.0', '3.1', '4.0'}:
         text = _render_dac_v2(payload.dados, payload.versao)
     else:
         text = renderers[payload.linha_cuidado](payload.dados)

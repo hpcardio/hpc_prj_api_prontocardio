@@ -514,3 +514,13 @@ class HistoricoAgendamentosInterno(BaseModel):
     total: int
     pagina: int
     limite: int
+
+
+class UltimoAtendimentoProcedimento(BaseModel):
+    encontrado: bool
+    cd_atendimento: int | None = None
+    data_atendimento: datetime | None = None
+    cd_especialidade: int | None = None
+    especialidade: str | None = None
+    cd_prestador: int | None = None
+    medico: str | None = None

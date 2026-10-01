@@ -275,6 +275,8 @@ CONSULTA_TESTE_ERGOMETRICO_AGENDADOS = text(
            a.HR_ATENDIMENTO AS dt_atendimento,
            i.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
+           a.CD_CONVENIO AS cd_convenio,
+           (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS nm_convenio,
            a.CD_PRESTADOR AS cd_prestador_atendimento,
            p.NM_PRESTADOR AS nm_prestador_atendimento,
            p.DS_CODIGO_CONSELHO AS crm_atendimento,
@@ -312,6 +314,17 @@ CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS = text(
            a.HR_ATENDIMENTO AS dt_atendimento,
            a.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
+           a.CD_CONVENIO AS cd_convenio,
+           (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS nm_convenio,
+           MAX(ra.CD_REMESSA) OVER (
+               PARTITION BY a.CD_ATENDIMENTO
+           ) AS "cd_remessa",
+           CASE
+               WHEN MAX(ra.CD_REMESSA) OVER (
+                   PARTITION BY a.CD_ATENDIMENTO
+               ) IS NOT NULL THEN 1
+               ELSE 0
+           END AS "em_remessa_faturamento",
            ira.CD_PRO_FAT AS cd_pro_fat,
            pf.DS_PRO_FAT AS ds_pro_fat,
            a.CD_PRESTADOR AS cd_prestador_atendimento,
@@ -325,6 +338,8 @@ CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS = text(
             40101037, 40101045, 20101056, 18000002,
             70051021, 22051014, 10210004, 20010028
        )
+      LEFT JOIN DBAMV.REG_AMB ra
+        ON ra.CD_REG_AMB = ira.CD_REG_AMB
       LEFT JOIN DBAMV.PRO_FAT pf
         ON pf.CD_PRO_FAT = ira.CD_PRO_FAT
       LEFT JOIN DBAMV.PACIENTE pac
@@ -345,6 +360,8 @@ CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS_CHECKUP = text(
            ped.HR_PEDIDO AS dt_atendimento,
            a.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
+           a.CD_CONVENIO AS cd_convenio,
+           (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS nm_convenio,
            exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
            pf.DS_PRO_FAT AS ds_pro_fat,
            a.CD_PRESTADOR AS cd_prestador_atendimento,
@@ -383,6 +400,17 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
            a.HR_ATENDIMENTO AS dt_atendimento,
            a.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
+           a.CD_CONVENIO AS cd_convenio,
+           (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS nm_convenio,
+           MAX(ra.CD_REMESSA) OVER (
+               PARTITION BY a.CD_ATENDIMENTO
+           ) AS "cd_remessa",
+           CASE
+               WHEN MAX(ra.CD_REMESSA) OVER (
+                   PARTITION BY a.CD_ATENDIMENTO
+               ) IS NOT NULL THEN 1
+               ELSE 0
+           END AS "em_remessa_faturamento",
            ira.CD_PRO_FAT AS cd_pro_fat,
            pf.DS_PRO_FAT AS ds_pro_fat,
            ped.CD_PED_RX AS cd_ped_rx,
@@ -403,6 +431,8 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
             40101037, 40101045, 20101056, 18000002,
             70051021, 22051014, 10210004, 20010028
        )
+      LEFT JOIN DBAMV.REG_AMB ra
+        ON ra.CD_REG_AMB = ira.CD_REG_AMB
       LEFT JOIN DBAMV.PRO_FAT pf
         ON pf.CD_PRO_FAT = ira.CD_PRO_FAT
       LEFT JOIN DBAMV.PACIENTE pac
@@ -411,6 +441,12 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
         ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
       JOIN DBAMV.ITPED_RX ipr
         ON ipr.CD_PED_RX = ped.CD_PED_RX
+      JOIN DBAMV.EXA_RX exa
+        ON exa.CD_EXA_RX = ipr.CD_EXA_RX
+       AND exa.EXA_RX_CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
       JOIN DBAMV.LAUDO_RX lr
         ON lr.CD_LAUDO = ipr.CD_LAUDO
       LEFT JOIN DBAMV.PRESTADOR p
@@ -434,6 +470,8 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS_CHECKUP = text(
            ped.HR_PEDIDO AS dt_atendimento,
            a.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
+           a.CD_CONVENIO AS cd_convenio,
+           (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS nm_convenio,
            exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
            pf.DS_PRO_FAT AS ds_pro_fat,
            ped.CD_PED_RX AS cd_ped_rx,
@@ -3127,7 +3165,24 @@ VALOR_UNITARIO_ALTA = Decimal('70.00')
 
 CONSULTA_BIQ_ALTAS_HOSPITALARES = text(
     """
-    WITH documentos_validos AS (
+    WITH remessas_distintas AS (
+        SELECT DISTINCT rf.CD_ATENDIMENTO, rf.CD_REMESSA
+          FROM DBAMV.REG_FAT rf
+         WHERE rf.CD_REMESSA IS NOT NULL
+    ), remessas AS (
+        SELECT rd.CD_ATENDIMENTO,
+               LISTAGG(TO_CHAR(rd.CD_REMESSA), ', ') WITHIN GROUP (ORDER BY rd.CD_REMESSA) AS REMESSA
+          FROM remessas_distintas rd
+         GROUP BY rd.CD_ATENDIMENTO
+    ), faturamento AS (
+        SELECT rf.CD_ATENDIMENTO,
+               CASE WHEN COUNT(rf.CD_REMESSA) > 0 THEN 1 ELSE 0 END AS EM_REMESSA_FATURAMENTO,
+               MAX(r.REMESSA) AS REMESSA,
+               MAX(rf.CD_REG_FAT) AS CONTA_FATURAMENTO
+          FROM DBAMV.REG_FAT rf
+          LEFT JOIN remessas r ON r.CD_ATENDIMENTO = rf.CD_ATENDIMENTO
+         GROUP BY rf.CD_ATENDIMENTO
+    ), documentos_validos AS (
         SELECT d.CD_DOCUMENTO_CLINICO,
                d.CD_ATENDIMENTO,
                d.CD_PRESTADOR,
@@ -3135,9 +3190,14 @@ CONSULTA_BIQ_ALTAS_HOSPITALARES = text(
                pr.DS_CODIGO_CONSELHO AS CRM,
                a.CD_PACIENTE,
                pac.NM_PACIENTE,
+               a.CD_CONVENIO,
+               (SELECT c.NM_CONVENIO FROM DBAMV.CONVENIO c WHERE c.CD_CONVENIO = a.CD_CONVENIO) AS NM_CONVENIO,
                a.DT_ATENDIMENTO,
                a.DT_ALTA,
                d.DH_FECHAMENTO,
+               NVL(f.EM_REMESSA_FATURAMENTO, 0) AS EM_REMESSA_FATURAMENTO,
+               f.REMESSA,
+               f.CONTA_FATURAMENTO,
                ROW_NUMBER() OVER (
                    PARTITION BY d.CD_ATENDIMENTO
                    ORDER BY d.DH_FECHAMENTO DESC,
@@ -3150,7 +3210,10 @@ CONSULTA_BIQ_ALTAS_HOSPITALARES = text(
             ON pr.CD_PRESTADOR = d.CD_PRESTADOR
           JOIN DBAMV.PACIENTE pac
             ON pac.CD_PACIENTE = a.CD_PACIENTE
-         WHERE d.CD_TIPO_DOCUMENTO = 51
+          LEFT JOIN faturamento f
+            ON f.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+         WHERE d.CD_TIPO_DOCUMENTO = 31
+           AND d.CD_OBJETO = 434
            AND d.TP_STATUS = 'FECHADO'
            AND d.CD_PRESTADOR IS NOT NULL
            AND a.TP_ATENDIMENTO = 'I'
@@ -3165,9 +3228,14 @@ CONSULTA_BIQ_ALTAS_HOSPITALARES = text(
            CRM AS "crm",
            CD_PACIENTE AS "cd_paciente",
            NM_PACIENTE AS "nm_paciente",
+           CD_CONVENIO AS "cd_convenio",
+           NM_CONVENIO AS "nm_convenio",
            DT_ATENDIMENTO AS "dt_atendimento",
            DT_ALTA AS "dt_alta",
-           DH_FECHAMENTO AS "dh_fechamento"
+           DH_FECHAMENTO AS "dh_fechamento",
+           EM_REMESSA_FATURAMENTO AS "em_remessa_faturamento",
+           REMESSA AS "remessa",
+           CONTA_FATURAMENTO AS "conta_faturamento"
       FROM documentos_validos
      WHERE RN = 1
      ORDER BY DT_ALTA DESC, NM_PACIENTE

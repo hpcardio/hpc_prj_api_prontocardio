@@ -6,6 +6,7 @@ services:
     env_file:
       - .env
     environment:
+      WHATSAPP_AGENDA_USUARIOS: prontogestao@hospitalprontocardio.com.br
       APP_ENV: production
       EXPECTED_POSTGRES_HOST: ${EXPECTED_POSTGRES_HOST:?configure o host oficial}
       EXPECTED_POSTGRES_DATABASE: ${EXPECTED_POSTGRES_DATABASE:?configure o banco oficial}
