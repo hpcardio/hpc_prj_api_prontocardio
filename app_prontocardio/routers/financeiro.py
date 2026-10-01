@@ -6064,6 +6064,72 @@ def _resumo_tratativas_cogestao_remessa(
     return valor_tratado, possui_recurso
 
 
+def _totais_tratativas_follow_up(
+    session: Session,
+    escopos: list[tuple[str, int, Decimal]],
+) -> tuple[Decimal, Decimal]:
+    limites_por_chave: dict[tuple[str, int], Decimal] = defaultdict(
+        lambda: Decimal('0.00')
+    )
+    for numero_processo, codigo_remessa, valor_glosado in escopos:
+        chave = (
+            str(numero_processo or '').strip().casefold(),
+            int(codigo_remessa),
+        )
+        if not chave[0]:
+            continue
+        limites_por_chave[chave] += _money(valor_glosado)
+    if not limites_por_chave:
+        return Decimal('0.00'), Decimal('0.00')
+
+    valores_por_chave: dict[tuple[str, int], dict[str, Decimal]] = (
+        defaultdict(
+            lambda: {
+                'recurso': Decimal('0.00'),
+                'acato': Decimal('0.00'),
+            }
+        )
+    )
+    codigos_remessa = {chave[1] for chave in limites_por_chave}
+    for (
+        numero_processo,
+        codigo_remessa,
+        sn_glosado,
+        valor_recursado,
+    ) in session.execute(
+        select(
+            RegistroGlosa.processo_controle_fatura_gab,
+            RegistroGlosa.cd_remessa,
+            RegistroGlosa.sn_glosado,
+            RegistroGlosa.valor_recursado,
+        ).where(
+            RegistroGlosa.cd_remessa.in_(codigos_remessa),
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.valor_recursado.is_not(None),
+            RegistroGlosa.valor_recursado > 0,
+        )
+    ).all():
+        chave = (
+            str(numero_processo or '').strip().casefold(),
+            int(codigo_remessa),
+        )
+        if chave not in limites_por_chave:
+            continue
+        tipo = 'acato' if sn_glosado == 'not' else 'recurso'
+        valores_por_chave[chave][tipo] += _money(valor_recursado)
+
+    total_recursado = Decimal('0.00')
+    total_acatado = Decimal('0.00')
+    for chave, limite in limites_por_chave.items():
+        valores = valores_por_chave[chave]
+        valor_recursado = min(valores['recurso'], limite)
+        saldo = max(limite - valor_recursado, Decimal('0.00'))
+        valor_acatado = min(valores['acato'], saldo)
+        total_recursado += valor_recursado
+        total_acatado += valor_acatado
+    return _money(total_recursado), _money(total_acatado)
+
+
 def _marcar_cards_com_recurso_ativo(
     session: Session,
     cards: list[dict],
@@ -8594,6 +8660,8 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         )
         .where(*filtros)
     ).one()
+    valor_total_recursado = Decimal('0.00')
+    valor_total_acatado = Decimal('0.00')
     identidades_glosa = set(
         session.execute(
             select(
@@ -8693,6 +8761,28 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             )
             not in chaves_ipm
         ]
+        escopos_tratativas = [
+            (
+                str(row[1].processo_recebimento or ''),
+                int(row[0].cd_remessa),
+                _money(row[0].valor_glosado),
+            )
+            for row in todas_rows
+        ] + [
+            (
+                str(
+                    (card.get('processo') or {}).get('numero_processo')
+                    or ''
+                ),
+                int(card['cd_remessa']),
+                _money(card['valor_glosado']),
+            )
+            for card in cards_cogestao
+        ]
+        (
+            valor_total_recursado,
+            valor_total_acatado,
+        ) = _totais_tratativas_follow_up(session, escopos_tratativas)
 
         ids_vinculos_legados = {row[0].id for row in todas_rows}
         identidades_legadas = set()
@@ -8831,6 +8921,36 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         ]
         total = len(chaves_ordenadas)
     else:
+        escopos_tratativas = [
+            (
+                str(numero_processo or ''),
+                int(codigo_remessa),
+                _money(valor_glosado),
+            )
+            for numero_processo, codigo_remessa, valor_glosado
+            in session.execute(
+                select(
+                    ConciliacaoFaturamento.processo_recebimento,
+                    ConciliacaoFaturamentoRemessa.cd_remessa,
+                    ConciliacaoFaturamentoRemessa.valor_glosado,
+                )
+                .join(
+                    ConciliacaoFaturamento,
+                    ConciliacaoFaturamento.id
+                    == ConciliacaoFaturamentoRemessa.conciliacao_id,
+                )
+                .outerjoin(
+                    valores_alocados,
+                    valores_alocados.c.cd_remessa
+                    == ConciliacaoFaturamentoRemessa.cd_remessa,
+                )
+                .where(*filtros)
+            ).all()
+        ]
+        (
+            valor_total_recursado,
+            valor_total_acatado,
+        ) = _totais_tratativas_follow_up(session, escopos_tratativas)
         rows = session.execute(
             consulta_ordenada.offset(offset).limit(limit)
         ).all()
@@ -9038,6 +9158,8 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         'valor_total_glosado': _money(valor_total_glosado),
         'valor_total_pendente': _money(valor_total_pendente),
         'valor_total_tratado': _money(valor_total_tratado),
+        'valor_total_recursado': _money(valor_total_recursado),
+        'valor_total_acatado': _money(valor_total_acatado),
         'limit': limit,
         'offset': offset,
     }
