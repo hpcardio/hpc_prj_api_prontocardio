@@ -1296,6 +1296,8 @@ def test_follow_up_limita_totalizadores_ao_valor_glosado(
 
     assert follow_up['valor_total_glosado'] == Decimal('20.00')
     assert follow_up['valor_total_tratado'] == Decimal('20.00')
+    assert follow_up['valor_total_recursado'] == Decimal('20.00')
+    assert follow_up['valor_total_acatado'] == Decimal('0.00')
     assert follow_up['valor_total_pendente'] == Decimal('0.00')
 
 
@@ -2579,6 +2581,8 @@ def test_follow_up_agrupa_recurso_e_acato_no_mesmo_item(
     assert item['registro_recusa'].valor_recursado == Decimal('10.00')
     assert item['registro_acato'].valor_recursado == Decimal('5.00')
     assert follow_up['valor_total_tratado'] == Decimal('15.00')
+    assert follow_up['valor_total_recursado'] == Decimal('10.00')
+    assert follow_up['valor_total_acatado'] == Decimal('5.00')
     assert follow_up['valor_total_pendente'] == Decimal('5.00')
 
 

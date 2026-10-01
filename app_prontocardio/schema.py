@@ -1640,6 +1640,8 @@ class FollowUpGlosasList(BaseModel):
     valor_total_glosado: Decimal
     valor_total_pendente: Decimal
     valor_total_tratado: Decimal
+    valor_total_recursado: Decimal
+    valor_total_acatado: Decimal
     limit: int
     offset: int
 
