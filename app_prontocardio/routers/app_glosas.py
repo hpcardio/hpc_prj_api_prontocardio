@@ -1,3 +1,4 @@
+import unicodedata
 from datetime import datetime
 from decimal import Decimal
 from http import HTTPStatus
@@ -54,6 +55,9 @@ ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 TEXT_FILTER_FIELDS = {'nm_paciente', 'nm_convenio', 'descricao'}
 ORACLE_IN_MAX_VALUES = 1000
+HONORARIOS_QUERY_CHUNK_SIZE = 250
+HONORARIOS_MINIMO_DETALHES = 2
+HONORARIOS_TOLERANCIA = Decimal('0.02')
 REGISTRO_GLOSA_PAYLOAD_EXCLUDE = {'demonstrativo_id_registro'}
 
 
@@ -91,6 +95,140 @@ def _data_criacao_sao_paulo():
 
 def _executar_conta_atendimento_sem_duplicidade(session: Session, query):
     return session.execute(query).unique().scalars().all()
+
+
+def _valor_atendimento(row, field_name):
+    if isinstance(row, dict):
+        return row.get(field_name)
+    return getattr(row, field_name, None)
+
+
+def _texto_sem_acentos(value) -> str:
+    return ''.join(
+        character
+        for character in unicodedata.normalize('NFKD', str(value or ''))
+        if not unicodedata.combining(character)
+    ).casefold()
+
+
+def _eh_honorario_medico_internacao(row) -> bool:
+    grupo = _texto_sem_acentos(_valor_atendimento(row, 'ds_gru_fat'))
+    tipo = _valor_atendimento(row, 'tp_atendimento')
+    if isinstance(tipo, TipoAtendimento):
+        tipo = tipo.value
+    return (
+        'honorarios medicos' in grupo
+        and _texto_sem_acentos(tipo) == 'internacao'
+    )
+
+
+def _consultar_honorarios_individualizados(
+    session: Session,
+    rows,
+) -> dict[tuple[int, int], list[dict]]:
+    chaves = sorted({
+        (
+            int(_valor_atendimento(row, 'cd_reg')),
+            int(_valor_atendimento(row, 'cd_lancamento')),
+        )
+        for row in rows
+        if _eh_honorario_medico_internacao(row)
+        and _valor_atendimento(row, 'cd_reg') is not None
+        and _valor_atendimento(row, 'cd_lancamento') is not None
+    })
+    detalhes_por_lancamento: dict[tuple[int, int], list[dict]] = {}
+    for start in range(0, len(chaves), HONORARIOS_QUERY_CHUNK_SIZE):
+        chunk = chaves[start : start + HONORARIOS_QUERY_CHUNK_SIZE]
+        params = {}
+        criterios = []
+        for index, (cd_reg, cd_lancamento) in enumerate(chunk):
+            params[f'cd_reg_{index}'] = cd_reg
+            params[f'cd_lancamento_{index}'] = cd_lancamento
+            criterios.append(
+                '(im.cd_reg_fat = :cd_reg_{index} '
+                'AND im.cd_lancamento = :cd_lancamento_{index})'.format(
+                    index=index
+                )
+            )
+        if not criterios:
+            continue
+        query = text(f"""
+            SELECT
+                im.cd_reg_fat AS cd_reg,
+                im.cd_lancamento AS cd_lancamento,
+                im.cd_prestador AS cd_prestador,
+                p.nm_prestador AS nm_prestador,
+                TO_CHAR(im.cd_ati_med) AS cd_ati_med,
+                am.ds_ati_med AS ds_ati_med,
+                im.vl_liquido AS vl_total_conta
+            FROM dbamv.itlan_med im
+            LEFT JOIN dbamv.prestador p
+              ON p.cd_prestador = im.cd_prestador
+            LEFT JOIN dbamv.ati_med am
+              ON am.cd_ati_med = im.cd_ati_med
+            WHERE ({' OR '.join(criterios)})
+              AND NVL(im.tp_pagamento, 'P') <> 'C'
+              AND NVL(im.vl_liquido, 0) > 0
+            ORDER BY
+                im.cd_reg_fat,
+                im.cd_lancamento,
+                im.cd_ati_med,
+                im.cd_prestador
+        """)
+        for row in session.execute(query, params).mappings():
+            detalhe = dict(row)
+            chave = (
+                int(detalhe['cd_reg']),
+                int(detalhe['cd_lancamento']),
+            )
+            detalhes_por_lancamento.setdefault(chave, []).append(detalhe)
+    return detalhes_por_lancamento
+
+
+def _expandir_honorarios_medicos(
+    session: Session,
+    rows,
+) -> list[Atendimento]:
+    detalhes_por_lancamento = _consultar_honorarios_individualizados(
+        session,
+        rows,
+    )
+    atendimentos = []
+    for row in rows:
+        atendimento = Atendimento.model_validate(row, from_attributes=True)
+        chave = (atendimento.cd_reg, atendimento.cd_lancamento)
+        detalhes = detalhes_por_lancamento.get(chave, [])
+        if (
+            len(detalhes) < HONORARIOS_MINIMO_DETALHES
+            or atendimento.vl_total_conta is None
+        ):
+            atendimentos.append(atendimento)
+            continue
+        total_individual = sum(
+            (Decimal(str(item['vl_total_conta'])) for item in detalhes),
+            start=Decimal('0.00'),
+        )
+        diferenca = abs(total_individual - atendimento.vl_total_conta)
+        if diferenca > HONORARIOS_TOLERANCIA:
+            atendimentos.append(atendimento)
+            continue
+        for detalhe in detalhes:
+            valor = Decimal(str(detalhe['vl_total_conta']))
+            atendimentos.append(
+                atendimento.model_copy(
+                    update={
+                        'cd_prestador': detalhe.get('cd_prestador'),
+                        'nm_prestador': detalhe.get('nm_prestador'),
+                        'cd_ati_med': detalhe.get('cd_ati_med'),
+                        'ds_ati_med': detalhe.get('ds_ati_med'),
+                        'vl_unitario': valor,
+                        'vl_total_conta': valor,
+                        'vl_total_registro': valor,
+                        'vl_honorario_unitario': valor,
+                    }
+                )
+            )
+    return atendimentos
 
 
 def _vincular_tratativa_ao_demonstrativo(
@@ -215,6 +353,7 @@ def _registros_do_mesmo_item(
         RegistroGlosa.cd_remessa == registro_origem.cd_remessa,
         RegistroGlosa.cd_atendimento == registro_origem.cd_atendimento,
         RegistroGlosa.conta == registro_origem.conta,
+        RegistroGlosa.cd_prestador == registro_origem.cd_prestador,
     ]
     if registro_origem.cd_lancamento is None:
         filtros.append(RegistroGlosa.cd_lancamento.is_(None))
@@ -668,13 +807,7 @@ def conta_atendimento(
             detail='Nenhum registro encontrado para os filtros informados.',
         )
 
-    atendimentos_list = [
-        Atendimento.model_validate(
-            row,
-            from_attributes=True,
-        )
-        for row in rows
-    ]
+    atendimentos_list = _expandir_honorarios_medicos(session, rows)
 
     return {
         'atendimentos': atendimentos_list,

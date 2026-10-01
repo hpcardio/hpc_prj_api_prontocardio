@@ -14,10 +14,12 @@ from app_prontocardio.models import (
     PrazoRecursoConvenio,
     RegistroGlosa,
     RegistroGlosaDemonstrativoIpm,
+    TipoAtendimento,
 )
 from app_prontocardio.routers.app_glosas import (
     _aplicar_filtros_conta_atendimento,
     _executar_conta_atendimento_sem_duplicidade,
+    _expandir_honorarios_medicos,
     _filtrar_linhas_por_guia,
     _resolver_filtro_guia,
     _resolver_filtro_processo,
@@ -120,6 +122,85 @@ def test_conta_atendimento_remove_identidades_repetidas_da_view():
     session.execute.assert_called_once_with('consulta')
     resultado.unique.assert_called_once_with()
     assert linhas == ['linha-unica']
+
+
+def test_triagem_segrega_honorarios_medicos_por_prestador():
+    session = Mock()
+    session.execute.return_value.mappings.return_value = [
+        {
+            'cd_reg': 24599,
+            'cd_lancamento': 7,
+            'cd_prestador': 15148,
+            'nm_prestador': 'AURICELIO MAGALHAES PONTE',
+            'cd_ati_med': '01',
+            'ds_ati_med': 'CIRURGIAO',
+            'vl_total_conta': Decimal('181.00'),
+        },
+        {
+            'cd_reg': 24599,
+            'cd_lancamento': 7,
+            'cd_prestador': 5151,
+            'nm_prestador': 'JOSE KLAUBER ROGER CAMEI',
+            'cd_ati_med': '02',
+            'ds_ati_med': '1 AUXILIAR',
+            'vl_total_conta': Decimal('54.30'),
+        },
+    ]
+    row = Atendimento(
+        cd_reg=24599,
+        cd_lancamento=7,
+        ds_gru_fat='HONORÁRIOS MÉDICOS',
+        tp_atendimento=TipoAtendimento.INTERNACAO,
+        cd_prestador=15148,
+        vl_total_conta=Decimal('235.30'),
+    )
+
+    atendimentos = _expandir_honorarios_medicos(session, [row])
+
+    assert [item.cd_prestador for item in atendimentos] == [15148, 5151]
+    assert [item.vl_total_conta for item in atendimentos] == [
+        Decimal('181.00'),
+        Decimal('54.30'),
+    ]
+    assert sum(item.vl_total_conta for item in atendimentos) == Decimal(
+        '235.30'
+    )
+
+
+def test_triagem_preserva_honorario_quando_detalhes_nao_fecham_total():
+    session = Mock()
+    session.execute.return_value.mappings.return_value = [
+        {
+            'cd_reg': 24599,
+            'cd_lancamento': 8,
+            'cd_prestador': 15148,
+            'nm_prestador': 'AURICELIO MAGALHAES PONTE',
+            'cd_ati_med': '01',
+            'ds_ati_med': 'CIRURGIAO',
+            'vl_total_conta': Decimal('100.00'),
+        },
+        {
+            'cd_reg': 24599,
+            'cd_lancamento': 8,
+            'cd_prestador': 5151,
+            'nm_prestador': 'JOSE KLAUBER ROGER CAMEI',
+            'cd_ati_med': '02',
+            'ds_ati_med': '1 AUXILIAR',
+            'vl_total_conta': Decimal('30.00'),
+        },
+    ]
+    row = Atendimento(
+        cd_reg=24599,
+        cd_lancamento=8,
+        ds_gru_fat='HONORARIOS MEDICOS',
+        tp_atendimento=TipoAtendimento.INTERNACAO,
+        cd_prestador=15148,
+        vl_total_conta=Decimal('235.30'),
+    )
+
+    atendimentos = _expandir_honorarios_medicos(session, [row])
+
+    assert atendimentos == [row]
 
 
 def test_filtro_por_guia_aplica_busca_exata_na_view_oracle():
