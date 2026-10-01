@@ -402,6 +402,66 @@ def test_pdf_da_triagem_usa_mesmo_gerador_e_inclui_lote(
     )
 
 
+def test_pdf_da_triagem_consolida_processos_do_mesmo_paciente(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    for conta, processo, codigo_paciente in (
+        (101, 'PROC-1/2026', 77),
+        (102, 'PROC-2/2026', 77),
+        (103, 'PROC-2/2026', 88),
+    ):
+        registrar_glosa(
+            RegistroGlosaCreate(
+                **registro_glosa_payload(
+                    codigo_paciente=codigo_paciente,
+                    conta=conta,
+                    cd_lancamento=conta,
+                    processo_controle_fatura_gab=processo,
+                )
+            ),
+            usuario_teste,
+            session,
+        )
+
+    cards_recebidos = []
+
+    def gerar_pdf_fake(cards):
+        cards_recebidos.extend(cards)
+        return b'%PDF-1.7\npaciente'
+
+    monkeypatch.setattr(
+        'app_prontocardio.routers.app_glosas.gerar_pdf_recurso_glosa',
+        gerar_pdf_fake,
+    )
+
+    response = gerar_pdf_recurso_triagem(
+        usuario_atual=usuario_teste,
+        session=session,
+        processos_originais=['PROC-1/2026', 'PROC-2/2026'],
+        codigo_paciente=77,
+        download=False,
+    )
+
+    processos = [
+        card['processo']['numero_processo']
+        for card in cards_recebidos
+    ]
+    itens = [
+        item
+        for card in cards_recebidos
+        for paciente in card['pacientes']
+        for item in paciente['itens']
+    ]
+    assert processos == ['PROC-1/2026', 'PROC-2/2026']
+    assert {item['conta'] for item in itens} == {101, 102}
+    assert response.body == b'%PDF-1.7\npaciente'
+    assert response.headers['content-disposition'] == (
+        'inline; filename="recurso-glosa-paciente-77.pdf"'
+    )
+
+
 def test_desfazer_registro_independente_mantem_exclusao_logica(
     session,
     usuario_teste,
