@@ -23,10 +23,18 @@ class Sessao:
     def __init__(self, respostas):
         self.respostas = list(respostas)
         self.chamadas = []
+        self.commits = 0
+        self.rollbacks = 0
 
     def execute(self, statement, params=None):
         self.chamadas.append((str(statement), params or {}))
         return Resultado(self.respostas.pop(0))
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
 
 def linha(descricao='ANGIOTOMOGRAFIA CORONARIANA', valor='300.00'):
@@ -101,6 +109,35 @@ def test_envio_chama_a_procedure_existente_com_os_tres_parametros():
         'empresa': 1,
     }
     assert resposta['status'] == 'enviado'
+    assert sessao.commits == 1
+    assert sessao.rollbacks == 0
+
+
+def test_envio_desfaz_transacao_quando_a_procedure_falha():
+    primeira = Sessao([[linha()]])
+    preview = repasse_medico.montar_preview(
+        primeira, date(2026, 9, 1), empresa=1
+    )
+
+    class SessaoComFalha(Sessao):
+        def execute(self, statement, params=None):
+            if 'PGTO_REP_GERAL' in str(statement):
+                raise RuntimeError('falha simulada na procedure')
+            return super().execute(statement, params)
+
+    sessao = SessaoComFalha([[linha()]])
+    payload = repasse_medico.EnvioRepasseInput(
+        competencia=date(2026, 9, 1),
+        data_pagamento=date(2026, 10, 10),
+        empresa=1,
+        token_confirmacao=preview['token_confirmacao'],
+    )
+
+    with pytest.raises(RuntimeError, match='falha simulada'):
+        repasse_medico.enviar_repasse(payload, object(), sessao)
+
+    assert sessao.commits == 0
+    assert sessao.rollbacks == 1
 
 
 def test_envio_bloqueia_quando_existe_teste_ergometrico_pendente():

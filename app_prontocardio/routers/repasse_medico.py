@@ -219,14 +219,19 @@ def enviar_repasse(
             detail='Não há repasses pendentes para enviar nesta competência.',
         )
 
-    session.execute(
-        EXECUTAR_PROCEDURE,
-        {
-            'competencia': payload.competencia.replace(day=1),
-            'data_pagamento': payload.data_pagamento,
-            'empresa': payload.empresa,
-        },
-    )
+    try:
+        session.execute(
+            EXECUTAR_PROCEDURE,
+            {
+                'competencia': payload.competencia.replace(day=1),
+                'data_pagamento': payload.data_pagamento,
+                'empresa': payload.empresa,
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     return {
         'status': 'enviado',
         'competencia': payload.competencia.replace(day=1),
