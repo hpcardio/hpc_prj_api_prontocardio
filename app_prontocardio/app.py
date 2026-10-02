@@ -29,13 +29,14 @@ from app_prontocardio.routers import (
     origens_mv,
     paciente_auth,
     painel_hemodinamica,
+    painel_leitos,
+    painel_leitos_soulmv,
     painel_senhas_soulmv,
     painel_senhas_soulmv_clinica1,
     painel_senhas_soulmv_emergencia,
-    painel_leitos,
-    painel_leitos_soulmv,
     prescricoes,
     prontolaudo,
+    repasse_medico,
     requisicoes,
     resultados,
     resultados_laboratoriais,
@@ -111,6 +112,7 @@ app.include_router(operacional.router)
 app.include_router(cuidados_paciente.router)
 app.include_router(cuidados_paciente.operational_router)
 app.include_router(prontolaudo.router)
+app.include_router(repasse_medico.router)
 app.include_router(origens_mv.router)
 app.include_router(painel_senhas_soulmv.router)
 app.include_router(painel_senhas_soulmv_clinica1.router)
