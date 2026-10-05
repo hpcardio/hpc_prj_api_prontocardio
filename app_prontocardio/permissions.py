@@ -21,10 +21,13 @@ TELAS_SISTEMA = (
     'fornecedores_criticos',
     'configuracao_convenio',
     'empresas_nfse',
+    'financeiro_mv',
     'ecg_worklist',
 )
 TELAS_PADRAO = tuple(
-    tela for tela in TELAS_SISTEMA if tela != 'ecg_worklist'
+    tela
+    for tela in TELAS_SISTEMA
+    if tela not in {'ecg_worklist', 'financeiro_mv'}
 )
 TELAS_PADRAO_JSON = json.dumps(list(TELAS_PADRAO))
 
