@@ -53,6 +53,57 @@ class WhatsappEnvioIdempotente:
     )
 
 
+@table_registry.mapped_as_dataclass
+class RepasseMvOperacao:
+    __tablename__ = 'repasse_mv_operacoes'
+    __table_args__ = (
+        Index('ix_repasse_mv_operacoes_cd_con_pag', 'cd_con_pag'),
+        Index('ix_repasse_mv_operacoes_cd_repasse', 'cd_repasse'),
+        Index('ix_repasse_mv_operacoes_competencia', 'competencia'),
+        Index('ix_repasse_mv_operacoes_usuario_id', 'usuario_id'),
+        Index('ix_repasse_mv_operacoes_estado', 'estado'),
+        Index(
+            'uq_repasse_mv_envio_ativo',
+            'competencia',
+            'cd_multi_empresa',
+            unique=True,
+            postgresql_where=text(
+                "acao = 'enviar' AND estado IN "
+                "('em_processamento', 'reconciliacao_pendente')"
+            ),
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    operacao_id: Mapped[str] = mapped_column(String(36), unique=True)
+    acao: Mapped[str] = mapped_column(String(20))
+    estado: Mapped[str] = mapped_column(String(30))
+    usuario_id: Mapped[int] = mapped_column(Integer)
+    usuario_nome: Mapped[str] = mapped_column(String(255))
+    usuario_email: Mapped[str] = mapped_column(String(255))
+    cd_con_pag: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    nr_documento: Mapped[str | None] = mapped_column(
+        String(100), default=None
+    )
+    cd_repasse: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    competencia: Mapped[date | None] = mapped_column(Date, default=None)
+    cd_multi_empresa: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    usuario_mv: Mapped[str | None] = mapped_column(String(100), default=None)
+    motivo: Mapped[str | None] = mapped_column(Text, default=None)
+    estado_anterior: Mapped[dict | None] = mapped_column(JSON, default=None)
+    estado_posterior: Mapped[dict | None] = mapped_column(JSON, default=None)
+    mensagem: Mapped[str | None] = mapped_column(String(500), default=None)
+    criado_em: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+    concluido_em: Mapped[datetime | None] = mapped_column(
+        DateTime, default=None
+    )
+
+
 class TipoAtendimento(str, Enum):
     AMBULATORIO = 'Ambulatório'
     EXTERNO = 'Externo'

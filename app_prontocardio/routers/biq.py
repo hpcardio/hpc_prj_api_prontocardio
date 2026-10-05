@@ -325,14 +325,24 @@ CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS = text(
                ) IS NOT NULL THEN 1
                ELSE 0
            END AS "em_remessa_faturamento",
-           ira.CD_PRO_FAT AS cd_pro_fat,
+           exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
            pf.DS_PRO_FAT AS ds_pro_fat,
            a.CD_PRESTADOR AS cd_prestador_atendimento,
            p.NM_PRESTADOR AS nm_prestador_atendimento,
            p.DS_CODIGO_CONSELHO AS crm_atendimento,
            a.TP_ATENDIMENTO AS tp_atendimento
       FROM DBAMV.ATENDIME a
-      JOIN DBAMV.ITREG_AMB ira
+      JOIN DBAMV.PED_RX ped
+        ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+      JOIN DBAMV.ITPED_RX ipr
+        ON ipr.CD_PED_RX = ped.CD_PED_RX
+      JOIN DBAMV.EXA_RX exa
+        ON exa.CD_EXA_RX = ipr.CD_EXA_RX
+       AND exa.EXA_RX_CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      LEFT JOIN DBAMV.ITREG_AMB ira
         ON ira.CD_ATENDIMENTO = a.CD_ATENDIMENTO
        AND ira.CD_PRO_FAT IN (
             40101037, 40101045, 20101056, 18000002,
@@ -341,7 +351,7 @@ CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS = text(
       LEFT JOIN DBAMV.REG_AMB ra
         ON ra.CD_REG_AMB = ira.CD_REG_AMB
       LEFT JOIN DBAMV.PRO_FAT pf
-        ON pf.CD_PRO_FAT = ira.CD_PRO_FAT
+        ON pf.CD_PRO_FAT = exa.EXA_RX_CD_PRO_FAT
       LEFT JOIN DBAMV.PACIENTE pac
         ON pac.CD_PACIENTE = a.CD_PACIENTE
       LEFT JOIN DBAMV.PRESTADOR p
@@ -411,7 +421,7 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
                ) IS NOT NULL THEN 1
                ELSE 0
            END AS "em_remessa_faturamento",
-           ira.CD_PRO_FAT AS cd_pro_fat,
+           exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
            pf.DS_PRO_FAT AS ds_pro_fat,
            ped.CD_PED_RX AS cd_ped_rx,
            ipr.CD_ITPED_RX AS cd_itped_rx,
@@ -425,18 +435,6 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
            pa.DS_CODIGO_CONSELHO AS crm_atendimento,
            a.TP_ATENDIMENTO AS tp_atendimento
       FROM DBAMV.ATENDIME a
-      JOIN DBAMV.ITREG_AMB ira
-        ON ira.CD_ATENDIMENTO = a.CD_ATENDIMENTO
-       AND ira.CD_PRO_FAT IN (
-            40101037, 40101045, 20101056, 18000002,
-            70051021, 22051014, 10210004, 20010028
-       )
-      LEFT JOIN DBAMV.REG_AMB ra
-        ON ra.CD_REG_AMB = ira.CD_REG_AMB
-      LEFT JOIN DBAMV.PRO_FAT pf
-        ON pf.CD_PRO_FAT = ira.CD_PRO_FAT
-      LEFT JOIN DBAMV.PACIENTE pac
-        ON pac.CD_PACIENTE = a.CD_PACIENTE
       JOIN DBAMV.PED_RX ped
         ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
       JOIN DBAMV.ITPED_RX ipr
@@ -449,6 +447,18 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS = text(
        )
       JOIN DBAMV.LAUDO_RX lr
         ON lr.CD_LAUDO = ipr.CD_LAUDO
+      LEFT JOIN DBAMV.ITREG_AMB ira
+        ON ira.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+       AND ira.CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      LEFT JOIN DBAMV.REG_AMB ra
+        ON ra.CD_REG_AMB = ira.CD_REG_AMB
+      LEFT JOIN DBAMV.PRO_FAT pf
+        ON pf.CD_PRO_FAT = exa.EXA_RX_CD_PRO_FAT
+      LEFT JOIN DBAMV.PACIENTE pac
+        ON pac.CD_PACIENTE = a.CD_PACIENTE
       LEFT JOIN DBAMV.PRESTADOR p
         ON p.CD_PRESTADOR = NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR)
       LEFT JOIN DBAMV.PRESTADOR pa

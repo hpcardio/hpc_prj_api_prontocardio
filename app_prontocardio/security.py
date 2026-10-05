@@ -105,3 +105,16 @@ def valida_acesso_ecg_worklist(
             detail='Permissão insuficiente.',
         )
     return usuario
+
+
+def valida_acesso_financeiro_mv(
+    usuario: Usuario = Depends(valida_token_usuario_atual),
+) -> Usuario:
+    autorizado_por_perfil = usuario.perfil in {'ti', 'administrador'}
+    autorizado_por_tela = 'financeiro_mv' in usuario.telas_permitidas
+    if not (autorizado_por_perfil or autorizado_por_tela):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Permissão insuficiente para o Financeiro MV.',
+        )
+    return usuario
