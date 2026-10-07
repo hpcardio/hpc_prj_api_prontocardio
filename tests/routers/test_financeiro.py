@@ -2445,6 +2445,74 @@ def test_follow_up_exibe_registro_analitico_sem_conciliacao_ou_relatorio(
     CardFollowUpGlosaPublic.model_validate(follow_up['cards'][0])
 
 
+def test_follow_up_maida_oculta_processo_tecnico_e_usa_competencia_xlsx(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    cd_atendimento_oracle = 654987
+    registro = criar_recurso_aberto(
+        session,
+        cd_remessa=24669,
+        conciliacao_remessa_id=None,
+        processo_controle_fatura_gab='MAIDA-24669',
+        processo_recurso=None,
+        codigo_paciente=321,
+        nm_paciente='Paciente obtido no Oracle',
+        cd_atendimento=cd_atendimento_oracle,
+        valor_recursado='0.00',
+        qtd_recursado=None,
+        dt_recurso=None,
+        dt_pagamento=None,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_cogestao_follow_up',
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_dados_demonstrativo_registros_follow_up',
+        lambda *_args, **_kwargs: {
+            registro.id: {
+                'origem_maida': True,
+                'competencias': {date(2026, 5, 1)},
+                'criterios': {'maida_hpc_carteira_guia_codigo_item'},
+            }
+        },
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        numero_nfse=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original=None,
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+        limit=20,
+        offset=0,
+        conciliacao_remessa_id=None,
+        incluir_detalhes=False,
+        agrupar_por_processo=True,
+    )
+
+    card = follow_up['cards'][0]
+    assert card['processo']['numero_processo'] == ''
+    assert card['data_competencia'] == date(2026, 5, 1)
+    assert card['pacientes'][0]['nm_paciente'] == (
+        'Paciente obtido no Oracle'
+    )
+    assert card['pacientes'][0]['itens'][0]['cd_atendimento'] == (
+        cd_atendimento_oracle
+    )
+
+
 def test_follow_up_nao_cria_itens_sem_demonstrativo(
     session,
     usuario_teste,
