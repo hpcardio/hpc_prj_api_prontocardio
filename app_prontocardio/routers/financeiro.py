@@ -4822,10 +4822,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             'status_processo': None,
             'motivo_finalizacao': None,
         }
-        if (
-            len(registros_maida) == len(registros)
-            and str(processo['numero_processo']).startswith('MAIDA-')
-        ):
+        if registros_maida and len(registros_maida) == len(registros):
             processo['numero_processo'] = ''
         protocolos = sorted({
             protocolo

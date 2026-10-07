@@ -2455,7 +2455,7 @@ def test_follow_up_maida_oculta_processo_tecnico_e_usa_competencia_xlsx(
         session,
         cd_remessa=24669,
         conciliacao_remessa_id=None,
-        processo_controle_fatura_gab='MAIDA-24669',
+        processo_controle_fatura_gab='24669',
         processo_recurso=None,
         codigo_paciente=321,
         nm_paciente='Paciente obtido no Oracle',
