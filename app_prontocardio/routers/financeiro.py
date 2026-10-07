@@ -4317,6 +4317,8 @@ def _dados_demonstrativo_registros_follow_up(
             SELECT rastreio.registro_glosa_id,
                    rastreio.criterio_correspondencia,
                    demo.codigo_glosa,
+                   demo.origem_maida,
+                   demo.referencia,
                    demo.valor_processado,
                    demo.valor_glosa,
                    demo.valor_liberado
@@ -4341,6 +4343,8 @@ def _dados_demonstrativo_registros_follow_up(
                 'valor_liberado': Decimal('0.00'),
                 'codigo_glosa': None,
                 'criterios': set(),
+                'origem_maida': False,
+                'competencias': set(),
             },
         )
         item['valor_processado'] += _money(row['valor_processado'])
@@ -4348,6 +4352,10 @@ def _dados_demonstrativo_registros_follow_up(
         item['valor_liberado'] += _money(row['valor_liberado'])
         codigo = str(row['codigo_glosa'] or '').strip()
         item['codigo_glosa'] = codigo or item['codigo_glosa']
+        if row['origem_maida'] is not None:
+            item['origem_maida'] = True
+            if row['referencia'] is not None:
+                item['competencias'].add(row['referencia'])
         criterio = str(row['criterio_correspondencia'] or '').strip()
         if criterio:
             item['criterios'].add(criterio)
@@ -4775,6 +4783,18 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     cards = []
     termo_protocolo = str(numero_protocolo or '').strip().casefold()
     for chave, registros in grupos.items():
+        registros_maida = [
+            registro
+            for registro in registros
+            if dados_demonstrativo.get(registro.id, {}).get('origem_maida')
+        ]
+        competencias_maida = {
+            competencia
+            for registro in registros_maida
+            for competencia in dados_demonstrativo[registro.id].get(
+                'competencias', set()
+            )
+        }
         pacientes = _pacientes_follow_up_glosa(
             registros,
             dados_demonstrativo,
@@ -4802,6 +4822,11 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             'status_processo': None,
             'motivo_finalizacao': None,
         }
+        if (
+            len(registros_maida) == len(registros)
+            and str(processo['numero_processo']).startswith('MAIDA-')
+        ):
+            processo['numero_processo'] = ''
         protocolos = sorted({
             protocolo
             for registro in registros
@@ -4841,7 +4866,11 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             'numero_protocolo': ', '.join(protocolos) or None,
             'convenio': registros[0].convenio,
             'data_competencia': (
-                remessa.data_competencia if remessa is not None else None
+                min(competencias_maida)
+                if competencias_maida
+                else (
+                    remessa.data_competencia if remessa is not None else None
+                )
             ),
             'data_entrega': min(item.data_glosa for item in registros),
             'numero_nfse': '',
