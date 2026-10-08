@@ -83,6 +83,12 @@ def test_preview_exclui_teste_ergometrico_e_bloqueia_envio():
         'quantidade': 1,
         'valor': Decimal('120.00'),
     }
+    assert len(preview['atendimentos']) == 1
+    assert len(preview['atendimentos_teste_ergometrico']) == 1
+    assert (
+        preview['atendimentos_teste_ergometrico'][0]['procedimento']
+        == 'TESTE ERGOMÉTRICO'
+    )
     assert preview['token_confirmacao']
 
 
