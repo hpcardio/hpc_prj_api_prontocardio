@@ -2513,6 +2513,69 @@ def test_follow_up_maida_oculta_processo_tecnico_e_usa_competencia_xlsx(
     )
 
 
+def test_indice_processos_portal_issec_exige_correspondencia_unica():
+    rows = [
+        {
+            'mes_producao': date(2026, 4, 1),
+            'valor_cobrado': Decimal('580.95'),
+            'processo': '2600006990',
+        },
+        {
+            'mes_producao': date(2026, 4, 20),
+            'valor_cobrado': Decimal('155.97'),
+            'processo': '2600006991',
+        },
+        {
+            'mes_producao': date(2026, 4, 1),
+            'valor_cobrado': Decimal('155.97'),
+            'processo': '2600006992',
+        },
+    ]
+
+    indice = financeiro._indice_processos_portal_issec(rows)
+
+    assert indice == {
+        (date(2026, 4, 1), Decimal('580.95')): '2600006990'
+    }
+
+
+def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
+    class Resultado:
+        def mappings(self):
+            return iter(
+                [
+                    {
+                        'mes_producao': date(2026, 4, 1),
+                        'valor_cobrado': Decimal('580.95'),
+                        'processo': '2600006990',
+                    }
+                ]
+            )
+
+    class Sessao:
+        def execute(self, *_args, **_kwargs):
+            return Resultado()
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_schema_existe',
+        lambda *_args: True,
+    )
+    cards = [
+        {
+            'convenio': 'ISSEC',
+            'data_competencia': date(2026, 4, 1),
+            'valor_remessa': Decimal('580.95'),
+            'processo': {'numero_processo': ''},
+            'pacientes': [{'itens': [{}]}],
+        }
+    ]
+
+    financeiro._aplicar_processos_portal_issec(Sessao(), cards)
+
+    assert cards[0]['processo']['numero_processo'] == '2600006990'
+
+
 def test_follow_up_nao_cria_itens_sem_demonstrativo(
     session,
     usuario_teste,

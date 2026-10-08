@@ -4362,6 +4362,85 @@ def _dados_demonstrativo_registros_follow_up(
     return resultado
 
 
+def _indice_processos_portal_issec(rows) -> dict[tuple[date, Decimal], str]:
+    candidatos: dict[tuple[date, Decimal], set[str]] = defaultdict(set)
+    for row in rows:
+        competencia = row['mes_producao']
+        if isinstance(competencia, datetime):
+            competencia = competencia.date()
+        if not isinstance(competencia, date):
+            continue
+        chave = (competencia.replace(day=1), _money(row['valor_cobrado']))
+        processo = str(row['processo'] or '').strip()
+        if processo:
+            candidatos[chave].add(processo)
+    return {
+        chave: next(iter(processos))
+        for chave, processos in candidatos.items()
+        if len(processos) == 1
+    }
+
+
+def _aplicar_processos_portal_issec(
+    session: Session,
+    cards: list[dict],
+) -> None:
+    elegiveis = [
+        card
+        for card in cards
+        if str(card.get('convenio') or '').strip().casefold() == 'issec'
+        and not str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip()
+        and isinstance(card.get('data_competencia'), date)
+    ]
+    if not elegiveis or not _tabela_schema_existe(
+        session, 'raw_issec_portal', 'processos'
+    ):
+        return
+    competencias = {
+        card['data_competencia'].replace(day=1) for card in elegiveis
+    }
+    competencia_minima = min(competencias)
+    competencia_maxima = max(competencias)
+    competencia_limite = date(
+        competencia_maxima.year
+        + (competencia_maxima.month == MESES_POR_ANO),
+        (
+            1
+            if competencia_maxima.month == MESES_POR_ANO
+            else competencia_maxima.month + 1
+        ),
+        1,
+    )
+    rows = session.execute(
+        text(
+            """
+            SELECT DATE_TRUNC('month', mes_producao)::date AS mes_producao,
+                   valor_cobrado,
+                   processo
+              FROM raw_issec_portal.processos
+             WHERE mes_producao >= :competencia_minima
+               AND mes_producao < :competencia_limite
+               AND NULLIF(BTRIM(processo), '') IS NOT NULL
+            """
+        ),
+        {
+            'competencia_minima': competencia_minima,
+            'competencia_limite': competencia_limite,
+        },
+    ).mappings()
+    indice = _indice_processos_portal_issec(rows)
+    for card in elegiveis:
+        chave = (
+            card['data_competencia'].replace(day=1),
+            _money(card.get('valor_remessa')),
+        )
+        processo = indice.get(chave)
+        if processo:
+            card['processo']['numero_processo'] = processo
+
+
 def _descricoes_tiss(
     session: Session,
     registros: list[RegistroGlosa],
@@ -8763,6 +8842,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 numero_protocolo=numero_protocolo,
             )
         )
+        _aplicar_processos_portal_issec(session, cards_cogestao)
 
         # A conciliação é um histórico financeiro legado e não define a
         # existência da glosa. Quando o IPM possui o mesmo processo/remessa,
