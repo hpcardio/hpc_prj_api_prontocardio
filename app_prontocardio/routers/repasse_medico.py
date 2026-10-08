@@ -449,45 +449,47 @@ def montar_preview(
         ).mappings().all()
     ]
     atendimentos = []
+    atendimentos_teste_ergometrico = []
     for item in detail_rows:
+        atendimento = {
+            'codigo_repasse_consolidado': item.get(
+                'cd_repasse_consolidado'
+            ),
+            'codigo_repasse': item.get('cd_repasse'),
+            'codigo_prestador': item.get('cd_prestador_destino'),
+            'prestador': item.get('nm_prestador_destino'),
+            'codigo_atendimento': item.get('cd_atendimento'),
+            'paciente': item.get('nm_paciente'),
+            'data_atendimento': item.get('dt_lancamento'),
+            'codigo_procedimento': item.get('cd_pro_fat'),
+            'procedimento': (
+                item.get('ds_procedimento') or 'Sem detalhamento'
+            ),
+            'codigo_convenio': item.get('cd_convenio'),
+            'convenio': item.get('nm_convenio'),
+            'codigo_remessa': item.get('cd_remessa'),
+            'numero_remessa': item.get('nr_remessa_convenio'),
+            'situacao_remessa': (
+                'inside'
+                if item.get('cd_remessa') is not None
+                else 'outside'
+            ),
+            'quantidade': int(item.get('quantidade') or 0),
+            'valor_bruto': _decimal(item.get('valor_bruto')),
+            'valor_desconto': _decimal(item.get('valor_desconto')),
+            'valor_liquido': _decimal(item.get('valor_liquido')),
+            'percentual_repasse': _decimal(item.get('vl_perc_repasse')),
+        }
         if _eh_teste_ergometrico(item.get('ds_procedimento')):
-            continue
-        atendimentos.append(
-            {
-                'codigo_repasse_consolidado': item.get(
-                    'cd_repasse_consolidado'
-                ),
-                'codigo_repasse': item.get('cd_repasse'),
-                'codigo_prestador': item.get('cd_prestador_destino'),
-                'prestador': item.get('nm_prestador_destino'),
-                'codigo_atendimento': item.get('cd_atendimento'),
-                'paciente': item.get('nm_paciente'),
-                'data_atendimento': item.get('dt_lancamento'),
-                'codigo_procedimento': item.get('cd_pro_fat'),
-                'procedimento': (
-                    item.get('ds_procedimento') or 'Sem detalhamento'
-                ),
-                'codigo_convenio': item.get('cd_convenio'),
-                'convenio': item.get('nm_convenio'),
-                'codigo_remessa': item.get('cd_remessa'),
-                'numero_remessa': item.get('nr_remessa_convenio'),
-                'situacao_remessa': (
-                    'inside'
-                    if item.get('cd_remessa') is not None
-                    else 'outside'
-                ),
-                'quantidade': int(item.get('quantidade') or 0),
-                'valor_bruto': _decimal(item.get('valor_bruto')),
-                'valor_desconto': _decimal(item.get('valor_desconto')),
-                'valor_liquido': _decimal(item.get('valor_liquido')),
-                'percentual_repasse': _decimal(item.get('vl_perc_repasse')),
-            }
-        )
+            atendimentos_teste_ergometrico.append(atendimento)
+        else:
+            atendimentos.append(atendimento)
     return {
         'competencia': competencia,
         'empresa': empresa,
         'itens': itens,
         'atendimentos': atendimentos,
+        'atendimentos_teste_ergometrico': atendimentos_teste_ergometrico,
         'total_liquido': total,
         'bloqueado': excluidos_quantidade > 0,
         'motivo_bloqueio': (
