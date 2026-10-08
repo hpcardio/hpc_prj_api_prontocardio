@@ -1274,9 +1274,15 @@ def reagendar_agendamento(
                         WHERE im.CD_IT_AGENDA_CENTRAL =
                               i.CD_IT_AGENDA_CENTRAL
                           AND im.TP_STATUS NOT IN ('E', 'C', 'P', 'T')
-                   ) AS protocolo_mv
+                   ) AS protocolo_mv,
+                   i.CD_LOG_OPERA_AGENDA AS cd_log_bloqueio_anterior,
+                   NVL(i.SN_BLOQUEADO, 'N') AS sn_bloqueado_anterior,
+                   i.DT_GRAVACAO AS dt_agendamento_anterior,
+                   l.DT_OPERA_AGENDA AS dt_bloqueio_anterior
               FROM DBAMV.IT_AGENDA_CENTRAL
                    i
+              LEFT JOIN DBAMV.LOG_OPERA_AGENDA_CENTRAL l
+                ON l.CD_LOG_OPERA_AGENDA = i.CD_LOG_OPERA_AGENDA
              WHERE CD_IT_AGENDA_CENTRAL = :slot
             '''
         ),
@@ -1292,6 +1298,18 @@ def reagendar_agendamento(
             status_code=HTTPStatus.CONFLICT,
             detail='O item do reagendamento difere do agendamento atual.',
         )
+
+    # O MV marca o horario ocupado como bloqueado. Na transferencia nativa,
+    # alguns slots permanecem assim mesmo depois de o paciente ser retirado.
+    # Liberamos somente quando o bloqueio associado ao slot e anterior ao
+    # agendamento que conseguiu ocupa-lo. Se um bloqueio manual foi criado
+    # depois do agendamento, ele continua preservado.
+    liberar_bloqueio_residual = (
+        anterior[4] == 'S'
+        and anterior[5] is not None
+        and anterior[6] is not None
+        and anterior[6] < anterior[5]
+    )
 
     _validar_regras_agenda_mv(session, payload)
 
@@ -1355,6 +1373,20 @@ def reagendar_agendamento(
                 payload.cd_it_agenda_central_anterior,
             ],
         )
+        if liberar_bloqueio_residual:
+            cursor.execute(
+                '''
+                UPDATE DBAMV.IT_AGENDA_CENTRAL
+                   SET SN_BLOQUEADO = 'N'
+                 WHERE CD_IT_AGENDA_CENTRAL = :slot_anterior
+                   AND CD_PACIENTE IS NULL
+                   AND CD_LOG_OPERA_AGENDA = :log_bloqueio_anterior
+                ''',
+                {
+                    'slot_anterior': payload.cd_it_agenda_central_anterior,
+                    'log_bloqueio_anterior': anterior[3],
+                },
+            )
         transferencia = cursor.execute(
             '''
             SELECT anterior.CD_PACIENTE,
