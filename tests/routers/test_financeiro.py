@@ -2539,14 +2539,14 @@ def test_indice_processos_portal_issec_exige_correspondencia_unica():
     }
 
 
-def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
+def test_aplica_processo_issec_pelo_total_unico_por_conta(monkeypatch):
     class Resultado:
         def mappings(self):
             return iter(
                 [
                     {
                         'mes_producao': date(2026, 4, 1),
-                        'valor_cobrado': Decimal('580.95'),
+                        'valor_cobrado': Decimal('736.92'),
                         'processo': '2600006990',
                     }
                 ]
@@ -2562,9 +2562,24 @@ def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
                 [
                     {
                         'cd_remessa': 17590,
+                        'cd_reg': 37129,
                         'dt_competencia': date(2026, 4, 1),
                         'vl_total_registro': Decimal('580.95'),
-                    }
+                    },
+                    # O total da conta se repete nos lançamentos e não pode
+                    # ser somado novamente.
+                    {
+                        'cd_remessa': 17590,
+                        'cd_reg': 37129,
+                        'dt_competencia': date(2026, 4, 1),
+                        'vl_total_registro': Decimal('580.95'),
+                    },
+                    {
+                        'cd_remessa': 17590,
+                        'cd_reg': 37130,
+                        'dt_competencia': date(2026, 4, 1),
+                        'vl_total_registro': Decimal('155.97'),
+                    },
                 ]
             )
 
@@ -2581,7 +2596,8 @@ def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
         {
             'convenio': 'ISSEC',
             'cd_remessa': 17590,
-            'data_competencia': date(2026, 4, 1),
+            # A referência Maida pode ser posterior à competência Oracle.
+            'data_competencia': date(2026, 5, 1),
             # O total da remessa não participa da associação.
             'valor_remessa': Decimal('736.92'),
             'processo': {'numero_processo': ''},
@@ -2598,7 +2614,7 @@ def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
     assert cards[0]['processo']['numero_processo'] == '2600006990'
 
 
-def test_nao_aplica_processo_issec_quando_remessa_pertence_a_mais_de_um(
+def test_nao_aplica_processo_issec_quando_total_aponta_para_mais_de_um(
     monkeypatch,
 ):
     class Resultado:
@@ -2614,12 +2630,12 @@ def test_nao_aplica_processo_issec_quando_remessa_pertence_a_mais_de_um(
                 [
                     {
                         'mes_producao': date(2026, 4, 1),
-                        'valor_cobrado': Decimal('580.95'),
+                        'valor_cobrado': Decimal('736.92'),
                         'processo': '2600006990',
                     },
                     {
                         'mes_producao': date(2026, 4, 1),
-                        'valor_cobrado': Decimal('155.97'),
+                        'valor_cobrado': Decimal('736.92'),
                         'processo': '2600006991',
                     },
                 ]
@@ -2631,11 +2647,13 @@ def test_nao_aplica_processo_issec_quando_remessa_pertence_a_mais_de_um(
                 [
                     {
                         'cd_remessa': 17590,
+                        'cd_reg': 37129,
                         'dt_competencia': date(2026, 4, 1),
                         'vl_total_registro': Decimal('580.95'),
                     },
                     {
                         'cd_remessa': 17590,
+                        'cd_reg': 37130,
                         'dt_competencia': date(2026, 4, 1),
                         'vl_total_registro': Decimal('155.97'),
                     },
