@@ -4383,6 +4383,7 @@ def _indice_processos_portal_issec(rows) -> dict[tuple[date, Decimal], str]:
 
 def _aplicar_processos_portal_issec(
     session: Session,
+    session_oracle: Session,
     cards: list[dict],
 ) -> None:
     elegiveis = [
@@ -4392,6 +4393,7 @@ def _aplicar_processos_portal_issec(
         and not str(
             (card.get('processo') or {}).get('numero_processo') or ''
         ).strip()
+        and card.get('cd_remessa') is not None
         and isinstance(card.get('data_competencia'), date)
     ]
     if not elegiveis or not _tabela_schema_existe(
@@ -4431,14 +4433,52 @@ def _aplicar_processos_portal_issec(
         },
     ).mappings()
     indice = _indice_processos_portal_issec(rows)
-    for card in elegiveis:
-        chave = (
-            card['data_competencia'].replace(day=1),
-            _money(card.get('valor_remessa')),
+    if not indice:
+        return
+
+    codigos_remessa = {
+        int(card['cd_remessa'])
+        for card in elegiveis
+        if card.get('cd_remessa') is not None
+    }
+    if not codigos_remessa:
+        return
+    processos_por_remessa: dict[int, set[str]] = defaultdict(set)
+    contas = session_oracle.execute(
+        select(
+            ModelContaAtendimento.cd_remessa,
+            ModelContaAtendimento.dt_competencia,
+            ModelContaAtendimento.vl_total_registro,
         )
-        processo = indice.get(chave)
-        if processo:
-            card['processo']['numero_processo'] = processo
+        .where(
+            ModelContaAtendimento.cd_remessa.in_(codigos_remessa),
+            ModelContaAtendimento.dt_competencia.in_(competencias),
+            func.upper(func.trim(ModelContaAtendimento.nm_convenio))
+            == 'ISSEC',
+            ModelContaAtendimento.vl_total_registro.is_not(None),
+        )
+        .distinct()
+    ).mappings()
+    for conta in contas:
+        competencia = conta['dt_competencia']
+        if isinstance(competencia, datetime):
+            competencia = competencia.date()
+        if not isinstance(competencia, date):
+            continue
+        chave = (
+            competencia.replace(day=1),
+            _money(conta['vl_total_registro']),
+        )
+        if processo := indice.get(chave):
+            processos_por_remessa[int(conta['cd_remessa'])].add(processo)
+
+    for card in elegiveis:
+        processos = processos_por_remessa.get(int(card['cd_remessa']), set())
+        # Uma remessa nunca pode ser apresentada dentro do card de um
+        # processo ambíguo. Somente a correspondência única entre a
+        # competência e o vl_total_registro do MV é aplicada.
+        if len(processos) == 1:
+            card['processo']['numero_processo'] = next(iter(processos))
 
 
 def _descricoes_tiss(
@@ -8842,7 +8882,11 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 numero_protocolo=numero_protocolo,
             )
         )
-        _aplicar_processos_portal_issec(session, cards_cogestao)
+        _aplicar_processos_portal_issec(
+            session,
+            session_oracle,
+            cards_cogestao,
+        )
 
         # A conciliação é um histórico financeiro legado e não define a
         # existência da glosa. Quando o IPM possui o mesmo processo/remessa,

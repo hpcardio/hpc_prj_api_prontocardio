@@ -2552,9 +2552,25 @@ def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
                 ]
             )
 
-    class Sessao:
+    class SessaoPortal:
         def execute(self, *_args, **_kwargs):
             return Resultado()
+
+    class ResultadoOracle:
+        def mappings(self):
+            return iter(
+                [
+                    {
+                        'cd_remessa': 17590,
+                        'dt_competencia': date(2026, 4, 1),
+                        'vl_total_registro': Decimal('580.95'),
+                    }
+                ]
+            )
+
+    class SessaoOracle:
+        def execute(self, *_args, **_kwargs):
+            return ResultadoOracle()
 
     monkeypatch.setattr(
         financeiro,
@@ -2564,16 +2580,89 @@ def test_aplica_processo_portal_issec_no_card_e_modal(monkeypatch):
     cards = [
         {
             'convenio': 'ISSEC',
+            'cd_remessa': 17590,
             'data_competencia': date(2026, 4, 1),
-            'valor_remessa': Decimal('580.95'),
+            # O total da remessa não participa da associação.
+            'valor_remessa': Decimal('736.92'),
             'processo': {'numero_processo': ''},
             'pacientes': [{'itens': [{}]}],
         }
     ]
 
-    financeiro._aplicar_processos_portal_issec(Sessao(), cards)
+    financeiro._aplicar_processos_portal_issec(
+        SessaoPortal(),
+        SessaoOracle(),
+        cards,
+    )
 
     assert cards[0]['processo']['numero_processo'] == '2600006990'
+
+
+def test_nao_aplica_processo_issec_quando_remessa_pertence_a_mais_de_um(
+    monkeypatch,
+):
+    class Resultado:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def mappings(self):
+            return iter(self.rows)
+
+    class SessaoPortal:
+        def execute(self, *_args, **_kwargs):
+            return Resultado(
+                [
+                    {
+                        'mes_producao': date(2026, 4, 1),
+                        'valor_cobrado': Decimal('580.95'),
+                        'processo': '2600006990',
+                    },
+                    {
+                        'mes_producao': date(2026, 4, 1),
+                        'valor_cobrado': Decimal('155.97'),
+                        'processo': '2600006991',
+                    },
+                ]
+            )
+
+    class SessaoOracle:
+        def execute(self, *_args, **_kwargs):
+            return Resultado(
+                [
+                    {
+                        'cd_remessa': 17590,
+                        'dt_competencia': date(2026, 4, 1),
+                        'vl_total_registro': Decimal('580.95'),
+                    },
+                    {
+                        'cd_remessa': 17590,
+                        'dt_competencia': date(2026, 4, 1),
+                        'vl_total_registro': Decimal('155.97'),
+                    },
+                ]
+            )
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_schema_existe',
+        lambda *_args: True,
+    )
+    cards = [
+        {
+            'convenio': 'ISSEC',
+            'cd_remessa': 17590,
+            'data_competencia': date(2026, 4, 1),
+            'processo': {'numero_processo': ''},
+        }
+    ]
+
+    financeiro._aplicar_processos_portal_issec(
+        SessaoPortal(),
+        SessaoOracle(),
+        cards,
+    )
+
+    assert cards[0]['processo']['numero_processo'] == ''
 
 
 def test_follow_up_nao_cria_itens_sem_demonstrativo(
