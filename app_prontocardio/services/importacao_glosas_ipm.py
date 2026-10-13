@@ -49,6 +49,8 @@ class ResolucaoItem:
 
 @dataclass(frozen=True)
 class IndicesItensOracle:
+    guia_servico_carteira: Mapping[tuple, tuple[Mapping, ...]]
+    guia_servico: Mapping[tuple, tuple[Mapping, ...]]
     competencia_guia_servico_carteira: Mapping[
         tuple,
         tuple[Mapping, ...],
@@ -105,6 +107,12 @@ def normalizar_digitos(valor) -> str:
 
 def normalizar_carteira(valor) -> str:
     return normalizar_digitos(valor).lstrip('0')
+
+
+def normalizar_codigo_item(valor) -> str:
+    texto = normalizar_texto(valor)
+    digitos = normalizar_digitos(texto)
+    return digitos.lstrip('0') if digitos and digitos == texto else texto
 
 
 def normalizar_mes_ano(valor) -> tuple[int, int] | None:
@@ -515,9 +523,11 @@ def resolver_item(
     return ResolucaoItem(status='ambiguo', candidatos=itens)
 
 
-def indexar_itens_oracle(  # noqa: PLR0912
+def indexar_itens_oracle(  # noqa: PLR0912, PLR0915
     itens: Iterable[Mapping],
 ) -> IndicesItensOracle:
+    por_guia_servico_carteira: dict[tuple, list[Mapping]] = defaultdict(list)
+    por_guia_servico: dict[tuple, list[Mapping]] = defaultdict(list)
     por_guia: dict[tuple, list[Mapping]] = defaultdict(list)
     por_atendimento_guia_carteira: dict[tuple, list[Mapping]] = defaultdict(
         list
@@ -544,6 +554,19 @@ def indexar_itens_oracle(  # noqa: PLR0912
             if senha and senha != guia
             else None
         )
+        guias = {guia, senha} - {''}
+        codigos = {
+            normalizar_codigo_item(item.get('cd_pro_fat')),
+            normalizar_codigo_item(item.get('cd_tuss')),
+        } - {''}
+        carteira = normalizar_carteira(item.get('nr_carteira'))
+        for numero_guia in guias:
+            for codigo in codigos:
+                por_guia_servico[(numero_guia, codigo)].append(item)
+                if carteira:
+                    por_guia_servico_carteira[
+                        (numero_guia, codigo, carteira)
+                    ].append(item)
         if normalizar_mes_ano(item.get('dt_competencia')) is not None:
             por_guia[chave_item_oracle(item)].append(item)
             if item_por_senha is not None:
@@ -627,6 +650,14 @@ def indexar_itens_oracle(  # noqa: PLR0912
                 chave_item_lancamento_pro_fat_valor_oracle(item)
             ].append(item)
     return IndicesItensOracle(
+        guia_servico_carteira={
+            chave: tuple(linhas)
+            for chave, linhas in por_guia_servico_carteira.items()
+        },
+        guia_servico={
+            chave: tuple(linhas)
+            for chave, linhas in por_guia_servico.items()
+        },
         competencia_guia_servico_carteira={
             chave: tuple(linhas) for chave, linhas in por_guia.items()
         },
@@ -672,6 +703,24 @@ def resolver_correspondencia_item_oracle(  # noqa: PLR0912
     cd_remessa_esperada: int | None = None,
     criterios_permitidos: set[str] | None = None,
 ) -> CorrespondenciaItemOracle:
+    carteira_demonstrativo = normalizar_carteira(
+        linha.get('codigo_beneficiario')
+    )
+    guia = normalizar_texto(linha.get('numero_guia_senha'))
+    codigo = normalizar_codigo_item(linha.get('codigo_servico'))
+    fontes_diretas = (
+        (
+            'guia_servico_carteira',
+            indices.guia_servico_carteira,
+            lambda _linha: (guia, codigo, carteira_demonstrativo),
+        ),
+    ) if carteira_demonstrativo else (
+        (
+            'guia_servico_sem_carteira',
+            indices.guia_servico,
+            lambda _linha: (guia, codigo),
+        ),
+    )
     fontes: tuple[
         tuple[
             str,
@@ -679,7 +728,7 @@ def resolver_correspondencia_item_oracle(  # noqa: PLR0912
             Callable[[Mapping], tuple],
         ],
         ...,
-    ] = (
+    ] = fontes_diretas + (
         (
             'competencia_guia_servico_carteira',
             indices.competencia_guia_servico_carteira,
