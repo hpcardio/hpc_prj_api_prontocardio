@@ -1292,7 +1292,7 @@ def reagendar_agendamento(
                    i
               LEFT JOIN DBAMV.LOG_OPERA_AGENDA_CENTRAL l
                 ON l.CD_LOG_OPERA_AGENDA = i.CD_LOG_OPERA_AGENDA
-             WHERE CD_IT_AGENDA_CENTRAL = :slot
+             WHERE i.CD_IT_AGENDA_CENTRAL = :slot
             '''
         ),
         {'slot': payload.cd_it_agenda_central_anterior},

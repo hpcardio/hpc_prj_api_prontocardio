@@ -219,7 +219,7 @@ def _guide_format(convenio_id: str | None) -> str:
     }
     if convenio_id in own_guides:
         return own_guides[convenio_id]
-    return 'sadt'
+    return 'ans'
 
 
 def _resolve_insurer(name: str | None):

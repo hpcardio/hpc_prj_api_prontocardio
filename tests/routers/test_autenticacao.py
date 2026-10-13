@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+
+from jwt import decode
+
 from app_prontocardio.routers import autenticacao
 from app_prontocardio.settings import Settings
 
@@ -115,3 +119,27 @@ def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
     ) in conteudo
     assert '?token=' not in conteudo
     assert 'https://api.exemplo.local' not in conteudo
+
+
+def test_token_painel_medicos_tem_audiencia_e_expiracao(
+    session, usuario_teste
+):
+    usuario_teste.perfil = 'leitura'
+    session.commit()
+
+    response = autenticacao.autenticar_usuario_painel_medicos(
+        SimpleNamespace(
+            username=usuario_teste.email,
+            password=usuario_teste.senha_limpa,
+        ),
+        session,
+    )
+
+    payload = decode(
+        response['access_token'],
+        autenticacao.settings.SECRET_KEY,
+        algorithms=[autenticacao.settings.ALGORITHM],
+        audience='painel_leitos_medicos',
+    )
+    assert payload['sub'] == usuario_teste.email
+    assert payload['exp'] > payload.get('iat', 0)

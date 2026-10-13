@@ -169,6 +169,7 @@ SQL_PACIENTE = """
 select
     a.cd_atendimento,
     initcap(p.nm_paciente) as nm_paciente,
+    initcap(p.nm_mae) as nm_mae,
     p.tp_sexo,
     p.dt_nascimento,
     initcap(co.nm_convenio) as nm_convenio,
@@ -425,10 +426,11 @@ left join dbamv.tip_presc tp on tp.cd_tip_presc = ip.cd_tip_presc
 left join dbamv.uni_pro up on up.cd_uni_pro = ip.cd_uni_pro
 left join dbamv.tip_fre tf on tf.cd_tip_fre = ip.cd_tip_fre
 where pm.cd_atendimento = :admission_id
+  and (:start_date is null or pm.dt_pre_med >= :start_date)
   and nvl(ip.tp_situacao, 'N') <> 'S'
   and coalesce(nullif(trim(tp.ds_tip_presc), ''), nullif(trim(ip.ds_itpre_med), '')) is not null
 order by pm.dt_pre_med desc, pm.hr_pre_med desc, ip.nr_ordem
-fetch first 100 rows only
+fetch first 600 rows only
 """
 
 SQL_IMAGENS = """
@@ -507,27 +509,58 @@ fetch first 12 rows only
 """
 
 SQL_HISTORICO_LABORATORIO = """
-select
-    nm_exa_lab as titulo,
-    nm_campo as campo,
-    substr(ds_resultado, 1, 500) as resultado,
-    dt_laudo as data_laudo
-from dbamv.v_hpc_exames_laboratorio
-where cd_paciente = (
-    select cd_paciente
-    from dbamv.atendime
-    where cd_atendimento = :admission_id
+select * from (
+    select
+        exame.nm_exa_lab as titulo,
+        resultado.nm_campo as campo,
+        substr(resultado.ds_resultado, 1, 500) as resultado,
+        item.dt_laudo as data_laudo,
+        pedido.dt_pedido as data_solicitacao,
+        'Liberado' as situacao
+    from dbamv.ped_lab pedido
+    join dbamv.itped_lab item
+      on item.cd_ped_lab = pedido.cd_ped_lab
+    join dbamv.res_exa resultado
+      on resultado.cd_ped_lab = item.cd_ped_lab
+     and resultado.cd_exa_lab = item.cd_exa_lab
+    join dbamv.exa_lab exame
+      on exame.cd_exa_lab = item.cd_exa_lab
+    where pedido.cd_atendimento = :admission_id
+      and pedido.dt_pedido >= :start_date
+      and resultado.ds_resultado is not null
+
+    union all
+
+    select
+        exame.nm_exa_lab as titulo,
+        null as campo,
+        null as resultado,
+        null as data_laudo,
+        pedido.dt_pedido as data_solicitacao,
+        'Não liberado' as situacao
+    from dbamv.ped_lab pedido
+    join dbamv.itped_lab item
+      on item.cd_ped_lab = pedido.cd_ped_lab
+    join dbamv.exa_lab exame
+      on exame.cd_exa_lab = item.cd_exa_lab
+    where pedido.cd_atendimento = :admission_id
+      and pedido.dt_pedido >= :start_date
+      and not exists (
+          select 1
+          from dbamv.res_exa resultado
+          where resultado.cd_ped_lab = item.cd_ped_lab
+            and resultado.cd_exa_lab = item.cd_exa_lab
+            and resultado.ds_resultado is not null
+      )
 )
-  and dt_laudo >= :start_date
-  and ds_resultado is not null
-order by dt_laudo desc nulls last, nm_exa_lab, nm_campo
+order by data_solicitacao desc nulls last, titulo, campo
 fetch first 500 rows only
 """
 
 SQL_LAUDO_LABORATORIO_DETALHE = """
 select substr(ds_resultado, 1, 3500) as conteudo
 from dbamv.v_hpc_exames_laboratorio
-where id = :report_id
+where to_char(id) = :report_id
   and cd_paciente = (
       select cd_paciente
       from dbamv.atendime
@@ -548,12 +581,19 @@ fetch first 1 rows only
 """
 
 SQL_LAUDO_IMAGEM_DETALHE = """
-select laudo.ds_laudo as conteudo
+select
+    laudo.ds_laudo as conteudo,
+    ged_conteudo.blob_conteudo as conteudo_ged
 from dbamv.itped_rx item
 join dbamv.ped_rx pedido
   on pedido.cd_ped_rx = item.cd_ped_rx
 left join dbamv.laudo_rx laudo
   on laudo.cd_laudo = item.cd_laudo
+left join dbamv.ged_documento ged
+  on ged.cd_documento = laudo.cd_ged_documento
+left join dbamv.ged_conteudo ged_conteudo
+  on ged_conteudo.cd_documento = ged.cd_documento
+ and ged_conteudo.cd_versao = ged.cd_versao_atual
 where pedido.cd_atendimento = :admission_id
   and item.cd_itped_rx = :exam_id
 fetch first 1 rows only
@@ -626,9 +666,12 @@ def _report_content(value):
 
 
 def _rtf_to_text(value):
-    if value is None or isinstance(value, bytes):
+    if value is None:
         return None
-    raw = str(value).strip()
+    if isinstance(value, bytes):
+        raw = value.decode("cp1252", errors="replace").strip()
+    else:
+        raw = str(value).strip()
     if not raw:
         return None
     if not raw.lstrip().startswith(r"{\rtf"):
@@ -781,7 +824,11 @@ def _serialize_reports(rows: list[dict]) -> list[dict]:
             "status": str(row.get("SITUACAO") or "Pendente").strip(),
             "content": _rtf_to_text(row.get("CONTEUDO")) if str(row.get("TIPO") or "").strip() == "imagem" else _report_content(row.get("CONTEUDO")),
             "pacsReference": str(row.get("REFERENCIA_PACS") or "").strip() or None,
-            "viewerAvailable": str(row.get("TIPO") or "").strip() == "imagem" and bool(row.get("IDENTIFICADOR")),
+            "viewerAvailable": (
+                str(row.get("TIPO") or "").strip() == "imagem"
+                and str(row.get("SITUACAO") or "").strip().lower() == "disponível"
+                and bool(row.get("IDENTIFICADOR"))
+            ),
         }
         for row in rows
     ]
@@ -793,10 +840,11 @@ def _serialize_laboratory_history(rows: list[dict]) -> list[dict]:
             "title": str(row.get("TITULO") or "Exame sem identificação").strip(),
             "field": str(row.get("CAMPO") or "Resultado").strip() or "Resultado",
             "result": _report_content(row.get("RESULTADO")),
+            "status": str(row.get("SITUACAO") or "Não liberado").strip(),
+            "requestedAt": _iso(row.get("DATA_SOLICITACAO")),
             "reportedAt": _iso(row.get("DATA_LAUDO")),
         }
         for row in rows
-        if _report_content(row.get("RESULTADO")) and row.get("DATA_LAUDO")
     ]
 
 
@@ -969,6 +1017,7 @@ def paciente(admission_id: int):
             "patient": {
                 "admissionId": _plain(row.get("CD_ATENDIMENTO")),
                 "name": str(row.get("NM_PACIENTE") or "Paciente não identificado").strip(),
+                "motherName": str(row.get("NM_MAE") or "").strip(),
                 "gender": str(row.get("TP_SEXO") or "Não informado").strip(),
                 "birthDate": row.get("DT_NASCIMENTO"),
                 "convenio": str(row.get("NM_CONVENIO") or "Não informado").strip(),
@@ -1056,11 +1105,15 @@ def evolucoes_clinicas(admission_id: int):
 
 
 @router.get("/paciente/{admission_id}/prescricoes")
-def prescricoes_clinicas(admission_id: int):
+def prescricoes_clinicas(admission_id: int, periodo: str = "24h"):
+    if periodo not in {"24h", "48h", "7d", "all"}:
+        raise HTTPException(status_code=400, detail="Período inválido.")
     try:
-        rows = fetch_all(SQL_PRESCRICOES, {"admission_id": admission_id})
+        start = None if periodo == "all" else (datetime.now() - timedelta(days=_lookback_days(periodo))).replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = fetch_all(SQL_PRESCRICOES, {"admission_id": admission_id, "start_date": start})
         return {
             "source": "soulmv",
+            "period": periodo,
             "updatedAt": datetime.now().isoformat(),
             "prescriptions": [
                 {
@@ -1084,8 +1137,6 @@ def laudos_imagens_clinicos(admission_id: int, incluir_laboratoriais: bool = Tru
         all_images = _cached_clinical_rows("imagens", admission_id, SQL_IMAGENS) if incluir_imagens else []
         imagens = _filter_by_period(all_images, periodo) if incluir_imagens else []
         images_outside_period = bool(incluir_imagens and not imagens and all_images and periodo != "all")
-        if images_outside_period:
-            imagens = all_images[:12]
         laboratory_sql = SQL_LAUDOS_LABORATORIO_RESUMO if resumo and incluir_resultados else (SQL_LAUDOS_LABORATORIO_COM_RESULTADO if incluir_resultados else SQL_LAUDOS_LABORATORIO)
         cache_name = "laboratorios-resumo" if resumo and incluir_resultados else ("laboratorios-com-resultado" if incluir_resultados else "laboratorios")
         laboratorios = _filter_by_period(_cached_clinical_rows(cache_name, admission_id, laboratory_sql, readonly=True), periodo) if incluir_laboratoriais else []
@@ -1113,7 +1164,6 @@ def historico_laboratorio(admission_id: int, periodo: str = "7d"):
             admission_id,
             SQL_HISTORICO_LABORATORIO,
             {"start_date": start_date},
-            readonly=True,
         )
         return {
             "source": "soulmv",
@@ -1125,7 +1175,7 @@ def historico_laboratorio(admission_id: int, periodo: str = "7d"):
 
 
 @router.get("/paciente/{admission_id}/laboratorio/{report_id}")
-def laudo_laboratorio_detalhe(admission_id: int, report_id: int):
+def laudo_laboratorio_detalhe(admission_id: int, report_id: str):
     try:
         rows = fetch_all_readonly(SQL_LAUDO_LABORATORIO_DETALHE, {"admission_id": admission_id, "report_id": report_id})
         if not rows:
@@ -1258,7 +1308,7 @@ def balanco_hidrico(admission_id: int):
 def laudo_imagem_detalhe(admission_id: int, exam_id: int):
     try:
         rows = fetch_all(SQL_LAUDO_IMAGEM_DETALHE, {"admission_id": admission_id, "exam_id": exam_id})
-        content = _report_content(rows[0].get("CONTEUDO")) if rows else None
+        content = _rtf_to_text(rows[0].get("CONTEUDO") or rows[0].get("CONTEUDO_GED")) if rows else None
         return {"source": "soulmv", "content": content}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha ao consultar o laudo do exame no Soul MV: {exc}") from exc
