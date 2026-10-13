@@ -61,6 +61,42 @@ def autenticar_usuario_para_acesso(
     return {'access_token': token, 'token_type': 'Bearer'}
 
 
+@router.post(
+    '/token-painel-medicos',
+    status_code=HTTPStatus.OK,
+    response_model=Token,
+)
+def autenticar_usuario_painel_medicos(
+    form_data: OAuthForm, session: SessionPostgres
+):
+    """Gera uma sessão de oito horas restrita ao painel médico externo."""
+    usuario_banco = session.scalar(
+        select(Usuario).where(Usuario.email == form_data.username)
+    )
+    excessao_autenticacao = HTTPException(
+        status_code=HTTPStatus.UNAUTHORIZED,
+        detail='Email ou senha incorretos',
+    )
+    if (
+        not usuario_banco
+        or not usuario_banco.ativo
+        or usuario_banco.perfil not in {'leitura', 'ti'}
+        or not valida_senha_cru_x_senha_hash_db(
+            form_data.password, usuario_banco.senha
+        )
+    ):
+        raise excessao_autenticacao
+
+    token = criar_token(
+        claim={
+            'sub': usuario_banco.email,
+            'aud': 'painel_leitos_medicos',
+            'exp': datetime.now(timezone.utc) + timedelta(hours=8),
+        }
+    )
+    return {'access_token': token, 'token_type': 'Bearer'}
+
+
 def _montar_link_redefinicao(token: str) -> str:
     reset_url = settings.frontend_password_reset_url
     if '{token}' in reset_url:

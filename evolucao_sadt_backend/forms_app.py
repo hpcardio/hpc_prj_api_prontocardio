@@ -1150,7 +1150,7 @@ def _confirmed_items(data: dict[str, Any], key: str) -> str:
     return '; '.join(_human(str(item)) for item in _items(data, key))
 
 
-def _render_prevent_current(data: dict[str, Any]) -> str:
+def _render_prevent_current_legacy(data: dict[str, Any]) -> str:
     consultation = _text(data, 'tipo_consulta') or (
         'CIR' if _text(data, 'tempo').startswith('cir') else 'CAL'
     )
@@ -1248,6 +1248,208 @@ def _render_prevent_current(data: dict[str, Any]) -> str:
     return '\n'.join(lines).strip()
 
 
+def _render_prevent_current(data: dict[str, Any]) -> str:
+    consultation = _text(data, 'tipo_consulta') or (
+        'CIR' if _text(data, 'tempo').startswith('cir') else 'CAL'
+    )
+    lines = ['LINHA DE CUIDADO — PREVENÇÃO CARDIOVASCULAR E CARDIOMETABÓLICA']
+
+    def section(title: str, values: list[str]) -> None:
+        filled = [value.strip() for value in values if value and value.strip()]
+        if filled:
+            lines.extend(['', title, *filled])
+
+    cycle_labels = {
+        'cal1': 'CAL 1',
+        'cir1': 'CIR/CAL 1 — integração de resultados',
+        'cal2': 'CAL 2',
+        'cir2': 'CIR/CAL 2 — integração de resultados',
+        'cal3': 'CAL 3',
+        'cir3': 'CIR/CAL 3 — integração de resultados',
+        'retorno_semestral': 'Seguimento semestral',
+        'consulta_extra': 'Consulta extraordinária',
+    }
+    situation_labels = {
+        'na_meta': 'NA META',
+        'fora_da_meta': 'FORA DA META',
+        'adequado': 'ADEQUADA',
+        'alterado': 'ALTERADA',
+        'sem_resultado_valido': 'SEM RESULTADO VÁLIDO',
+        'indeterminado': 'INDETERMINADA',
+    }
+    conduct_labels = {
+        'adesao': 'Avaliar/corrigir adesão ao tratamento',
+        'ajustar': 'Ajustar tratamento',
+        'mapa': 'Solicitar MAPA',
+        'investigar': 'Investigar hipertensão resistente/secundária',
+        'manter': 'Manter tratamento atual com justificativa clínica',
+        'intensificar': 'Intensificar tratamento hipolipemiante',
+        'associar': 'Associar terapia adicional',
+        'nutricao': 'Reforçar orientação alimentar',
+        'atividade': 'Reforçar atividade física',
+        'outra': 'Outra conduta',
+        'ecg': 'Eletrocardiograma',
+        'holter': 'Holter',
+        'eco': 'Ecocardiograma transtorácico',
+        'teste_ergometrico': 'Teste ergométrico',
+        'escore_calcio': 'Escore de cálcio coronariano',
+        'angio_tc': 'Angiotomografia de artérias coronárias',
+        'cine': 'Cinecoronariografia',
+    }
+
+    def listed(key: str, overrides: dict[str, str] | None = None) -> str:
+        labels = {**conduct_labels, **(overrides or {})}
+        return '; '.join(labels.get(item, _human(item)) for item in _items(data, key))
+
+    def numeric(key: str) -> float | None:
+        raw = _text(data, key).replace(',', '.')
+        try:
+            return float(''.join(char for char in raw if char in '0123456789.-'))
+        except ValueError:
+            return None
+
+    pa_situation = _text(data, 'pa_situacao')
+    systolic, diastolic = numeric('pa_sistolica'), numeric('pa_diastolica')
+    if not pa_situation and systolic is not None and diastolic is not None:
+        pa_situation = (
+            'na_meta' if systolic < 130 and diastolic < 80 else 'fora_da_meta'
+        )
+    ldl_situation = _text(data, 'ldl_situacao')
+    ldl_result, ldl_target = numeric('ldl_resultado'), numeric('ldl_meta')
+    if not ldl_situation and ldl_result is not None and ldl_target is not None:
+        ldl_situation = 'na_meta' if ldl_result < ldl_target else 'fora_da_meta'
+    hba1c_situation = _text(data, 'hba1c_situacao')
+    hba1c_result = numeric('hba1c_resultado')
+    if not hba1c_situation and hba1c_result is not None:
+        hba1c_target = numeric('hba1c_meta') or 7
+        hba1c_situation = (
+            'na_meta' if hba1c_result < hba1c_target else 'fora_da_meta'
+        )
+    renal_situation = _text(data, 'renal_situacao')
+    tfg, rac = numeric('tfg'), numeric('rac_resultado')
+    if not renal_situation and (tfg is not None or rac is not None):
+        renal_situation = (
+            'alterado' if (tfg or 90) < 60 or (rac or 0) >= 30 else 'adequado'
+        )
+
+    section('POSIÇÃO NA LINHA DE CUIDADO', [
+        f'Consulta atual: {consultation}.',
+        f'Data-âncora: {_text(data, "data_ancora")}.'
+        if _text(data, 'data_ancora') else '',
+        f'Momento: {cycle_labels.get(_text(data, "tempo"), _human(_text(data, "tempo")))}.'
+        if _text(data, 'tempo') else '',
+    ])
+    if consultation == 'CIR':
+        change = _text(data, 'mudanca_clinica_cir')
+        section('INTEGRAÇÃO DE RESULTADOS — CIR', [
+            f'Houve mudança clínica relevante: {"Sim" if change == "sim" else "Não"}.'
+            if change else '',
+            _text(data, 'mudanca_clinica_descricao'),
+            _text(data, 'integracao_resultados'),
+            _text(data, 'pendencias_decisao'),
+        ])
+        section('DECISÃO CLÍNICA', [
+            _text(data, 'decisoes_cir'),
+            _text(data, 'conduta_adicional'),
+        ])
+        return '\n'.join(lines).strip()
+
+    section('EVOLUÇÃO CLÍNICA', [
+        f'Houve intercorrência clínica: {"Sim" if _text(data, "intercorrencia") == "sim" else "Não"}.'
+        if _text(data, 'intercorrencia') else '',
+        f'Intercorrências: {_confirmed_items(data, "intercorrencias")}.'
+        if _items(data, 'intercorrencias') else '',
+        _text(data, 'intercorrencia_conduta'),
+    ])
+    section('AVALIAÇÃO CLÍNICA E EXAME FÍSICO', [
+        f'PA atual: {_text(data, "pa_sistolica")}/{_text(data, "pa_diastolica")} mmHg.'
+        if _text(data, 'pa_sistolica') or _text(data, 'pa_diastolica') else '',
+        f'Frequência cardíaca: {_text(data, "frequencia_cardiaca")} bpm.'
+        if _text(data, 'frequencia_cardiaca') else '',
+        f'Peso: {_text(data, "peso_atual")} kg.' if _text(data, 'peso_atual') else '',
+        f'Exame cardiovascular: {_text(data, "exame_cardiovascular_descricao")}.'
+        if _text(data, 'exame_cardiovascular_descricao') else '',
+        f'Exame respiratório: {_text(data, "exame_respiratorio_descricao")}.'
+        if _text(data, 'exame_respiratorio_descricao') else '',
+    ])
+    ldl_repeat = _text(data, 'ldl_nova_dosagem')
+    section('METAS CARDIOMETABÓLICAS', [
+        f'Situação da pressão arterial: {situation_labels.get(pa_situation, _human(pa_situation))}.'
+        if pa_situation else '',
+        f'LDL-C: {_text(data, "ldl_resultado")} mg/dL'
+        f'{f" em {_text(data, "ldl_data")}" if _text(data, "ldl_data") else ""}.'
+        if _text(data, 'ldl_resultado') else '',
+        f'Situação do LDL-C: {situation_labels.get(ldl_situation, _human(ldl_situation))}.'
+        if ldl_situation else '',
+        f'Nova dosagem: {_human(ldl_repeat)}.' if ldl_repeat else '',
+        f'HbA1c: {_text(data, "hba1c_resultado")}.'
+        if _text(data, 'hba1c_resultado') else '',
+        f'Situação da HbA1c: {situation_labels.get(hba1c_situation, _human(hba1c_situation))}.'
+        if hba1c_situation else '',
+        f'Situação da função renal/albuminúria: {situation_labels.get(renal_situation, _human(renal_situation))}.'
+        if renal_situation else '',
+    ])
+    section('ESTILO DE VIDA E FATORES MODIFICÁVEIS', [
+        f'Atividade física: {_text(data, "atividade_fisica_conduta")}.'
+        if _text(data, 'atividade_fisica_conduta') else '',
+        f'Alimentação: {_text(data, "alimentacao_conduta")}.'
+        if _text(data, 'alimentacao_conduta') else '',
+        f'Tabagismo: {_text(data, "tabagismo_conduta")}.'
+        if _text(data, 'tabagismo_conduta') else '',
+        f'Sono/AOS: {_text(data, "aos_conduta")}.'
+        if _text(data, 'aos_conduta') else '',
+    ])
+    section('ADESÃO E TOLERÂNCIA AO TRATAMENTO', [
+        f'Medicações atuais: {_text(data, "prescricao_atual")}.'
+        if _text(data, 'prescricao_atual') else '',
+        f'Adesão: {_human(_text(data, "adesao"))}.' if _text(data, 'adesao') else '',
+        f'Barreiras à adesão: {_text(data, "adesao_barreiras")}.'
+        if _text(data, 'adesao_barreiras') else '',
+        f'Efeitos adversos/intolerância: {_human(_text(data, "efeitos_adversos"))}.'
+        if _text(data, 'efeitos_adversos') else '',
+        _text(data, 'efeitos_adversos_descricao'),
+    ])
+    section('EXAMES E INVESTIGAÇÕES COMPLEMENTARES', [
+        f'Exames selecionados para solicitação: {_confirmed_items(data, "exames_solicitados")}.'
+        if _items(data, 'exames_solicitados') else '',
+        f'Avaliação cardiovascular complementar: {listed("avaliacao_cardiovascular_complementar")}.'
+        if _items(data, 'avaliacao_cardiovascular_complementar') else '',
+        _text(data, 'outro_exame_cardiovascular'),
+        _text(data, 'outra_investigacao'),
+    ])
+    section('PLANO TERAPÊUTICO CONSOLIDADO', [
+        f'Pressão arterial: {listed("pa_condutas", {"ajustar": "Ajustar tratamento anti-hipertensivo"})}.'
+        if _items(data, 'pa_condutas') else '',
+        _text(data, 'pa_manter_justificativa'),
+        _text(data, 'pa_conduta_outra'),
+        f'LDL-C: {listed("ldl_condutas")}.' if _items(data, 'ldl_condutas') else '',
+        _text(data, 'ldl_manter_justificativa'),
+        _text(data, 'ldl_conduta_outra'),
+        f'Controle glicêmico: {listed("hba1c_condutas", {"ajustar": "Ajustar tratamento do diabete melito"})}.'
+        if _items(data, 'hba1c_condutas') else '',
+        _text(data, 'hba1c_conduta_outra'),
+        _text(data, 'atividade_fisica_conduta'),
+        _text(data, 'alimentacao_conduta'),
+        _text(data, 'tabagismo_conduta'),
+        _text(data, 'aos_conduta'),
+        _text(data, 'conduta_adicional'),
+    ])
+    section('PRIORIDADES ATÉ A PRÓXIMA AVALIAÇÃO', [
+        f'{_confirmed_items(data, "prioridades")}.'
+        if _items(data, 'prioridades') else '',
+        _text(data, 'prioridade_outra'),
+    ])
+    section('PRÓXIMO PASSO', [
+        f'Próxima etapa: {cycle_labels.get(_text(data, "proxima_etapa"), _human(_text(data, "proxima_etapa")))}.'
+        if _text(data, 'proxima_etapa') else '',
+        f'Data prevista: {_text(data, "data_proxima_etapa")}.'
+        if _text(data, 'data_proxima_etapa') else '',
+        f'Retorno extraordinário em {_text(data, "retorno_extraordinario_dias")} dias.'
+        if _text(data, 'retorno_extraordinario_dias') else '',
+    ])
+    return '\n'.join(lines).strip()
+
+
 def _render_ic_current(data: dict[str, Any]) -> str:
     consultation = _text(data, 'tipo_consulta') or (
         'CIR' if _text(data, 'tempo').startswith('cir') else 'CAL'
@@ -1279,6 +1481,43 @@ def _render_ic_current(data: dict[str, Any]) -> str:
                 _text(data, 'observacao_decisao_adicional'),
             ])
         return '\n'.join(lines).strip()
+
+    moment_labels = {
+        'cal1': 'CAL1', 'cir1': 'CIR1',
+        'cal2': 'CAL2', 'cir2': 'CIR2',
+        'cal3': 'CAL3', 'cir3': 'CIR3',
+        'retorno_semestral': 'Seguimento semestral',
+        'consulta_extra': 'Consulta extraordinária',
+    }
+    identification: list[str] = []
+    if _text(data, 'data_ancora'):
+        identification.append(
+            f'Data-âncora: {_text(data, "data_ancora")}.'
+        )
+    if _text(data, 'tempo'):
+        identification.append(
+            'Momento atual da Linha: '
+            + moment_labels.get(_text(data, 'tempo'), _human(_text(data, 'tempo')))
+            + '.'
+        )
+    if _text(data, 'ultima_avaliacao'):
+        identification.append(
+            'Última avaliação da Linha: '
+            + _text(data, 'ultima_avaliacao') + '.'
+        )
+    if _text(data, 'feve'):
+        identification.append(f'Última FEVE: {_text(data, "feve")}%.' )
+    if _text(data, 'proxima_etapa'):
+        identification.append(
+            'Próxima etapa prevista: '
+            + moment_labels.get(
+                _text(data, 'proxima_etapa'),
+                _human(_text(data, 'proxima_etapa')),
+            )
+            + '.'
+        )
+    if identification:
+        lines.extend(['', '3. IDENTIFICAÇÃO DO CICLO', *identification])
 
     phenotype = _text(data, 'fenotipo_atual')
     feve = _text(data, 'feve')
@@ -1407,6 +1646,33 @@ def _record(row: sqlite3.Row) -> dict[str, Any]:
         'criado_em': row['criado_em'],
         'atualizado_em': row['atualizado_em'],
     }
+
+
+def latest_previous_form_value(
+    cd_atendimento: int,
+    linha_cuidado: str,
+    field_key: str,
+) -> str | None:
+    """Return the newest non-empty structured value for this care line."""
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT dados_json
+              FROM formularios_evolucao
+             WHERE cd_atendimento = ?
+               AND linha_cuidado = ?
+             ORDER BY atualizado_em DESC
+            """,
+            (cd_atendimento, linha_cuidado),
+        ).fetchall()
+    for row in rows:
+        try:
+            value = json.loads(row['dados_json']).get(field_key)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 _initialize_database()

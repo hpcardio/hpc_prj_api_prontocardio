@@ -15,6 +15,9 @@ from app_prontocardio.settings import Settings
 settings = Settings()
 pwd_context = PasswordHash.recommended()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/autenticacao/token')
+painel_medicos_oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl='/autenticacao/token-painel-medicos'
+)
 
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 
@@ -92,6 +95,42 @@ def valida_usuario_ti(usuario: Usuario = Depends(valida_token_usuario_atual)):
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail='Acesso restrito à equipe de TI.',
+        )
+    return usuario
+
+
+def valida_acesso_painel_leitos_medicos(
+    session: SessionPostgres,
+    token: str = Depends(painel_medicos_oauth2_scheme),
+) -> Usuario:
+    """Valida token de curta duração exclusivo do painel clínico externo."""
+    excessao_autenticacao = HTTPException(
+        status_code=HTTPStatus.UNAUTHORIZED,
+        detail='Sessão inválida ou expirada.',
+        headers={'WWW-Authenticate': 'Bearer'},
+    )
+    try:
+        payload = decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=settings.ALGORITHM,
+            audience='painel_leitos_medicos',
+        )
+        subject_email = payload.get('sub')
+        if not subject_email:
+            raise excessao_autenticacao
+    except InvalidTokenError:
+        raise excessao_autenticacao
+
+    usuario = session.scalar(
+        select(Usuario).where(Usuario.email == subject_email)
+    )
+    if not usuario or not usuario.ativo:
+        raise excessao_autenticacao
+    if usuario.perfil not in {'leitura', 'ti'}:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Acesso restrito aos usuários autorizados do painel médico.',
         )
     return usuario
 

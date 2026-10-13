@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -12,6 +12,7 @@ from app_prontocardio.database import (
 )
 from app_prontocardio.routers import (
     agendamentos,
+    angio_tc,
     app_glosas,
     autenticacao,
     biq,
@@ -44,7 +45,10 @@ from app_prontocardio.routers import (
     usuarios,
     whatsapp,
 )
-from app_prontocardio.security import usuario_token_somente_leitura
+from app_prontocardio.security import (
+    usuario_token_somente_leitura,
+    valida_acesso_painel_leitos_medicos,
+)
 from app_prontocardio.settings import Settings
 from evolucao_sadt_backend.app import app as evolucao_sadt_app
 
@@ -114,6 +118,7 @@ app.include_router(cuidados_paciente.router)
 app.include_router(cuidados_paciente.operational_router)
 app.include_router(prontolaudo.router)
 app.include_router(repasse_medico.router)
+app.include_router(angio_tc.router)
 app.include_router(origens_mv.router)
 app.include_router(precos_rede.router)
 app.include_router(painel_senhas_soulmv.router)
@@ -121,6 +126,11 @@ app.include_router(painel_senhas_soulmv_clinica1.router)
 app.include_router(painel_senhas_soulmv_emergencia.router)
 app.include_router(painel_leitos.router)
 app.include_router(painel_leitos_soulmv.router)
+app.include_router(
+    painel_leitos_soulmv.router,
+    prefix='/externo',
+    dependencies=[Depends(valida_acesso_painel_leitos_medicos)],
+)
 app.include_router(painel_hemodinamica.router)
 app.include_router(resultados.router)
 app.include_router(resultados_laboratoriais.router)

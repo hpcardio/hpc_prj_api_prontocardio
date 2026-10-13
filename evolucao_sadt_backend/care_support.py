@@ -1,12 +1,14 @@
 from datetime import date, datetime
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from evolucao_sadt_backend.lc_dac_support import (
     extract_numeric_result,
     load_lc_dac_support,
 )
+from evolucao_sadt_backend.forms_app import latest_previous_form_value
 
 SUPPORTED_LINES = {'LC-DAC', 'LC-IC', 'LC-PREVENCAO'}
 
@@ -31,15 +33,98 @@ def _exam(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _generic_support(raw: dict[str, Any], line_code: str) -> dict[str, Any]:
+def _attendance_identification(
+    session: Session,
+    cd_atendimento: int,
+) -> dict[str, dict[str, Any]]:
+    row = session.execute(
+        text(
+            '''
+            SELECT p.NM_PACIENTE AS nm_paciente,
+                   a.DT_ATENDIMENTO AS dt_atendimento
+              FROM DBAMV.ATENDIME a
+              JOIN DBAMV.PACIENTE p
+                ON p.CD_PACIENTE = a.CD_PACIENTE
+             WHERE a.CD_ATENDIMENTO = :cd_atendimento
+            '''
+        ),
+        {'cd_atendimento': cd_atendimento},
+    ).mappings().first()
+    if not row:
+        return {}
     fields: dict[str, dict[str, Any]] = {}
+    patient = str(row.get('nm_paciente') or '').strip()
+    consultation_date = _date(row.get('dt_atendimento'))
+    if patient:
+        fields['paciente'] = {
+            'valor': patient,
+            'origem': 'MV - atendimento aberto',
+        }
+    if consultation_date:
+        fields['data_consulta'] = {
+            'valor': consultation_date[:10],
+            'origem': 'MV - atendimento aberto',
+        }
+    return fields
+
+
+def _load_latest_receituario_text(
+    session: Session,
+    cd_atendimento: int,
+) -> str | None:
+    rows = session.execute(
+        text(
+            '''
+            SELECT rc.DS_VALOR AS ds_valor,
+                   DBMS_LOB.SUBSTR(rc.LO_VALOR, 4000, 1) AS lo_valor
+              FROM DBAMV.PW_DOCUMENTO_CLINICO dc
+              JOIN DBAMV.PW_EDITOR_CLINICO ec
+                ON ec.CD_DOCUMENTO_CLINICO = dc.CD_DOCUMENTO_CLINICO
+              JOIN DBAMV.EDITOR_REGISTRO_CAMPO rc
+                ON rc.CD_REGISTRO = ec.CD_EDITOR_REGISTRO
+              JOIN DBAMV.EDITOR_CAMPO c
+                ON c.CD_CAMPO = rc.CD_CAMPO
+             WHERE dc.CD_ATENDIMENTO = :cd_atendimento
+               AND dc.CD_OBJETO = 529
+               AND dc.TP_STATUS = 'FECHADO'
+               AND dc.CD_DOCUMENTO_CLINICO = (
+                    SELECT MAX(dc2.CD_DOCUMENTO_CLINICO)
+                      FROM DBAMV.PW_DOCUMENTO_CLINICO dc2
+                     WHERE dc2.CD_ATENDIMENTO = :cd_atendimento
+                       AND dc2.CD_OBJETO = 529
+                       AND dc2.TP_STATUS = 'FECHADO'
+               )
+               AND (
+                    UPPER(c.DS_IDENTIFICADOR) LIKE 'DS_RECEITUARIO_LIVRE%'
+                    OR UPPER(c.DS_IDENTIFICADOR) LIKE 'DS_RECEITUARIO_MEDICAMENTO%'
+               )
+             ORDER BY rc.CD_CAMPO
+            '''
+        ),
+        {'cd_atendimento': cd_atendimento},
+    ).mappings().all()
+    values: list[str] = []
+    for row in rows:
+        value = row.get('lo_valor') or row.get('ds_valor')
+        cleaned = str(value or '').strip()
+        if cleaned and cleaned not in values:
+            values.append(cleaned)
+    return '\n'.join(values) or None
+
+
+def _generic_support(
+    raw: dict[str, Any],
+    line_code: str,
+    identification: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    fields: dict[str, dict[str, Any]] = dict(identification or {})
     exams: dict[str, dict[str, Any]] = {}
 
     prescription = raw.get('itens_ultima_prescricao')
     if isinstance(prescription, list) and prescription:
         fields['prescricao_atual'] = {
             'valor': [str(item) for item in prescription if item],
-            'origem': 'MV - última prescrição ativa',
+            'origem': 'MV - última prescrição medicamentosa ativa',
         }
 
     for source_key, target_key in (
@@ -103,4 +188,25 @@ def load_care_support(
     raw = load_lc_dac_support(session, cd_atendimento)
     if line_code == 'LC-DAC':
         return raw
-    return _generic_support(raw, line_code)
+    if line_code == 'LC-PREVENCAO':
+        raw = {**raw, 'itens_ultima_prescricao': []}
+    identification = _attendance_identification(session, cd_atendimento)
+    result = _generic_support(raw, line_code, identification)
+    if line_code == 'LC-PREVENCAO':
+        receituario = _load_latest_receituario_text(session, cd_atendimento)
+        if receituario:
+            result['campos']['prescricao_atual'] = {
+                'valor': receituario,
+                'origem': 'MV - último receituário fechado',
+            }
+        anchor = latest_previous_form_value(
+            cd_atendimento,
+            line_code,
+            'data_ancora',
+        )
+        if anchor:
+            result['campos']['data_ancora'] = {
+                'valor': anchor,
+                'origem': 'Última evolução estruturada',
+            }
+    return result

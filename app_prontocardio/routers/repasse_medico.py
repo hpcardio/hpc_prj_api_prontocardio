@@ -17,6 +17,14 @@ from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import RepasseMvOperacao, Usuario
+from app_prontocardio.routers.angio_tc import (
+    COMPETENCIA_INICIAL as COMPETENCIA_INICIAL_ANGIO_TC,
+)
+from app_prontocardio.routers.angio_tc import (
+    PRESTADORES_ANGIO_TC,
+    PROCEDIMENTO_ANGIO_TC,
+    angio_tc_dedicado_ativo,
+)
 from app_prontocardio.security import (
     settings,
     valida_acesso_financeiro_mv,
@@ -333,6 +341,15 @@ def _eh_teste_ergometrico(descricao: str | None) -> bool:
     return 'TESTE ERGOMETRICO' in texto or 'TESTE ERGOMÉTRICO' in texto
 
 
+def _eh_angio_tc_dedicada(row: dict, competencia: date) -> bool:
+    return (
+        angio_tc_dedicado_ativo()
+        and competencia >= COMPETENCIA_INICIAL_ANGIO_TC
+        and str(row.get('cd_pro_fat') or '') == PROCEDIMENTO_ANGIO_TC
+        and int(row.get('cd_prestador_destino') or 0) in PRESTADORES_ANGIO_TC
+    )
+
+
 def _token_snapshot(competencia: date, empresa: int, rows: list[dict]) -> str:
     dados = {
         'competencia': competencia.replace(day=1).isoformat(),
@@ -415,6 +432,8 @@ def montar_preview(
     excluidos_valor = Decimal('0')
     total = Decimal('0')
     for row in rows:
+        if _eh_angio_tc_dedicada(row, competencia):
+            continue
         bruto = _decimal(row.get('valor_repasse'))
         desconto = _decimal(row.get('valor_desconto'))
         liquido = bruto - desconto
@@ -451,6 +470,8 @@ def montar_preview(
     atendimentos = []
     atendimentos_teste_ergometrico = []
     for item in detail_rows:
+        if _eh_angio_tc_dedicada(item, competencia):
+            continue
         atendimento = {
             'codigo_repasse_consolidado': item.get(
                 'cd_repasse_consolidado'

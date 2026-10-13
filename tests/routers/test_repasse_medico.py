@@ -92,6 +92,22 @@ def test_preview_exclui_teste_ergometrico_e_bloqueia_envio():
     assert preview['token_confirmacao']
 
 
+def test_preview_exclui_angio_tc_quando_fluxo_dedicado_esta_ativo(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        repasse_medico, 'angio_tc_dedicado_ativo', lambda: True
+    )
+
+    preview = repasse_medico.montar_preview(
+        Sessao([_linha()]), date(2026, 9, 1), empresa=1
+    )
+
+    assert preview['itens'] == []
+    assert preview['atendimentos'] == []
+    assert preview['total_liquido'] == Decimal('0')
+
+
 @pytest.mark.parametrize(
     ('alteracao', 'estado'),
     [
