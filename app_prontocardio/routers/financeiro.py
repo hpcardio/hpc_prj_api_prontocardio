@@ -4394,14 +4394,78 @@ def _aplicar_processos_portal_issec(
             (card.get('processo') or {}).get('numero_processo') or ''
         ).strip()
         and card.get('cd_remessa') is not None
-        and isinstance(card.get('data_competencia'), date)
     ]
     if not elegiveis or not _tabela_schema_existe(
         session, 'raw_issec_portal', 'processos'
     ):
         return
+    codigos_remessa = {
+        int(card['cd_remessa'])
+        for card in elegiveis
+        if card.get('cd_remessa') is not None
+    }
+    if not codigos_remessa:
+        return
+    contas = session_oracle.execute(
+        select(
+            ModelContaAtendimento.cd_remessa,
+            ModelContaAtendimento.cd_reg,
+            ModelContaAtendimento.dt_competencia,
+            ModelContaAtendimento.vl_total_registro,
+        )
+        .where(
+            ModelContaAtendimento.cd_remessa.in_(codigos_remessa),
+            func.upper(func.trim(ModelContaAtendimento.nm_convenio))
+            == 'ISSEC',
+            ModelContaAtendimento.dt_competencia.is_not(None),
+            ModelContaAtendimento.vl_total_registro.is_not(None),
+        )
+        .distinct()
+    ).mappings()
+
+    valores_por_conta: dict[tuple[int, date, int], set[Decimal]] = (
+        defaultdict(set)
+    )
+    for conta in contas:
+        competencia = conta['dt_competencia']
+        if isinstance(competencia, datetime):
+            competencia = competencia.date()
+        if not isinstance(competencia, date):
+            continue
+        chave_conta = (
+            int(conta['cd_remessa']),
+            competencia.replace(day=1),
+            int(conta['cd_reg']),
+        )
+        valores_por_conta[chave_conta].add(
+            _money(conta['vl_total_registro'])
+        )
+
+    totais_por_remessa_competencia: dict[
+        tuple[int, date], Decimal
+    ] = defaultdict(lambda: Decimal('0.00'))
+    remessas_ambiguas: set[int] = set()
+    for (codigo_remessa, competencia, _conta), valores in (
+        valores_por_conta.items()
+    ):
+        if len(valores) != 1:
+            remessas_ambiguas.add(codigo_remessa)
+            continue
+        totais_por_remessa_competencia[
+            (codigo_remessa, competencia)
+        ] += next(iter(valores))
+
+    totais_por_remessa_competencia = {
+        chave: _money(valor)
+        for chave, valor in totais_por_remessa_competencia.items()
+        if chave[0] not in remessas_ambiguas
+    }
+    if not totais_por_remessa_competencia:
+        return
+
     competencias = {
-        card['data_competencia'].replace(day=1) for card in elegiveis
+        competencia
+        for _, competencia in totais_por_remessa_competencia
     }
     competencia_minima = min(competencias)
     competencia_maxima = max(competencias)
@@ -4436,47 +4500,18 @@ def _aplicar_processos_portal_issec(
     if not indice:
         return
 
-    codigos_remessa = {
-        int(card['cd_remessa'])
-        for card in elegiveis
-        if card.get('cd_remessa') is not None
-    }
-    if not codigos_remessa:
-        return
     processos_por_remessa: dict[int, set[str]] = defaultdict(set)
-    contas = session_oracle.execute(
-        select(
-            ModelContaAtendimento.cd_remessa,
-            ModelContaAtendimento.dt_competencia,
-            ModelContaAtendimento.vl_total_registro,
-        )
-        .where(
-            ModelContaAtendimento.cd_remessa.in_(codigos_remessa),
-            ModelContaAtendimento.dt_competencia.in_(competencias),
-            func.upper(func.trim(ModelContaAtendimento.nm_convenio))
-            == 'ISSEC',
-            ModelContaAtendimento.vl_total_registro.is_not(None),
-        )
-        .distinct()
-    ).mappings()
-    for conta in contas:
-        competencia = conta['dt_competencia']
-        if isinstance(competencia, datetime):
-            competencia = competencia.date()
-        if not isinstance(competencia, date):
-            continue
-        chave = (
-            competencia.replace(day=1),
-            _money(conta['vl_total_registro']),
-        )
-        if processo := indice.get(chave):
-            processos_por_remessa[int(conta['cd_remessa'])].add(processo)
+    for (codigo_remessa, competencia), valor_total in (
+        totais_por_remessa_competencia.items()
+    ):
+        if processo := indice.get((competencia, valor_total)):
+            processos_por_remessa[codigo_remessa].add(processo)
 
     for card in elegiveis:
         processos = processos_por_remessa.get(int(card['cd_remessa']), set())
-        # Uma remessa nunca pode ser apresentada dentro do card de um
-        # processo ambíguo. Somente a correspondência única entre a
-        # competência e o vl_total_registro do MV é aplicada.
+        # O total da remessa soma vl_total_registro uma única vez por conta.
+        # A associação só é aplicada quando competência + total apontam para
+        # um único processo do portal.
         if len(processos) == 1:
             card['processo']['numero_processo'] = next(iter(processos))
 
