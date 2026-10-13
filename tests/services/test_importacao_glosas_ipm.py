@@ -537,6 +537,70 @@ def test_associacao_manual_combina_senha_procedimento_e_carteira():
     )
 
 
+def test_guia_codigo_e_carteira_resolvem_sem_depender_da_competencia():
+    cd_remessa = 17942
+    linha = demonstrativo(
+        numero_guia_senha='435644',
+        codigo_servico='0000034564',
+        codigo_beneficiario='020914873',
+        data_realizacao=date(2026, 5, 1),
+    )
+    item = {
+        'cd_remessa': cd_remessa,
+        'cd_reg': 384570,
+        'cd_lancamento': 4,
+        'nr_guia': '435644',
+        'cd_senha': None,
+        'cd_pro_fat': '34564',
+        'cd_tuss': None,
+        'nr_carteira': '20914873',
+        'vl_total_conta': Decimal('10.00'),
+        'dt_competencia': date(2026, 4, 1),
+        'dt_atendimento': date(2026, 3, 23),
+        'dt_lancamento': date(2026, 3, 23),
+    }
+
+    correspondencia = resolver_correspondencia_item_oracle(
+        linha, indexar_itens_oracle([item])
+    )
+
+    assert correspondencia.status == 'item_unico'
+    assert correspondencia.cd_remessa == cd_remessa
+    assert correspondencia.criterio == 'guia_servico_carteira'
+
+
+def test_guia_e_codigo_resolvem_quando_demonstrativo_nao_tem_carteira():
+    cd_remessa = 18160
+    linha = demonstrativo(
+        numero_guia_senha='453193',
+        codigo_servico='0000000240',
+        codigo_beneficiario='',
+        data_realizacao=date(2026, 5, 1),
+    )
+    item = {
+        'cd_remessa': cd_remessa,
+        'cd_reg': 384570,
+        'cd_lancamento': 4,
+        'nr_guia': '453193',
+        'cd_senha': None,
+        'cd_pro_fat': '240',
+        'cd_tuss': None,
+        'nr_carteira': '999999',
+        'vl_total_conta': Decimal('10.00'),
+        'dt_competencia': date(2026, 4, 1),
+        'dt_atendimento': date(2026, 3, 23),
+        'dt_lancamento': date(2026, 3, 23),
+    }
+
+    correspondencia = resolver_correspondencia_item_oracle(
+        linha, indexar_itens_oracle([item])
+    )
+
+    assert correspondencia.status == 'item_unico'
+    assert correspondencia.cd_remessa == cd_remessa
+    assert correspondencia.criterio == 'guia_servico_sem_carteira'
+
+
 def test_valor_refina_lancamentos_iguais_da_mesma_conta_guia_e_dia():
     item_base = {
         'cd_remessa': 17371,
@@ -831,7 +895,7 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         'localizada-por-competencia': 50,
     }
     assert classificacao.criterios == {
-        'localizada': 'competencia_guia_servico_carteira',
+        'localizada': 'guia_servico_carteira',
         'localizada-por-competencia': 'competencia_servico_carteira',
     }
     assert [
@@ -906,7 +970,7 @@ def test_chave_alternativa_nao_repete_correspondencia_da_chave_anterior():
         'prioridade-chave-anterior': 10,
     }
     assert classificacao.criterios == {
-        'prioridade-chave-anterior': 'competencia_guia_servico_carteira',
+        'prioridade-chave-anterior': 'guia_servico_carteira',
     }
     assert classificacao.ambiguas == ()
 
