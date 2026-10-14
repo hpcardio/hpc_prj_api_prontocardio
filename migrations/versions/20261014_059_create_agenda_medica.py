@@ -44,8 +44,14 @@ def upgrade() -> None:
         sa.Column('cd_escala_modelo', sa.Integer(), nullable=False),
         sa.Column('data_agenda', sa.Date(), nullable=False),
         sa.Column('especialidade', sa.String(length=120), nullable=False),
+        sa.Column('hr_inicio', sa.String(length=5), nullable=False),
+        sa.Column('hr_fim', sa.String(length=5), nullable=False),
+        sa.Column('cd_unidade_atendimento', sa.Integer(), nullable=False),
         sa.Column('criado_por_id', sa.Integer(), nullable=False),
         sa.Column('criado_por_nome', sa.String(length=200), nullable=False),
+        sa.Column(
+            'ds_unidade_atendimento', sa.String(length=120), nullable=True
+        ),
         sa.Column('observacao', sa.Text(), nullable=True),
         sa.Column('status', sa.String(length=20), nullable=False),
         sa.Column('criado_em', sa.DateTime(), server_default=sa.func.now()),

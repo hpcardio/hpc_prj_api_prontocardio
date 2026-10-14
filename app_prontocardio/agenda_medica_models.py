@@ -45,8 +45,14 @@ class AgendaMedicaOferta:
     cd_escala_modelo: Mapped[int] = mapped_column(Integer, index=True)
     data_agenda: Mapped[date] = mapped_column(Date, index=True)
     especialidade: Mapped[str] = mapped_column(String(120))
+    hr_inicio: Mapped[str] = mapped_column(String(5))
+    hr_fim: Mapped[str] = mapped_column(String(5))
+    cd_unidade_atendimento: Mapped[int] = mapped_column(Integer)
     criado_por_id: Mapped[int] = mapped_column(Integer)
     criado_por_nome: Mapped[str] = mapped_column(String(200))
+    ds_unidade_atendimento: Mapped[str | None] = mapped_column(
+        String(120), default=None
+    )
     observacao: Mapped[str | None] = mapped_column(Text, default=None)
     status: Mapped[str] = mapped_column(
         String(20), default='ABERTA', index=True

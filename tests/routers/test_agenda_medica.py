@@ -157,6 +157,26 @@ def test_telas_da_agenda_medica_ficam_fora_do_padrao():
     }.intersection(TELAS_PADRAO)
 
 
+def test_me_informa_papeis_e_prestador(cliente, perfis):
+    medico = cliente.get('/agenda-medica/me', headers=perfis['medico'])
+    assert medico.status_code == HTTPStatus.OK
+    assert medico.json()['papeis'] == ['medico']
+    assert medico.json()['cd_prestador'] == CD_PRESTADOR
+    admin = cliente.get('/agenda-medica/me', headers=perfis['admin']).json()
+    assert admin['papeis'] == ['admin']
+    assert admin['cd_prestador'] is None
+
+
+def test_oferta_guarda_horario_e_unidade_da_escala(cliente, perfis):
+    _oferta(cliente, perfis)
+    ofertas = cliente.get(
+        '/agenda-medica/ofertas', headers=perfis['medico']
+    ).json()['ofertas']
+    assert ofertas[0]['hr_inicio'] == '08:00'
+    assert ofertas[0]['hr_fim'] == '12:00'
+    assert ofertas[0]['ds_unidade_atendimento'] == 'CLINICA PRONTOCARDIO SAUDE'
+
+
 def test_usuario_sem_tela_nao_acessa(cliente, perfis):
     resposta = cliente.get('/agenda-medica/status', headers=perfis['comum'])
     assert resposta.status_code == HTTPStatus.FORBIDDEN

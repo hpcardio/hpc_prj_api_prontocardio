@@ -161,6 +161,10 @@ def _oferta_dict(oferta: AgendaMedicaOferta) -> dict:
         'cd_escala_modelo': oferta.cd_escala_modelo,
         'data_agenda': oferta.data_agenda.isoformat(),
         'especialidade': oferta.especialidade,
+        'hr_inicio': oferta.hr_inicio,
+        'hr_fim': oferta.hr_fim,
+        'cd_unidade_atendimento': oferta.cd_unidade_atendimento,
+        'ds_unidade_atendimento': oferta.ds_unidade_atendimento,
         'observacao': oferta.observacao,
         'status': oferta.status,
         'criado_por': oferta.criado_por_nome,
@@ -192,6 +196,33 @@ def _conflito(mensagem) -> HTTPException:
 
 
 # ---------------------------------------------------------------- consultas
+
+
+@router.get('/me')
+def quem_sou(usuario: Leitor, session: SessionPostgres):
+    """Papéis do usuário na Agenda Médica e o prestador que ele representa."""
+    vinculo = session.scalar(
+        select(AgendaMedicaVinculo).where(
+            AgendaMedicaVinculo.usuario_id == usuario.id
+        )
+    )
+    papeis = [
+        papel
+        for papel, tela in (
+            ('medico', TELA_MEDICO),
+            ('admin', TELA_ADMIN),
+            ('responsavel', TELA_RESPONSAVEL),
+        )
+        if tela in (usuario.telas_permitidas or [])
+        or (papel != 'medico' and usuario.perfil in PERFIS_GESTAO)
+    ]
+    return {
+        'id': usuario.id,
+        'nome': usuario.nome,
+        'perfil': usuario.perfil,
+        'papeis': papeis,
+        'cd_prestador': vinculo.cd_prestador if vinculo else None,
+    }
 
 
 @router.get('/status')
@@ -294,8 +325,15 @@ def criar_oferta(
         cd_escala_modelo=payload.cd_escala_modelo,
         data_agenda=payload.data_agenda,
         especialidade=payload.especialidade.strip().upper(),
+        hr_inicio=escala['hr_inicio'],
+        hr_fim=escala['hr_fim'],
+        cd_unidade_atendimento=escala['cd_unidade_atendimento'],
         criado_por_id=usuario.id,
         criado_por_nome=usuario.nome,
+        ds_unidade_atendimento=(
+            escala.get('ds_unidade_atendimento') or ''
+        ).strip()
+        or None,
         observacao=payload.observacao,
     )
     session.add(oferta)
