@@ -124,6 +124,6 @@ def test_evolucao_ic_inclui_identificacao_do_ciclo():
     )
 
     assert '3. IDENTIFICAÇÃO DO CICLO' in texto
-    assert 'Data-âncora: 2026-10-01.' in texto
+    assert 'Início na Linha de Cuidado: 2026-10-01.' in texto
     assert 'Momento atual da Linha: CAL1.' in texto
     assert 'Próxima etapa prevista: CIR1.' in texto

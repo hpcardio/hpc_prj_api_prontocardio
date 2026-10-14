@@ -188,14 +188,18 @@ def load_care_support(
     raw = load_lc_dac_support(session, cd_atendimento)
     if line_code == 'LC-DAC':
         return raw
-    if line_code == 'LC-PREVENCAO':
+    if line_code in {'LC-IC', 'LC-PREVENCAO'}:
         raw = {**raw, 'itens_ultima_prescricao': []}
     identification = _attendance_identification(session, cd_atendimento)
     result = _generic_support(raw, line_code, identification)
-    if line_code == 'LC-PREVENCAO':
+    if line_code in {'LC-IC', 'LC-PREVENCAO'}:
         receituario = _load_latest_receituario_text(session, cd_atendimento)
         if receituario:
-            result['campos']['prescricao_atual'] = {
+            medication_field = (
+                'medicacoes_atuais' if line_code == 'LC-IC'
+                else 'prescricao_atual'
+            )
+            result['campos'][medication_field] = {
                 'valor': receituario,
                 'origem': 'MV - último receituário fechado',
             }
@@ -209,4 +213,15 @@ def load_care_support(
                 'valor': anchor,
                 'origem': 'Última evolução estruturada',
             }
+        if line_code == 'LC-IC':
+            previous_phenotype = latest_previous_form_value(
+                cd_atendimento,
+                line_code,
+                'fenotipo_atual',
+            )
+            if previous_phenotype:
+                result['campos']['fenotipo_anterior'] = {
+                    'valor': previous_phenotype,
+                    'origem': 'Última evolução estruturada',
+                }
     return result

@@ -1492,7 +1492,7 @@ def _render_ic_current(data: dict[str, Any]) -> str:
     identification: list[str] = []
     if _text(data, 'data_ancora'):
         identification.append(
-            f'Data-âncora: {_text(data, "data_ancora")}.'
+            f'Início na Linha de Cuidado: {_text(data, "data_ancora")}.'
         )
     if _text(data, 'tempo'):
         identification.append(
@@ -1519,6 +1519,19 @@ def _render_ic_current(data: dict[str, Any]) -> str:
     if identification:
         lines.extend(['', '3. IDENTIFICAÇÃO DO CICLO', *identification])
 
+    physical: list[str] = []
+    if _text(data, 'altura'):
+        physical.append(f'Altura: {_text(data, "altura")}.')
+    if _text(data, 'imc'):
+        physical.append(f'IMC: {_text(data, "imc")}.')
+    if _text(data, 'exame_dirigido_outro'):
+        physical.append(
+            'Outras alterações no exame físico: '
+            + _text(data, 'exame_dirigido_outro') + '.'
+        )
+    if physical:
+        lines.extend(['', '5. EXAME FÍSICO', *physical])
+
     phenotype = _text(data, 'fenotipo_atual')
     feve = _text(data, 'feve')
     feve_date = _text(data, 'feve_data')
@@ -1532,17 +1545,92 @@ def _render_ic_current(data: dict[str, Any]) -> str:
             lines.append(f'Fenótipo atual: {phenotype}.')
 
     risk = _text(data, 'risco_situacao')
-    if risk:
+    risk_criterion_labels = {
+        'feve_menor_35': 'FEVE < 35%',
+        'bnp_elevado': 'BNP/NT-proBNP elevado',
+        'disfuncao_vd': 'Disfunção ventricular direita',
+        'hiponatremia': 'Hiponatremia',
+        'hipotensao': 'Hipotensão',
+        'internacao_ic_6m': 'Uma ou mais internações por IC nos últimos 6 meses',
+        'emergencias_12m': '≥2 atendimentos na Emergência nos últimos 12 meses',
+        'arritmia_ventricular': 'Arritmia ventricular',
+        'intolerancia_quatro_pilares': 'Intolerância aos quatro pilares',
+        'sincope': 'Síncope',
+        'piora_rapida_dispneia': 'Piora rápida da dispneia',
+        'congestao_persistente': 'Congestão persistente',
+        'piora_renal_progressiva': 'Piora renal progressiva',
+        'necessidade_crescente_diuretico': 'Necessidade crescente de diurético',
+    }
+    risk_criteria = [
+        risk_criterion_labels.get(str(item), str(item))
+        for item in _items(data, 'criterios_alto_risco')
+    ]
+    risk_conduct_labels = {
+        'antecipar': 'Antecipar retorno',
+        'navegacao': 'Intensificar monitoramento/navegação',
+        'revisar': 'Revisar tratamento',
+        'especialista': 'Discutir com especialista em IC',
+    }
+    risk_conducts = [
+        risk_conduct_labels.get(str(item), _human(str(item)))
+        for item in _items(data, 'condutas_alto_risco')
+    ]
+    if risk or risk_criteria or risk_conducts:
+        lines.extend(['', '7. ESTRATIFICAÇÃO DE RISCO'])
+        if risk:
+            lines.append(f'Situação: {_human(risk)}.')
+        if risk_criteria:
+            lines.append('Critérios identificados: ' + '; '.join(risk_criteria) + '.')
+        if risk_conducts:
+            lines.append('Condutas: ' + '; '.join(risk_conducts) + '.')
+
+    etiology: list[str] = []
+    if _text(data, 'etiologia_status'):
+        etiology_status_labels = {
+            'suspeita': 'Suspeita',
+            'confirmada': 'Confirmada',
+            'em_investigacao': 'Em investigação',
+        }
+        etiology.append(
+            'Etiologia da IC: '
+            + etiology_status_labels.get(
+                _text(data, 'etiologia_status'),
+                _human(_text(data, 'etiologia_status')),
+            ) + '.'
+        )
+    valvar_labels = {
+        'sem_relevante': 'Sem valvopatia relevante',
+        'possivelmente_relacionada': 'Valvopatia possivelmente relacionada à IC',
+        'moderada_importante': 'Valvopatia moderada/importante',
+    }
+    valvar_conduct_labels = {
+        'heart_team': 'Encaminhar para Heart Team',
+        'nao_indicar': 'Não indicar neste momento',
+    }
+    if _text(data, 'investigacao_valvar_classificacao'):
+        etiology.append(
+            'Doença valvar: '
+            + valvar_labels.get(
+                _text(data, 'investigacao_valvar_classificacao'),
+                _human(_text(data, 'investigacao_valvar_classificacao')),
+            ) + '.'
+        )
+    if _text(data, 'investigacao_valvar_conduta'):
+        etiology.append(
+            'Conduta valvar: '
+            + valvar_conduct_labels.get(
+                _text(data, 'investigacao_valvar_conduta'),
+                _human(_text(data, 'investigacao_valvar_conduta')),
+            ) + '.'
+        )
+    if etiology:
+        lines.extend(['', '8. INVESTIGAÇÃO ETIOLÓGICA', *etiology])
+
+    if _text(data, 'medicacoes_atuais'):
         lines.extend([
-            '', '7. ESTRATIFICAÇÃO DE RISCO',
-            f'Situação: {_human(risk)}.',
+            '', '9. TRATAMENTO MEDICAMENTOSO',
+            'Medicações atuais:', _text(data, 'medicacoes_atuais'),
         ])
-        if _items(data, 'criterios_alto_risco'):
-            lines.append(
-                'Critérios identificados: '
-                + '; '.join(str(item) for item in _items(data, 'criterios_alto_risco'))
-                + '.'
-            )
 
     phenotype_heading = {
         'ICFEr': '10. TRATAMENTO — ICFEr',
@@ -1596,6 +1684,22 @@ def _render_ic_current(data: dict[str, Any]) -> str:
             lines.append('CDI: ' + _human(_text(data, 'cdi_decisao')) + '.')
         if _text(data, 'trc_decisao'):
             lines.append('TRC: ' + _human(_text(data, 'trc_decisao')) + '.')
+    advanced_signals = [str(item) for item in _items(data, 'sinais_ic_avancada')]
+    advanced_conduct_labels = {
+        'intensificar': 'Intensificar acompanhamento',
+        'rever': 'Rever tratamento e causas potencialmente corrigíveis',
+        'especialista': 'Encaminhar/discutir com cardiologista Sênior/especialista em IC',
+    }
+    advanced_conducts = [
+        advanced_conduct_labels.get(str(item), _human(str(item)))
+        for item in _items(data, 'condutas_ic_avancada')
+    ]
+    if advanced_signals or advanced_conducts:
+        lines.extend(['', '15. AVALIAÇÃO PARA IC AVANÇADA'])
+        if advanced_signals:
+            lines.append('Sinais de alerta: ' + '; '.join(advanced_signals) + '.')
+        if advanced_conducts:
+            lines.append('Condutas: ' + '; '.join(advanced_conducts) + '.')
     if _text(data, 'observacao_decisao_adicional'):
         lines.extend([
             '', '17. PLANO TERAPÊUTICO CONSOLIDADO',
