@@ -9448,6 +9448,19 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
     cards.extend(cards_cogestao)
+    if incluir_detalhes:
+        from app_prontocardio.services.followup_identity import enrich_cards, missing_identity
+
+        remessas_sem_identificacao = {
+            int(card['cd_remessa']) for card in cards
+            if str(card.get('convenio') or '').strip().upper() == 'ISSEC'
+            and card.get('cd_remessa') is not None
+            and any(missing_identity(item) for patient in card.get('pacientes') or []
+                    for item in patient.get('itens') or [])
+        }
+        if remessas_sem_identificacao:
+            _, origens = _itens_oracle_remessas_ipm(session_oracle, remessas_sem_identificacao)
+            enrich_cards(cards, origens)
     _marcar_cards_com_pendencia_associacao_manual(session, cards)
     _marcar_cards_com_recurso_ativo(session, cards)
     return {
