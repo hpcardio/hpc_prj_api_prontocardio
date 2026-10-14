@@ -4499,6 +4499,43 @@ def _aplicar_processos_portal_issec(
             card['processo']['numero_processo'] = next(iter(processos))
 
 
+def _cards_cogestao_com_processo_issec(
+    session, session_oracle, remessas_modeladas, **filtros,
+):
+    """Resolve derived ISSEC identifiers before applying the process filter."""
+    cards = _cards_cogestao_follow_up(
+        session, session_oracle, remessas_modeladas, **filtros,
+    )
+    termo = str(filtros.get('processo_original') or '').strip().casefold()
+    convenio = str(filtros.get('convenio') or '').strip().casefold()
+    if not termo or (convenio and convenio not in 'issec'):
+        return cards
+
+    # Keep all other filters, including the requested remittance. Only ISSEC
+    # needs the portal-derived process, unavailable in the source rows.
+    candidatos = _cards_cogestao_follow_up(
+        session, session_oracle, remessas_modeladas,
+        **{**filtros, 'processo_original': None, 'convenio': 'ISSEC'},
+    )
+    _aplicar_processos_portal_issec(session, session_oracle, candidatos)
+    chaves = {
+        (card.get('cd_remessa'), str((card.get('processo') or {}).get(
+            'numero_processo') or '').strip().casefold())
+        for card in cards
+    }
+    for card in candidatos:
+        numero = str((card.get('processo') or {}).get(
+            'numero_processo') or '').strip().casefold()
+        chave = card.get('cd_remessa'), numero
+        if (
+            str(card.get('convenio') or '').strip().casefold() == 'issec'
+            and termo in numero and chave not in chaves
+        ):
+            cards.append(card)
+            chaves.add(chave)
+    return cards
+
+
 def _detalhar_cards_maida_issec(session, session_oracle, cards):
     from app_prontocardio.services.maida_followup import match_maida_items
 
@@ -8897,7 +8934,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     cards_cogestao: list[dict] = []
     if agrupar_por_processo and conciliacao_remessa_id is None:
         todas_rows = session.execute(consulta_ordenada).all()
-        cards_cogestao = _cards_cogestao_follow_up(
+        cards_cogestao = _cards_cogestao_com_processo_issec(
             session,
             session_oracle,
             set(),
