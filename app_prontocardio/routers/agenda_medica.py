@@ -1,0 +1,591 @@
+"""Agenda Médica: ofertas de grade, pedidos dos médicos e decisões.
+
+Os pedidos ficam no PostgreSQL da API até a decisão. A gravação no SoulMV não
+é feita por este módulo: a aprovação registra a decisão e devolve o plano
+exato do que a rotina oficial da MV receberia (ver plano_geracao).
+"""
+
+from datetime import date, datetime
+from http import HTTPStatus
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app_prontocardio.agenda_medica_models import (
+    AgendaMedicaEvento,
+    AgendaMedicaOferta,
+    AgendaMedicaSolicitacao,
+    AgendaMedicaVinculo,
+)
+from app_prontocardio.database import get_session_oracle, get_session_postgres
+from app_prontocardio.models import Usuario
+from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.agenda_medica_soulmv import (
+    DIAS_SEMANA,
+    AgendaMedicaSoulMV,
+    plano_geracao,
+    tp_dia_semana_de,
+)
+
+router = APIRouter(prefix='/agenda-medica', tags=['agenda-medica'])
+
+TELA_MEDICO = 'agenda_medica_medico'
+TELA_ADMIN = 'agenda_medica_admin'
+TELA_RESPONSAVEL = 'agenda_medica_responsavel'
+PERFIS_GESTAO = {'ti', 'administrador'}
+USUARIO_MV = 'AGENDA_MEDICA'
+MOTIVO_MINIMO = 5
+
+SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
+UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
+
+
+def get_soulmv_agenda_medica(
+    session: Session = Depends(get_session_oracle),
+) -> AgendaMedicaSoulMV:
+    return AgendaMedicaSoulMV(session)
+
+
+SoulMV = Annotated[AgendaMedicaSoulMV, Depends(get_soulmv_agenda_medica)]
+
+
+# ---------------------------------------------------------------- acesso
+
+
+def _tem_tela(usuario: Usuario, tela: str) -> bool:
+    if usuario.perfil in PERFIS_GESTAO:
+        return True
+    return tela in (usuario.telas_permitidas or [])
+
+
+def _proibido(mensagem: str) -> HTTPException:
+    return HTTPException(status_code=HTTPStatus.FORBIDDEN, detail=mensagem)
+
+
+def acesso_admin(usuario: UsuarioAtual) -> Usuario:
+    if not _tem_tela(usuario, TELA_ADMIN):
+        raise _proibido('Acesso restrito ao administrador de agendas.')
+    return usuario
+
+
+def acesso_responsavel(usuario: UsuarioAtual) -> Usuario:
+    if not _tem_tela(usuario, TELA_RESPONSAVEL):
+        raise _proibido('Acesso restrito ao responsável institucional.')
+    return usuario
+
+
+def acesso_leitura(usuario: UsuarioAtual) -> Usuario:
+    telas = (TELA_MEDICO, TELA_ADMIN, TELA_RESPONSAVEL)
+    if not any(_tem_tela(usuario, tela) for tela in telas):
+        raise _proibido('Sem acesso à Agenda Médica.')
+    return usuario
+
+
+def medico_atual(
+    usuario: UsuarioAtual, session: SessionPostgres
+) -> tuple[Usuario, int]:
+    if TELA_MEDICO not in (usuario.telas_permitidas or []):
+        raise _proibido('Acesso restrito a médicos da Agenda Médica.')
+    vinculo = session.scalar(
+        select(AgendaMedicaVinculo).where(
+            AgendaMedicaVinculo.usuario_id == usuario.id
+        )
+    )
+    if vinculo is None:
+        raise _proibido(
+            'Usuário sem prestador vinculado. Peça ao administrador.'
+        )
+    return usuario, vinculo.cd_prestador
+
+
+Admin = Annotated[Usuario, Depends(acesso_admin)]
+Responsavel = Annotated[Usuario, Depends(acesso_responsavel)]
+Leitor = Annotated[Usuario, Depends(acesso_leitura)]
+Medico = Annotated[tuple[Usuario, int], Depends(medico_atual)]
+
+
+# ---------------------------------------------------------------- schemas
+
+
+class VinculoInput(BaseModel):
+    usuario_id: int = Field(gt=0)
+    cd_prestador: int = Field(gt=0)
+
+
+class OfertaInput(BaseModel):
+    cd_escala_modelo: int = Field(gt=0)
+    data_agenda: date
+    especialidade: str = Field(min_length=2, max_length=120)
+    observacao: str | None = Field(default=None, max_length=1000)
+
+
+class CancelamentoInput(BaseModel):
+    cd_agenda_central: int = Field(gt=0)
+    motivo: str = Field(min_length=MOTIVO_MINIMO, max_length=1000)
+
+
+class DecisaoInput(BaseModel):
+    acao: Literal['aprovar', 'recusar']
+    motivo: str | None = Field(default=None, max_length=1000)
+
+
+# ---------------------------------------------------------------- apoio
+
+
+def _registrar(  # noqa: PLR0913, PLR0917
+    session: Session,
+    usuario: Usuario,
+    acao: str,
+    detalhe: str | None = None,
+    oferta_id: int | None = None,
+    solicitacao_id: int | None = None,
+) -> None:
+    session.add(
+        AgendaMedicaEvento(
+            acao=acao,
+            usuario_id=usuario.id,
+            usuario_nome=usuario.nome,
+            oferta_id=oferta_id,
+            solicitacao_id=solicitacao_id,
+            detalhe=detalhe,
+        )
+    )
+
+
+def _oferta_dict(oferta: AgendaMedicaOferta) -> dict:
+    return {
+        'id': oferta.id,
+        'cd_escala_modelo': oferta.cd_escala_modelo,
+        'data_agenda': oferta.data_agenda.isoformat(),
+        'especialidade': oferta.especialidade,
+        'observacao': oferta.observacao,
+        'status': oferta.status,
+        'criado_por': oferta.criado_por_nome,
+    }
+
+
+def _solicitacao_dict(item: AgendaMedicaSolicitacao) -> dict:
+    return {
+        'id': item.id,
+        'tipo': item.tipo,
+        'status': item.status,
+        'cd_prestador': item.cd_prestador,
+        'oferta_id': item.oferta_id,
+        'cd_agenda_central': item.cd_agenda_central,
+        'motivo': item.motivo,
+        'criado_por': item.criado_por_nome,
+        'decisao_por': item.decisao_por_nome,
+        'decisao_em': item.decisao_em.isoformat() if item.decisao_em else None,
+        'resultado_mv': item.resultado_mv,
+    }
+
+
+def _nao_encontrado(mensagem: str) -> HTTPException:
+    return HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=mensagem)
+
+
+def _conflito(mensagem) -> HTTPException:
+    return HTTPException(status_code=HTTPStatus.CONFLICT, detail=mensagem)
+
+
+# ---------------------------------------------------------------- consultas
+
+
+@router.get('/status')
+def status_agenda_medica(_: Leitor):
+    return {
+        'gravacao_soulmv': False,
+        'mensagem': (
+            'Decisões registradas na API. A geração da agenda no SoulMV '
+            'ainda não está implementada: a aprovação devolve o plano.'
+        ),
+    }
+
+
+@router.get('/escalas-modelo')
+def listar_escalas_modelo(
+    _: Admin,
+    soulmv: SoulMV,
+    cd_unidade: int | None = Query(default=None, gt=0),
+    tp_dia_semana: int | None = Query(default=None, ge=1, le=7),
+):
+    return {'escalas': soulmv.escalas_modelo(cd_unidade, tp_dia_semana)}
+
+
+# ---------------------------------------------------------------- vínculos
+
+
+@router.post('/vinculos', status_code=HTTPStatus.CREATED)
+def vincular_prestador(
+    payload: VinculoInput,
+    usuario: Admin,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    if session.get(Usuario, payload.usuario_id) is None:
+        raise _nao_encontrado('Usuário não encontrado.')
+    prestador = soulmv.prestador(payload.cd_prestador)
+    if prestador is None:
+        raise _nao_encontrado('Prestador não encontrado no SoulMV.')
+    vinculo = session.scalar(
+        select(AgendaMedicaVinculo).where(
+            AgendaMedicaVinculo.usuario_id == payload.usuario_id
+        )
+    )
+    if vinculo is None:
+        vinculo = AgendaMedicaVinculo(
+            usuario_id=payload.usuario_id,
+            cd_prestador=payload.cd_prestador,
+            criado_por=usuario.nome,
+        )
+        session.add(vinculo)
+    else:
+        vinculo.cd_prestador = payload.cd_prestador
+    _registrar(
+        session,
+        usuario,
+        'VINCULO_PRESTADOR',
+        f'usuario {payload.usuario_id} -> prestador {payload.cd_prestador}',
+    )
+    session.commit()
+    return {
+        'usuario_id': payload.usuario_id,
+        'cd_prestador': payload.cd_prestador,
+        'nm_prestador': prestador.get('nm_prestador'),
+    }
+
+
+@router.get('/vinculos')
+def listar_vinculos(_: Admin, session: SessionPostgres):
+    vinculos = session.scalars(select(AgendaMedicaVinculo)).all()
+    return {
+        'vinculos': [
+            {'usuario_id': v.usuario_id, 'cd_prestador': v.cd_prestador}
+            for v in vinculos
+        ]
+    }
+
+
+# ---------------------------------------------------------------- ofertas
+
+
+@router.post('/ofertas', status_code=HTTPStatus.CREATED)
+def criar_oferta(
+    payload: OfertaInput,
+    usuario: Admin,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    if payload.data_agenda <= date.today():
+        raise _conflito('A data da grade precisa ser futura.')
+    escala = soulmv.escala_modelo(payload.cd_escala_modelo)
+    if escala is None:
+        raise _nao_encontrado('Escala-modelo não encontrada no SoulMV.')
+    dia = tp_dia_semana_de(payload.data_agenda)
+    if escala['tp_dia_semana'] != dia:
+        esperado = DIAS_SEMANA.get(escala['tp_dia_semana'], '?')
+        raise _conflito(
+            f'A escala-modelo é de {esperado}; escolha uma data nesse dia.'
+        )
+    oferta = AgendaMedicaOferta(
+        cd_escala_modelo=payload.cd_escala_modelo,
+        data_agenda=payload.data_agenda,
+        especialidade=payload.especialidade.strip().upper(),
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+        observacao=payload.observacao,
+    )
+    session.add(oferta)
+    session.flush()
+    _registrar(
+        session,
+        usuario,
+        'OFERTA_CRIADA',
+        f'escala-modelo {payload.cd_escala_modelo} em {payload.data_agenda}',
+        oferta_id=oferta.id,
+    )
+    session.commit()
+    return {**_oferta_dict(oferta), 'escala': escala}
+
+
+@router.get('/ofertas')
+def listar_ofertas(
+    _: Leitor,
+    session: SessionPostgres,
+    status: str | None = Query(default='ABERTA'),
+):
+    consulta = select(AgendaMedicaOferta).order_by(
+        AgendaMedicaOferta.data_agenda
+    )
+    if status:
+        consulta = consulta.where(AgendaMedicaOferta.status == status)
+    return {'ofertas': [_oferta_dict(o) for o in session.scalars(consulta)]}
+
+
+@router.post('/ofertas/{oferta_id}/interesse', status_code=HTTPStatus.CREATED)
+def manifestar_interesse(
+    oferta_id: int, medico: Medico, session: SessionPostgres
+):
+    usuario, cd_prestador = medico
+    oferta = session.get(AgendaMedicaOferta, oferta_id)
+    if oferta is None:
+        raise _nao_encontrado('Oferta não encontrada.')
+    if oferta.status != 'ABERTA':
+        raise _conflito('Esta grade não está mais aberta.')
+    repetido = session.scalar(
+        select(AgendaMedicaSolicitacao).where(
+            AgendaMedicaSolicitacao.oferta_id == oferta_id,
+            AgendaMedicaSolicitacao.cd_prestador == cd_prestador,
+            AgendaMedicaSolicitacao.status.in_(('PENDENTE', 'APROVADA')),
+        )
+    )
+    if repetido is not None:
+        raise _conflito('Você já tem um pedido para esta grade.')
+    pedido = AgendaMedicaSolicitacao(
+        tipo='INTERESSE',
+        cd_prestador=cd_prestador,
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+        oferta_id=oferta_id,
+    )
+    session.add(pedido)
+    session.flush()
+    _registrar(
+        session,
+        usuario,
+        'INTERESSE_MANIFESTADO',
+        oferta_id=oferta_id,
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    return _solicitacao_dict(pedido)
+
+
+# ---------------------------------------------------------------- pedidos
+
+
+@router.post('/cancelamentos', status_code=HTTPStatus.CREATED)
+def pedir_cancelamento(
+    payload: CancelamentoInput,
+    medico: Medico,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    usuario, cd_prestador = medico
+    agenda = soulmv.agenda(payload.cd_agenda_central)
+    if agenda is None or agenda['cd_prestador'] != cd_prestador:
+        raise _nao_encontrado('Agenda não encontrada para este médico.')
+    data_agenda = agenda['dt_agenda']
+    if isinstance(data_agenda, datetime):
+        data_agenda = data_agenda.date()
+    if data_agenda <= date.today():
+        raise _conflito('Só é possível pedir cancelamento de agenda futura.')
+    repetido = session.scalar(
+        select(AgendaMedicaSolicitacao).where(
+            AgendaMedicaSolicitacao.tipo == 'CANCELAMENTO',
+            AgendaMedicaSolicitacao.cd_agenda_central
+            == payload.cd_agenda_central,
+            AgendaMedicaSolicitacao.status == 'PENDENTE',
+        )
+    )
+    if repetido is not None:
+        raise _conflito('Já existe um pedido pendente para esta agenda.')
+    pedido = AgendaMedicaSolicitacao(
+        tipo='CANCELAMENTO',
+        cd_prestador=cd_prestador,
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+        cd_agenda_central=payload.cd_agenda_central,
+        motivo=payload.motivo.strip(),
+    )
+    session.add(pedido)
+    session.flush()
+    _registrar(
+        session,
+        usuario,
+        'CANCELAMENTO_SOLICITADO',
+        payload.motivo.strip(),
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    return _solicitacao_dict(pedido)
+
+
+@router.get('/solicitacoes')
+def listar_solicitacoes(
+    usuario: Leitor,
+    session: SessionPostgres,
+    tipo: Literal['INTERESSE', 'CANCELAMENTO'] | None = None,
+    status: str | None = None,
+):
+    consulta = select(AgendaMedicaSolicitacao).order_by(
+        AgendaMedicaSolicitacao.id.desc()
+    )
+    if tipo:
+        consulta = consulta.where(AgendaMedicaSolicitacao.tipo == tipo)
+    if status:
+        consulta = consulta.where(AgendaMedicaSolicitacao.status == status)
+    so_medico = not (
+        _tem_tela(usuario, TELA_ADMIN) or _tem_tela(usuario, TELA_RESPONSAVEL)
+    )
+    if so_medico:
+        vinculo = session.scalar(
+            select(AgendaMedicaVinculo).where(
+                AgendaMedicaVinculo.usuario_id == usuario.id
+            )
+        )
+        if vinculo is None:
+            return {'solicitacoes': []}
+        consulta = consulta.where(
+            AgendaMedicaSolicitacao.cd_prestador == vinculo.cd_prestador
+        )
+    return {
+        'solicitacoes': [
+            _solicitacao_dict(s) for s in session.scalars(consulta)
+        ]
+    }
+
+
+# ---------------------------------------------------------------- decisões
+
+
+def _avaliar_interesse(
+    pedido: AgendaMedicaSolicitacao,
+    oferta: AgendaMedicaOferta,
+    session: Session,
+    soulmv: AgendaMedicaSoulMV,
+) -> tuple[list[str], dict]:
+    """Regras do SoulMV para aprovar o médico; retorna (pendências, plano)."""
+    pendencias: list[str] = []
+    if oferta.data_agenda <= date.today():
+        pendencias.append('A data da grade já passou.')
+    if oferta.status != 'ABERTA':
+        pendencias.append('Esta grade já foi preenchida ou cancelada.')
+    escala = soulmv.escala_modelo(oferta.cd_escala_modelo)
+    if escala is None:
+        pendencias.append('A escala-modelo não está mais ativa no SoulMV.')
+        return pendencias, {}
+    especialidades = soulmv.especialidades_prestador(pedido.cd_prestador)
+    if oferta.especialidade not in especialidades:
+        pendencias.append(
+            f'O médico não tem {oferta.especialidade} cadastrada no SoulMV.'
+        )
+    conflitos = soulmv.conflitos(
+        pedido.cd_prestador,
+        oferta.data_agenda,
+        escala['hr_inicio'],
+        escala['hr_fim'],
+    )
+    if conflitos:
+        agendas = ', '.join(str(c['cd_agenda_central']) for c in conflitos)
+        pendencias.append(f'Conflito com agenda(s) no SoulMV: {agendas}.')
+    outro_aprovado = session.scalar(
+        select(AgendaMedicaSolicitacao).where(
+            AgendaMedicaSolicitacao.oferta_id == oferta.id,
+            AgendaMedicaSolicitacao.status == 'APROVADA',
+            AgendaMedicaSolicitacao.id != pedido.id,
+        )
+    )
+    if outro_aprovado is not None:
+        pendencias.append('Esta grade já foi aprovada para outro médico.')
+    plano = plano_geracao(
+        escala, pedido.cd_prestador, oferta.data_agenda, USUARIO_MV
+    )
+    return pendencias, plano
+
+
+@router.post('/solicitacoes/{solicitacao_id}/decisao')
+def decidir_solicitacao(
+    solicitacao_id: int,
+    payload: DecisaoInput,
+    usuario: UsuarioAtual,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    pedido = session.get(AgendaMedicaSolicitacao, solicitacao_id)
+    if pedido is None:
+        raise _nao_encontrado('Solicitação não encontrada.')
+    if pedido.tipo == 'INTERESSE':
+        acesso_admin(usuario)
+    else:
+        acesso_responsavel(usuario)
+    if pedido.status != 'PENDENTE':
+        raise _conflito('Esta solicitação já foi decidida.')
+
+    if payload.acao == 'recusar':
+        resultado = {'modo': 'recusado', 'motivo': payload.motivo}
+        status = 'RECUSADA'
+    elif pedido.tipo == 'INTERESSE':
+        oferta = session.get(AgendaMedicaOferta, pedido.oferta_id)
+        pendencias, plano = _avaliar_interesse(pedido, oferta, session, soulmv)
+        if pendencias:
+            raise _conflito({'pendencias': pendencias})
+        oferta.status = 'PREENCHIDA'
+        resultado = {**plano, 'gravado_no_soulmv': False}
+        status = 'APROVADA'
+    else:
+        agenda = soulmv.agenda(pedido.cd_agenda_central)
+        if agenda is None:
+            raise _nao_encontrado('Agenda não encontrada no SoulMV.')
+        if agenda['qt_marcados'] > 0:
+            raise _conflito({
+                'pendencias': [
+                    f'Há {agenda["qt_marcados"]} paciente(s) marcado(s). '
+                    'Remaneje os pacientes antes de cancelar.'
+                ]
+            })
+        resultado = {
+            'modo': 'simulacao',
+            'gravado_no_soulmv': False,
+            'orientacao': (
+                'Bloquear a agenda pela tela do SoulMV até a confirmação '
+                'da rotina oficial de bloqueio com a MV.'
+            ),
+            'cd_agenda_central': pedido.cd_agenda_central,
+        }
+        status = 'APROVADA'
+
+    pedido.status = status
+    pedido.decisao_por_id = usuario.id
+    pedido.decisao_por_nome = usuario.nome
+    pedido.decisao_em = datetime.now()
+    pedido.resultado_mv = resultado
+    _registrar(
+        session,
+        usuario,
+        f'{pedido.tipo}_{status}',
+        payload.motivo,
+        oferta_id=pedido.oferta_id,
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    return _solicitacao_dict(pedido)
+
+
+@router.get('/eventos')
+def listar_eventos(
+    _: Leitor,
+    session: SessionPostgres,
+    limite: int = Query(default=100, ge=1, le=500),
+):
+    eventos = session.scalars(
+        select(AgendaMedicaEvento)
+        .order_by(AgendaMedicaEvento.id.desc())
+        .limit(limite)
+    ).all()
+    return {
+        'eventos': [
+            {
+                'acao': e.acao,
+                'usuario': e.usuario_nome,
+                'oferta_id': e.oferta_id,
+                'solicitacao_id': e.solicitacao_id,
+                'detalhe': e.detalhe,
+                'criado_em': e.criado_em.isoformat() if e.criado_em else None,
+            }
+            for e in eventos
+        ]
+    }

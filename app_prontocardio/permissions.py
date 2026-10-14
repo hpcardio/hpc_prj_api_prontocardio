@@ -23,11 +23,20 @@ TELAS_SISTEMA = (
     'empresas_nfse',
     'financeiro_mv',
     'ecg_worklist',
+    'agenda_medica_medico',
+    'agenda_medica_admin',
+    'agenda_medica_responsavel',
 )
+# Telas concedidas só por atribuição explícita (fora do padrão).
+TELAS_RESTRITAS = {
+    'ecg_worklist',
+    'financeiro_mv',
+    'agenda_medica_medico',
+    'agenda_medica_admin',
+    'agenda_medica_responsavel',
+}
 TELAS_PADRAO = tuple(
-    tela
-    for tela in TELAS_SISTEMA
-    if tela not in {'ecg_worklist', 'financeiro_mv'}
+    tela for tela in TELAS_SISTEMA if tela not in TELAS_RESTRITAS
 )
 TELAS_PADRAO_JSON = json.dumps(list(TELAS_PADRAO))
 
