@@ -26,7 +26,7 @@ RUN pip install \
     && poetry config installer.max-workers 10 \
     && poetry install --no-interaction --no-ansi --without dev --no-root \
     && pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
-        "pillow==12.3.0" "reportlab==4.5.1"
+        "pillow==12.3.0" "reportlab==4.5.1" "pypdf==6.1.1"
 
 COPY . .
 

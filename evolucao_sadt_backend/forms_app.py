@@ -1533,6 +1533,9 @@ def _render_ic_current(data: dict[str, Any]) -> str:
         lines.extend(['', '5. EXAME FÍSICO', *physical])
 
     phenotype = _text(data, 'fenotipo_atual')
+    phenotype_label = {
+        'FEVE_MELHORADA': 'FEVE melhorada',
+    }.get(phenotype, phenotype)
     feve = _text(data, 'feve')
     feve_date = _text(data, 'feve_data')
     if phenotype or feve:
@@ -1542,7 +1545,7 @@ def _render_ic_current(data: dict[str, Any]) -> str:
                 f'FEVE: {feve}%{f" em {feve_date}" if feve_date else ""}.'
             )
         if phenotype:
-            lines.append(f'Fenótipo atual: {phenotype}.')
+            lines.append(f'Fenótipo atual: {phenotype_label}.')
 
     risk = _text(data, 'risco_situacao')
     risk_criterion_labels = {

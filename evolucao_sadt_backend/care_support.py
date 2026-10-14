@@ -1,4 +1,7 @@
+import re
+import unicodedata
 from datetime import date, datetime
+from io import BytesIO
 from typing import Any
 
 from sqlalchemy import text
@@ -11,6 +14,96 @@ from evolucao_sadt_backend.lc_dac_support import (
 from evolucao_sadt_backend.forms_app import latest_previous_form_value
 
 SUPPORTED_LINES = {'LC-DAC', 'LC-IC', 'LC-PREVENCAO'}
+
+
+def _normalized_report_text(value: Any) -> str:
+    raw = str(value or '').upper()
+    without_accents = ''.join(
+        char
+        for char in unicodedata.normalize('NFKD', raw)
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r'\s+', ' ', without_accents).strip()
+
+
+def extract_feve_from_report(report_text: Any) -> str | None:
+    """Return FEVE only when the report explicitly labels the percentage."""
+    normalized = _normalized_report_text(report_text)
+    match = re.search(
+        r'(?:\bFEVE\b|FRACAO DE EJECAO(?: DO VENTRICULO ESQUERDO)?)'
+        r'(?:\s*\([^)]*\))?\s*(?:[:=]|DE)?\s*'
+        r'(\d{1,3}(?:[.,]\d+)?)\s*%',
+        normalized,
+    )
+    if not match:
+        return None
+    value = float(match.group(1).replace(',', '.'))
+    if value < 0 or value > 100:
+        return None
+    return f'{value:g}'
+
+
+def _extract_pdf_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = value.read() if hasattr(value, 'read') else value
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        return None
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(bytes(raw)))
+        text_parts = [page.extract_text() or '' for page in reader.pages]
+    except Exception:
+        return None
+    combined = '\n'.join(part for part in text_parts if part).strip()
+    return combined or None
+
+
+def _load_latest_echo_feve(
+    session: Session,
+    cd_atendimento: int,
+) -> dict[str, Any] | None:
+    rows = session.execute(
+        text(
+            '''
+            SELECT *
+              FROM (
+                    SELECT l.DS_LAUDO_PDF AS laudo_pdf,
+                           l.LAYOUT_NOVO_EDITOR AS layout_novo_editor,
+                           l.DT_LAUDO AS dt_laudo,
+                           l.NOME_EXA_RX AS nome_exame
+                      FROM DBAMV.HPC_V_IMG_LAUDOS_CHPC l
+                     WHERE l.CD_PACIENTE = (
+                           SELECT a.CD_PACIENTE
+                             FROM DBAMV.ATENDIME a
+                            WHERE a.CD_ATENDIMENTO = :cd_atendimento
+                     )
+                       AND (
+                            UPPER(l.NOME_EXA_RX) LIKE '%ECOCARDIOGRAMA%'
+                            OR UPPER(l.NOME_EXA_RX) LIKE '%ECODOPPLER%'
+                       )
+                       AND UPPER(l.NOME_EXA_RX) LIKE '%TRANSTOR%'
+                     ORDER BY l.DT_LAUDO DESC NULLS LAST
+              )
+             WHERE ROWNUM <= 10
+            '''
+        ),
+        {'cd_atendimento': cd_atendimento},
+    ).mappings().all()
+    for row in rows:
+        report_text = _extract_pdf_text(
+            row.get('laudo_pdf') or row.get('layout_novo_editor')
+        )
+        feve = extract_feve_from_report(report_text)
+        if feve is None:
+            continue
+        return {
+            'valor': feve,
+            'data': _date(row.get('dt_laudo')),
+            'origem': 'MV - laudo de ecocardiograma transtorácico',
+        }
+    return None
 
 
 def _date(value: Any) -> str | None:
@@ -214,6 +307,20 @@ def load_care_support(
                 'origem': 'Última evolução estruturada',
             }
         if line_code == 'LC-IC':
+            try:
+                latest_feve = _load_latest_echo_feve(session, cd_atendimento)
+            except Exception:
+                latest_feve = None
+                result['alertas'].append(
+                    'FEVE automática indisponível; informe manualmente.'
+                )
+            if latest_feve:
+                result['campos']['feve'] = latest_feve
+                if latest_feve.get('data'):
+                    result['campos']['feve_data'] = {
+                        'valor': latest_feve['data'],
+                        'origem': latest_feve['origem'],
+                    }
             previous_phenotype = latest_previous_form_value(
                 cd_atendimento,
                 line_code,
