@@ -11,6 +11,7 @@ from app_prontocardio.database import (
     run_postgres_migrations,
 )
 from app_prontocardio.routers import (
+    agenda_medica,
     agendamentos,
     angio_tc,
     app_glosas,
@@ -112,6 +113,7 @@ app.include_router(financeiro.router)
 app.include_router(contas_pagar.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
+app.include_router(agenda_medica.router)
 app.include_router(evolucoes.router)
 app.include_router(operacional.router)
 app.include_router(cuidados_paciente.router)
