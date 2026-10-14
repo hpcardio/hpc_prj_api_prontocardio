@@ -18,6 +18,9 @@ def card(process='', insurer='ISSEC', remittance=17451):
 def setup(monkeypatch, initial=None, candidates=None):
     loader = Mock(side_effect=[initial or [], candidates or []])
     monkeypatch.setattr(financeiro, '_cards_cogestao_follow_up', loader)
+    monkeypatch.setattr(
+        financeiro, '_cards_registros_glosa_follow_up', Mock(return_value=[])
+    )
 
     def resolve(pg, mv, cards):
         for item in cards:
@@ -97,3 +100,44 @@ def test_unrelated_queries_preserve_original_path(monkeypatch, filters):
     loader = setup(monkeypatch)
     financeiro._cards_cogestao_com_processo_issec(None, None, set(), **filters)
     loader.assert_called_once()
+
+
+def test_registered_glosas_resolve_process_before_filter(monkeypatch):
+    setup(monkeypatch)
+    registros = Mock(return_value=[card()])
+    monkeypatch.setattr(
+        financeiro, '_cards_registros_glosa_follow_up', registros
+    )
+    result = financeiro._cards_cogestao_com_processo_issec(
+        None,
+        None,
+        set(),
+        processo_original='2600011399',
+        cd_remessa=17451,
+        paciente='Filtro',
+        incluir_detalhes=True,
+    )
+    assert len(result) == 1
+    assert result[0]['processo']['numero_processo'] == '2600011399'
+    assert sum(len(p['itens']) for p in result[0]['pacientes']) == 3
+    assert registros.call_args.kwargs['processo_original'] is None
+    assert registros.call_args.kwargs['cd_remessa'] == 17451
+    assert registros.call_args.kwargs['paciente'] == 'Filtro'
+    assert registros.call_args.kwargs['convenio'] == 'ISSEC'
+
+
+def test_registered_glosas_do_not_duplicate_resolved_cogestao(monkeypatch):
+    setup(monkeypatch, candidates=[card()])
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_registros_glosa_follow_up',
+        Mock(return_value=[card()]),
+    )
+    result = financeiro._cards_cogestao_com_processo_issec(
+        None,
+        None,
+        set(),
+        processo_original='2600011399',
+        cd_remessa=17451,
+    )
+    assert len(result) == 1

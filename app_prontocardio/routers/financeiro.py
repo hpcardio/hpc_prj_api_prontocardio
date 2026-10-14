@@ -4517,6 +4517,23 @@ def _cards_cogestao_com_processo_issec(
         session, session_oracle, remessas_modeladas,
         **{**filtros, 'processo_original': None, 'convenio': 'ISSEC'},
     )
+    # ISSEC items also originate in registros_glosa. These records can have
+    # no process until the portal association, just like cogestao rows.
+    filtros_registros = {
+        key: filtros.get(key) for key in (
+            'q', 'numero_nfse', 'cd_remessa', 'processo_recurso',
+            'paciente', 'cd_atendimento', 'tipo_atendimento', 'numero_protocolo',
+        )
+    }
+    chaves_cogestao = {
+        (str((card.get('processo') or {}).get('numero_processo') or '')
+         .strip().casefold(), int(card['cd_remessa']))
+        for card in candidatos if card.get('cd_remessa') is not None
+    }
+    candidatos.extend(_cards_registros_glosa_follow_up(
+        session, chaves_cogestao, **filtros_registros,
+        processo_original=None, convenio='ISSEC',
+    ))
     _aplicar_processos_portal_issec(session, session_oracle, candidatos)
     chaves = {
         (card.get('cd_remessa'), str((card.get('processo') or {}).get(
@@ -4527,6 +4544,10 @@ def _cards_cogestao_com_processo_issec(
         numero = str((card.get('processo') or {}).get(
             'numero_processo') or '').strip().casefold()
         chave = card.get('cd_remessa'), numero
+        if filtros.get('processos_permitidos') is not None and numero not in filtros['processos_permitidos']:
+            continue
+        if filtros.get('remessas_permitidas') is not None and card.get('cd_remessa') not in filtros['remessas_permitidas']:
+            continue
         if (
             str(card.get('convenio') or '').strip().casefold() == 'issec'
             and termo in numero and chave not in chaves
