@@ -4365,15 +4365,12 @@ def _dados_demonstrativo_registros_follow_up(
 def _indice_processos_portal_issec(rows) -> dict[tuple[date, Decimal], str]:
     candidatos: dict[tuple[date, Decimal], set[str]] = defaultdict(set)
     for row in rows:
-        competencia = _competencia_cogestao(str(row.get('competencia') or ''))
-        if isinstance(competencia, datetime):
-            competencia = competencia.date()
-        if not isinstance(competencia, date):
-            continue
-        chave = (competencia.replace(day=1), _money(row['valor_cobrado']))
+        from app_prontocardio.services.followup_issec import portal_months
+
         processo = str(row['processo'] or '').strip()
         if processo:
-            candidatos[chave].add(processo)
+            for competencia in portal_months(row):
+                candidatos[competencia, _money(row['valor_cobrado'])].add(processo)
     return {
         chave: next(iter(processos))
         for chave, processos in candidatos.items()
@@ -4470,11 +4467,12 @@ def _aplicar_processos_portal_issec(
     rows = session.execute(
         text(
             """
-            SELECT competencia,
+            SELECT competencia, mes_producao,
                    valor_cobrado,
                    processo
               FROM raw_issec_portal.processos
-             WHERE competencia = ANY(:competencias)
+             WHERE (competencia = ANY(:competencias)
+                    OR TO_CHAR(mes_producao, 'MM/YYYY') = ANY(:competencias))
                AND NULLIF(BTRIM(processo), '') IS NOT NULL
             """
         ),
@@ -4482,16 +4480,15 @@ def _aplicar_processos_portal_issec(
             'competencias': sorted(item.strftime('%m/%Y') for item in competencias),
         },
     ).mappings()
-    indice = _indice_processos_portal_issec(rows)
-    if not indice:
-        return
+    from app_prontocardio.services.followup_issec import match_rows
 
+    totais = [
+        dict(cd_remessa=remessa, competencia=competencia, total=valor)
+        for (remessa, competencia), valor in totais_por_remessa_competencia.items()
+    ]
     processos_por_remessa: dict[int, set[str]] = defaultdict(set)
-    for (codigo_remessa, competencia), valor_total in (
-        totais_por_remessa_competencia.items()
-    ):
-        if processo := indice.get((competencia, valor_total)):
-            processos_por_remessa[codigo_remessa].add(processo)
+    for row, remessa in match_rows(rows, totais):
+        processos_por_remessa[remessa].add(row['processo'])
 
     for card in elegiveis:
         processos = processos_por_remessa.get(int(card['cd_remessa']), set())
