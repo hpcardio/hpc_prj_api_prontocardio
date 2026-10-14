@@ -2516,17 +2516,17 @@ def test_follow_up_maida_oculta_processo_tecnico_e_usa_competencia_xlsx(
 def test_indice_processos_portal_issec_exige_correspondencia_unica():
     rows = [
         {
-            'mes_producao': date(2026, 4, 1),
+            'competencia': '04/2026',
             'valor_cobrado': Decimal('580.95'),
             'processo': '2600006990',
         },
         {
-            'mes_producao': date(2026, 4, 20),
+            'competencia': '04/2026',
             'valor_cobrado': Decimal('155.97'),
             'processo': '2600006991',
         },
         {
-            'mes_producao': date(2026, 4, 1),
+            'competencia': '04/2026',
             'valor_cobrado': Decimal('155.97'),
             'processo': '2600006992',
         },
@@ -2545,7 +2545,7 @@ def test_aplica_processo_issec_pelo_total_unico_por_conta(monkeypatch):
             return iter(
                 [
                     {
-                        'mes_producao': date(2026, 4, 1),
+                        'competencia': '04/2026',
                         'valor_cobrado': Decimal('736.92'),
                         'processo': '2600006990',
                     }
@@ -2629,12 +2629,12 @@ def test_nao_aplica_processo_issec_quando_total_aponta_para_mais_de_um(
             return Resultado(
                 [
                     {
-                        'mes_producao': date(2026, 4, 1),
+                        'competencia': '04/2026',
                         'valor_cobrado': Decimal('736.92'),
                         'processo': '2600006990',
                     },
                     {
-                        'mes_producao': date(2026, 4, 1),
+                        'competencia': '04/2026',
                         'valor_cobrado': Decimal('736.92'),
                         'processo': '2600006991',
                     },
