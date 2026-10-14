@@ -1003,6 +1003,66 @@ def _enviar_cancelamento_whatsapp_agendamento(
     return 'enviado', 'Cancelamento enviado por WhatsApp.'
 
 
+def persistir_convenio_plano_agendamento(
+    cursor,
+    *,
+    cd_it_agenda_inicio: int,
+    cd_it_agenda_fim: int | None,
+    cd_agenda_central: int,
+    cd_paciente: int,
+    cd_convenio: int,
+    cd_con_pla: int,
+) -> None:
+    slot_fim = cd_it_agenda_fim or cd_it_agenda_inicio
+    parametros = {
+        'cd_it_agenda_inicio': cd_it_agenda_inicio,
+        'cd_it_agenda_fim': slot_fim,
+        'cd_agenda_central': cd_agenda_central,
+        'cd_paciente': cd_paciente,
+        'cd_convenio': cd_convenio,
+        'cd_con_pla': cd_con_pla,
+    }
+    cursor.execute(
+        """
+        UPDATE DBAMV.IT_AGENDA_CENTRAL
+           SET CD_CONVENIO = :cd_convenio,
+               CD_CON_PLA = :cd_con_pla
+         WHERE CD_IT_AGENDA_CENTRAL BETWEEN
+                   :cd_it_agenda_inicio AND :cd_it_agenda_fim
+           AND CD_AGENDA_CENTRAL = :cd_agenda_central
+           AND CD_PACIENTE = :cd_paciente
+        """,
+        parametros,
+    )
+    verificacao = cursor.execute(
+        """
+        SELECT COUNT(*) AS quantidade_slots,
+               SUM(
+                   CASE
+                       WHEN CD_CONVENIO = :cd_convenio
+                        AND CD_CON_PLA = :cd_con_pla
+                       THEN 1
+                       ELSE 0
+                   END
+               ) AS quantidade_corretos
+          FROM DBAMV.IT_AGENDA_CENTRAL
+         WHERE CD_IT_AGENDA_CENTRAL BETWEEN
+                   :cd_it_agenda_inicio AND :cd_it_agenda_fim
+           AND CD_AGENDA_CENTRAL = :cd_agenda_central
+           AND CD_PACIENTE = :cd_paciente
+        """,
+        parametros,
+    ).fetchone()
+    if (
+        verificacao is None
+        or verificacao[0] < 1
+        or verificacao[1] != verificacao[0]
+    ):
+        raise RuntimeError(
+            'O MV nao persistiu convenio e plano em todos os horarios.'
+        )
+
+
 @router.post(
     '/confirmar',
     status_code=HTTPStatus.OK,
@@ -1126,6 +1186,15 @@ def confirmar_agendamento(
             cd_paciente=payload.cd_paciente,
             cd_it_agenda_inicio=payload.cd_it_agenda_central,
             cd_it_agenda_fim=slot_fim,
+        )
+        persistir_convenio_plano_agendamento(
+            cursor,
+            cd_it_agenda_inicio=payload.cd_it_agenda_central,
+            cd_it_agenda_fim=slot_fim,
+            cd_agenda_central=payload.cd_agenda_central,
+            cd_paciente=payload.cd_paciente,
+            cd_convenio=payload.cd_convenio,
+            cd_con_pla=payload.cd_con_pla,
         )
         row = cursor.execute(
             """
@@ -1419,6 +1488,18 @@ def reagendar_agendamento(
                     'O agendamento anterior foi preservado.'
                 ),
             )
+        persistir_convenio_plano_agendamento(
+            cursor,
+            cd_it_agenda_inicio=payload.cd_it_agenda_central,
+            cd_it_agenda_fim=(
+                payload.cd_it_agenda_fim
+                or payload.cd_it_agenda_central
+            ),
+            cd_agenda_central=novo[0],
+            cd_paciente=payload.cd_paciente,
+            cd_convenio=payload.cd_convenio,
+            cd_con_pla=payload.cd_con_pla,
+        )
         row = cursor.execute(
             '''
             SELECT i.CD_IT_AGENDA_CENTRAL,
