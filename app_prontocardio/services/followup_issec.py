@@ -142,7 +142,7 @@ def portal_cards(
             'data_entrega': None,
             'numero_nfse': '',
             'valor_remessa': money(row['valor_cobrado']),
-            'valor_itens': Decimal('0.00'),
+            'valor_itens': money(row['valor_cobrado']),
             'valor_glosado': glosa,
             'valor_glosa_pendente': glosa,
             'valor_total_tratado': Decimal('0.00'),

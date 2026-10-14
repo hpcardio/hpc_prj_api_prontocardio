@@ -4502,6 +4502,55 @@ def _aplicar_processos_portal_issec(
             card['processo']['numero_processo'] = next(iter(processos))
 
 
+def _detalhar_cards_maida_issec(session, session_oracle, cards):
+    from app_prontocardio.services.maida_followup import match_maida_items
+
+    if not cards or not _tabela_ipm_existe(session, 'demonstrativo_conta_ipm'):
+        return
+    _, by_remessa = _itens_oracle_remessas_ipm(
+        session_oracle, {int(card['cd_remessa']) for card in cards},
+    )
+    guides = sorted({
+        str(item.get('nr_guia') or '').strip()
+        for items in by_remessa.values() for item in items
+        if str(item.get('nr_guia') or '').strip()
+    })
+    if not guides:
+        return
+    demos = list(session.execute(text(
+        """SELECT * FROM api_prontocardio.demonstrativo_conta_ipm
+            WHERE origem_maida IS NOT NULL AND COALESCE(valor_glosa, 0) > 0
+              AND BTRIM(numero_guia_senha) = ANY(:guias)
+            ORDER BY id_registro"""
+    ), {'guias': guides}).mappings())
+    codes = {str(d.get('codigo_glosa') or '').strip() for d in demos}
+    descriptions = {
+        t.codigo_termo: t.termo
+        for t in session.scalars(select(Tiss).where(Tiss.codigo_termo.in_(codes)))
+    } if codes else {}
+    for card in cards:
+        patients = {}
+        for demo, origin in match_maida_items(
+            demos, by_remessa.get(int(card['cd_remessa']), []),
+        ):
+            item = _item_demonstrativo_follow_up(
+                demo, origin, 'guia_procedimento_maida',
+                descriptions.get(str(demo.get('codigo_glosa') or '').strip()),
+            )
+            key = item['cd_paciente']
+            patient = patients.setdefault(key, {
+                'codigo_paciente': key,
+                'nm_paciente': item['nm_paciente'] or 'Paciente não informado',
+                'valor_itens': Decimal('0.00'),
+                'valor_glosado': Decimal('0.00'),
+                'valor_total_tratado': Decimal('0.00'), 'itens': [],
+            })
+            patient['itens'].append(item)
+            patient['valor_itens'] += item['valor_processado']
+            patient['valor_glosado'] += item['valor_glosa']
+        card['pacientes'] = list(patients.values())
+
+
 def _descricoes_tiss(
     session: Session,
     registros: list[RegistroGlosa],
@@ -8921,7 +8970,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 str((card.get('processo') or {}).get('numero_processo') or '').strip()
                 for card in cards_cogestao
             }
-            cards_cogestao.extend(portal_cards(
+            novos_cards_issec = portal_cards(
                 session, session_oracle, existing,
                 cd_remessa=cd_remessa, processo=processo_original,
                 protocolo=numero_protocolo, convenio=convenio, q=q,
@@ -8929,7 +8978,9 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                                  cd_atendimento, tipo_atendimento)),
                 processos_permitidos=processos_permitidos,
                 remessas_permitidas=remessas_permitidas,
-            ))
+            )
+            _detalhar_cards_maida_issec(session, session_oracle, novos_cards_issec)
+            cards_cogestao.extend(novos_cards_issec)
 
         # A conciliação é um histórico financeiro legado e não define a
         # existência da glosa. Quando o IPM possui o mesmo processo/remessa,
