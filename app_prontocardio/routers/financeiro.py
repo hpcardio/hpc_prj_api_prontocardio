@@ -4365,7 +4365,7 @@ def _dados_demonstrativo_registros_follow_up(
 def _indice_processos_portal_issec(rows) -> dict[tuple[date, Decimal], str]:
     candidatos: dict[tuple[date, Decimal], set[str]] = defaultdict(set)
     for row in rows:
-        competencia = row['mes_producao']
+        competencia = _competencia_cogestao(str(row.get('competencia') or ''))
         if isinstance(competencia, datetime):
             competencia = competencia.date()
         if not isinstance(competencia, date):
@@ -4467,33 +4467,19 @@ def _aplicar_processos_portal_issec(
         competencia
         for _, competencia in totais_por_remessa_competencia
     }
-    competencia_minima = min(competencias)
-    competencia_maxima = max(competencias)
-    competencia_limite = date(
-        competencia_maxima.year
-        + (competencia_maxima.month == MESES_POR_ANO),
-        (
-            1
-            if competencia_maxima.month == MESES_POR_ANO
-            else competencia_maxima.month + 1
-        ),
-        1,
-    )
     rows = session.execute(
         text(
             """
-            SELECT DATE_TRUNC('month', mes_producao)::date AS mes_producao,
+            SELECT competencia,
                    valor_cobrado,
                    processo
               FROM raw_issec_portal.processos
-             WHERE mes_producao >= :competencia_minima
-               AND mes_producao < :competencia_limite
+             WHERE competencia = ANY(:competencias)
                AND NULLIF(BTRIM(processo), '') IS NOT NULL
             """
         ),
         {
-            'competencia_minima': competencia_minima,
-            'competencia_limite': competencia_limite,
+            'competencias': sorted(item.strftime('%m/%Y') for item in competencias),
         },
     ).mappings()
     indice = _indice_processos_portal_issec(rows)
@@ -8922,6 +8908,28 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             session_oracle,
             cards_cogestao,
         )
+
+        # O portal ISSEC também contém processos ainda sem conciliação ou
+        # tratativa local. O vínculo é derivado; nenhum dado é persistido.
+        from app_prontocardio.services.followup_issec import portal_cards
+
+        if _tabela_schema_existe(session, 'raw_issec_portal', 'processos'):
+            existing = {
+                str(row[1].processo_recebimento or '').strip()
+                for row in todas_rows
+            } | {
+                str((card.get('processo') or {}).get('numero_processo') or '').strip()
+                for card in cards_cogestao
+            }
+            cards_cogestao.extend(portal_cards(
+                session, session_oracle, existing,
+                cd_remessa=cd_remessa, processo=processo_original,
+                protocolo=numero_protocolo, convenio=convenio, q=q,
+                unsupported=any((numero_nfse, processo_recurso, paciente,
+                                 cd_atendimento, tipo_atendimento)),
+                processos_permitidos=processos_permitidos,
+                remessas_permitidas=remessas_permitidas,
+            ))
 
         # A conciliação é um histórico financeiro legado e não define a
         # existência da glosa. Quando o IPM possui o mesmo processo/remessa,
