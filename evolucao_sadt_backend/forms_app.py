@@ -1354,11 +1354,35 @@ def _render_prevent_current(data: dict[str, Any]) -> str:
         ])
         return '\n'.join(lines).strip()
 
+    profile_labels = {
+        'hipertensao': 'Hipertensão arterial',
+        'dislipidemia': 'Dislipidemia',
+        'pre_diabete': 'Pré-diabete',
+        'diabete_melito': 'Diabete melito',
+        'sindrome_metabolica': 'Síndrome metabólica',
+        'doenca_renal_cronica': 'Doença renal crônica',
+        'albuminuria': 'Albuminúria',
+        'apneia_obstrutiva_sono': 'Apneia obstrutiva do sono',
+        'aterosclerose_subclinica': 'Aterosclerose subclínica',
+        'doenca_cardiovascular_estabelecida': 'Doença cardiovascular estabelecida',
+        'historia_familiar_dcv_prematura': 'História familiar de doença cardiovascular prematura',
+    }
+    active_profile = [
+        label for key, label in profile_labels.items()
+        if _text(data, key) == 'sim'
+    ]
+    section('PERFIL CARDIOVASCULAR E CARDIOMETABÓLICO', [
+        f'Condições identificadas: {"; ".join(active_profile)}.'
+        if active_profile else '',
+        _text(data, 'outros_fatores_relevantes'),
+    ])
+
     section('EVOLUÇÃO CLÍNICA', [
         f'Houve intercorrência clínica: {"Sim" if _text(data, "intercorrencia") == "sim" else "Não"}.'
         if _text(data, 'intercorrencia') else '',
         f'Intercorrências: {_confirmed_items(data, "intercorrencias")}.'
         if _items(data, 'intercorrencias') else '',
+        _text(data, 'intercorrencia_outra'),
         _text(data, 'intercorrencia_conduta'),
     ])
     section('AVALIAÇÃO CLÍNICA E EXAME FÍSICO', [
@@ -1367,6 +1391,12 @@ def _render_prevent_current(data: dict[str, Any]) -> str:
         f'Frequência cardíaca: {_text(data, "frequencia_cardiaca")} bpm.'
         if _text(data, 'frequencia_cardiaca') else '',
         f'Peso: {_text(data, "peso_atual")} kg.' if _text(data, 'peso_atual') else '',
+        f'Altura: {_text(data, "altura")} m.' if _text(data, 'altura') else '',
+        f'IMC: {_text(data, "imc")} kg/m².' if _text(data, 'imc') else '',
+        f'Peso anterior: {_text(data, "peso_anterior")} kg.'
+        if _text(data, 'peso_anterior') else '',
+        f'Meta de peso: {_text(data, "meta_peso")} kg.'
+        if _text(data, 'meta_peso') else '',
         f'Exame cardiovascular: {_text(data, "exame_cardiovascular_descricao")}.'
         if _text(data, 'exame_cardiovascular_descricao') else '',
         f'Exame respiratório: {_text(data, "exame_respiratorio_descricao")}.'
@@ -1381,13 +1411,23 @@ def _render_prevent_current(data: dict[str, Any]) -> str:
         if _text(data, 'ldl_resultado') else '',
         f'Situação do LDL-C: {situation_labels.get(ldl_situation, _human(ldl_situation))}.'
         if ldl_situation else '',
+        f'Meta de LDL-C: {_text(data, "ldl_meta")} mg/dL.'
+        if _text(data, 'ldl_meta') else '',
         f'Nova dosagem: {_human(ldl_repeat)}.' if ldl_repeat else '',
         f'HbA1c: {_text(data, "hba1c_resultado")}.'
         if _text(data, 'hba1c_resultado') else '',
         f'Situação da HbA1c: {situation_labels.get(hba1c_situation, _human(hba1c_situation))}.'
         if hba1c_situation else '',
+        f'Meta de HbA1c: {_text(data, "hba1c_meta")}%.'
+        if _text(data, 'hba1c_meta') else '',
         f'Situação da função renal/albuminúria: {situation_labels.get(renal_situation, _human(renal_situation))}.'
         if renal_situation else '',
+        f'Creatinina: {_text(data, "creatinina")} mg/dL.'
+        if _text(data, 'creatinina') else '',
+        f'TFGe: {_text(data, "tfg")} mL/min/1,73m².'
+        if _text(data, 'tfg') else '',
+        f'RAC: {_text(data, "rac_resultado")} mg/g.'
+        if _text(data, 'rac_resultado') else '',
     ])
     section('ESTILO DE VIDA E FATORES MODIFICÁVEIS', [
         f'Atividade física: {_text(data, "atividade_fisica_conduta")}.'
