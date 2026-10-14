@@ -8,6 +8,8 @@ from sqlalchemy import text
 
 
 def month(value):
+    if isinstance(value, (date, datetime)):
+        return date(value.year, value.month, 1)
     try:
         return datetime.strptime(str(value).strip(), '%m/%Y').date()
     except (ValueError, TypeError):
@@ -18,28 +20,46 @@ def money(value):
     return Decimal(str(value or 0)).quantize(Decimal('0.01'))
 
 
+def portal_months(row):
+    return {
+        value
+        for value in (
+            month(row.get('competencia')),
+            month(row.get('mes_producao')),
+        )
+        if value is not None
+    }
+
+
 def match_rows(portal, oracle):
-    """Require a unique portal process and a unique remittance per key."""
-    processes = defaultdict(set)
+    """Match either portal month, requiring uniqueness across both alternatives."""
+    portal = list(portal)
     remittances = defaultdict(set)
-    for row in portal:
+    for row in oracle:
         competence = month(row['competencia'])
         if competence:
-            processes[competence, money(row['valor_cobrado'])].add(
-                row['processo']
-            )
-    for row in oracle:
-        competence = row['competencia']
-        if isinstance(competence, datetime):
-            competence = competence.date()
-        if isinstance(competence, date):
-            remittances[competence.replace(day=1), money(row['total'])].add(
+            remittances[competence, money(row['total'])].add(
                 int(row['cd_remessa'])
             )
+    by_process = defaultdict(set)
+    by_remittance = defaultdict(set)
     for row in portal:
-        key = month(row['competencia']), money(row['valor_cobrado'])
-        if len(processes[key]) == 1 and len(remittances[key]) == 1:
-            yield row, next(iter(remittances[key]))
+        number = row['processo']
+        for competence in portal_months(row):
+            for remittance in remittances[
+                competence, money(row['valor_cobrado'])
+            ]:
+                by_process[number].add(remittance)
+                by_remittance[remittance].add(number)
+    seen = set()
+    for row in portal:
+        number = row['processo']
+        candidates = by_process[number]
+        if number not in seen and len(candidates) == 1:
+            remittance = next(iter(candidates))
+            if len(by_remittance[remittance]) == 1:
+                seen.add(number)
+                yield row, remittance
 
 
 def portal_cards(
@@ -64,7 +84,7 @@ def portal_cards(
         dict(row)
         for row in session.execute(
             text(
-                """SELECT BTRIM(processo) AS processo, competencia,
+                """SELECT BTRIM(processo) AS processo, competencia, mes_producao,
                   valor_cobrado, valor_total_itens_glosados,
                   EXISTS (SELECT 1 FROM api_prontocardio.registros_glosa r
                            WHERE r.sn_ativo = 'true'
@@ -76,7 +96,7 @@ def portal_cards(
     ]
     # Preserve ambiguity detection even if only one of two equal processes
     # matches the user's search. Never filter candidates before matching.
-    months = {month(row['competencia']) for row in rows}
+    months = {value for row in rows for value in portal_months(row)}
     months.discard(None)
     if not months:
         return []
