@@ -527,6 +527,81 @@ CONSULTA_TESTE_ERGOMETRICO_LAUDOS_CHECKUP = text(
     """
 )
 
+# A competencia vem do ciclo de faturamento do MV, mas os dados do exame e o
+# prestador continuam vindo do pedido/laudo clinico. Nenhum valor do repasse e
+# usado para calcular o pagamento no ProntoEscala.
+CONSULTA_TESTE_ERGOMETRICO_POR_COMPETENCIA = text(
+    """
+    WITH faturamento AS (
+        SELECT rc.CD_ATENDIMENTO,
+               MAX(rc.CD_REPASSE_CONSOLIDADO) AS CD_REPASSE_CONSOLIDADO,
+               MAX(rc.CD_REMESSA) AS CD_REMESSA,
+               TRUNC(r.DT_COMPETENCIA, 'MM') AS COMPETENCIA_FATURAMENTO
+          FROM DBAMV.REPASSE_CONSOLIDADO rc
+          JOIN DBAMV.REPASSE r
+            ON r.CD_REPASSE = rc.CD_REPASSE
+         WHERE r.DT_COMPETENCIA >= :data_inicio
+           AND r.DT_COMPETENCIA < :data_fim
+           AND NVL(rc.CD_PROCEDIMENTO, rc.CD_PRO_FAT) IN (
+                40101037, 40101045, 20101056, 18000002,
+                70051021, 22051014, 10210004, 20010028
+           )
+         GROUP BY rc.CD_ATENDIMENTO, TRUNC(r.DT_COMPETENCIA, 'MM')
+    )
+    SELECT DISTINCT
+           a.CD_ATENDIMENTO AS cd_atendimento,
+           a.HR_ATENDIMENTO AS dt_atendimento,
+           a.CD_PACIENTE AS cd_paciente,
+           pac.NM_PACIENTE AS nm_paciente,
+           a.CD_CONVENIO AS cd_convenio,
+           conv.NM_CONVENIO AS nm_convenio,
+           fat.CD_REPASSE_CONSOLIDADO AS cd_repasse_consolidado,
+           fat.CD_REMESSA AS cd_remessa,
+           1 AS em_remessa_faturamento,
+           fat.COMPETENCIA_FATURAMENTO AS competencia_faturamento,
+           exa.EXA_RX_CD_PRO_FAT AS cd_pro_fat,
+           pf.DS_PRO_FAT AS ds_pro_fat,
+           ped.CD_PED_RX AS cd_ped_rx,
+           ipr.CD_ITPED_RX AS cd_itped_rx,
+           lr.CD_LAUDO AS cd_laudo,
+           lr.DT_LAUDO AS dt_laudo,
+           NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) AS cd_prestador,
+           p.NM_PRESTADOR AS nm_prestador,
+           p.DS_CODIGO_CONSELHO AS crm,
+           a.CD_PRESTADOR AS cd_prestador_atendimento,
+           pa.NM_PRESTADOR AS nm_prestador_atendimento,
+           pa.DS_CODIGO_CONSELHO AS crm_atendimento,
+           a.TP_ATENDIMENTO AS tp_atendimento
+      FROM faturamento fat
+      JOIN DBAMV.ATENDIME a
+        ON a.CD_ATENDIMENTO = fat.CD_ATENDIMENTO
+      JOIN DBAMV.PED_RX ped
+        ON ped.CD_ATENDIMENTO = a.CD_ATENDIMENTO
+      JOIN DBAMV.ITPED_RX ipr
+        ON ipr.CD_PED_RX = ped.CD_PED_RX
+      JOIN DBAMV.EXA_RX exa
+        ON exa.CD_EXA_RX = ipr.CD_EXA_RX
+       AND exa.EXA_RX_CD_PRO_FAT IN (
+            40101037, 40101045, 20101056, 18000002,
+            70051021, 22051014, 10210004, 20010028
+       )
+      JOIN DBAMV.LAUDO_RX lr
+        ON lr.CD_LAUDO = ipr.CD_LAUDO
+      LEFT JOIN DBAMV.PRO_FAT pf
+        ON pf.CD_PRO_FAT = exa.EXA_RX_CD_PRO_FAT
+      LEFT JOIN DBAMV.PACIENTE pac
+        ON pac.CD_PACIENTE = a.CD_PACIENTE
+      LEFT JOIN DBAMV.CONVENIO conv
+        ON conv.CD_CONVENIO = a.CD_CONVENIO
+      LEFT JOIN DBAMV.PRESTADOR p
+        ON p.CD_PRESTADOR = NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR)
+      LEFT JOIN DBAMV.PRESTADOR pa
+        ON pa.CD_PRESTADOR = a.CD_PRESTADOR
+     WHERE NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) IS NOT NULL
+     ORDER BY lr.DT_LAUDO, p.NM_PRESTADOR, a.CD_ATENDIMENTO, lr.CD_LAUDO
+    """
+)
+
 CONSULTA_INDICADORES_HOSPITALARES_RESUMO = text(
     """
     WITH leitos AS (
@@ -2198,6 +2273,7 @@ def consultar_teste_ergometrico(
     data_inicio: date,
     data_fim: date,
     session: Session = Depends(get_session_oracle),
+    competencia_faturamento: date | None = None,
 ):
     del usuario_atual
     if data_fim <= data_inicio:
@@ -2208,37 +2284,51 @@ def consultar_teste_ergometrico(
 
     params = {"data_inicio": data_inicio, "data_fim": data_fim}
     try:
-        agenda_rows = (
-            session.execute(CONSULTA_TESTE_ERGOMETRICO_AGENDADOS, params)
-            .mappings()
-            .all()
-        )
-        atendimento_rows = (
-            session.execute(CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS, params)
-            .mappings()
-            .all()
-        )
-        atendimento_checkup_rows = (
-            session.execute(
-                CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS_CHECKUP,
-                params,
+        if competencia_faturamento is not None:
+            laudo_rows = (
+                session.execute(
+                    CONSULTA_TESTE_ERGOMETRICO_POR_COMPETENCIA,
+                    params,
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
-        laudo_rows = (
-            session.execute(CONSULTA_TESTE_ERGOMETRICO_LAUDOS, params)
-            .mappings()
-            .all()
-        )
-        laudo_checkup_rows = (
-            session.execute(
-                CONSULTA_TESTE_ERGOMETRICO_LAUDOS_CHECKUP,
-                params,
+            agenda_rows = []
+            atendimento_rows = laudo_rows
+            atendimento_checkup_rows = []
+            laudo_checkup_rows = []
+        else:
+            agenda_rows = (
+                session.execute(CONSULTA_TESTE_ERGOMETRICO_AGENDADOS, params)
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
+            atendimento_rows = (
+                session.execute(CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS, params)
+                .mappings()
+                .all()
+            )
+            atendimento_checkup_rows = (
+                session.execute(
+                    CONSULTA_TESTE_ERGOMETRICO_ATENDIMENTOS_CHECKUP,
+                    params,
+                )
+                .mappings()
+                .all()
+            )
+            laudo_rows = (
+                session.execute(CONSULTA_TESTE_ERGOMETRICO_LAUDOS, params)
+                .mappings()
+                .all()
+            )
+            laudo_checkup_rows = (
+                session.execute(
+                    CONSULTA_TESTE_ERGOMETRICO_LAUDOS_CHECKUP,
+                    params,
+                )
+                .mappings()
+                .all()
+            )
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
