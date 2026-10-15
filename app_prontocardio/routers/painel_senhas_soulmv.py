@@ -53,17 +53,20 @@ SELECT event_id,
        process_type,
        priority,
        patient_name,
+       queue_id,
        match_order
   FROM (
     SELECT matched_events.*,
            ROW_NUMBER() OVER (
                PARTITION BY CASE
-                   WHEN process_type IN (50, 60, 70, 80)
+                   WHEN queue_id IN (29, 30)
+                     OR process_type IN (50, 60, 70, 80)
                      OR REGEXP_LIKE(
                          UPPER(destination),
                          'ECG|ECOCARDIOGRAMA|MAPA|HOLTER|ELETRO|RAIO[ -]?X|ULTRASSONOGRAFIA|TOMOGRAFIA|ERGOMETRICO|COLETA|PROCED'
                      )
                    THEN 3
+                   WHEN queue_id IN (28, 31) THEN 2
                    WHEN process_type IN (10, 20, 100) THEN 1
                    ELSE 2
                END
@@ -77,6 +80,7 @@ SELECT event_id,
                process_type,
                priority,
                patient_name,
+                queue_id,
                ROW_NUMBER() OVER (
                    PARTITION BY event_id
                    ORDER BY match_quality, triage_at DESC NULLS LAST
@@ -112,6 +116,7 @@ SELECT event_id,
                        )
                        ELSE NULL
                    END patient_name,
+                   t.cd_fila_senha queue_id,
                    t.dh_pre_atendimento triage_at,
                    CASE
                        WHEN p.cd_triagem_atendimento = t.cd_triagem_atendimento
@@ -133,7 +138,8 @@ SELECT event_id,
              WHERE p.cd_tipo_tempo_processo IN (20, 30, 50)
                AND p.dh_processo >= SYSDATE - (:window_minutes / 1440)
                AND t.cd_fila_senha IN (
-                   12, 13, 14, 15, 16, 17, 18, 19, 22, 23, 24
+                   12, 13, 14, 15, 16, 17, 18, 19, 22, 23, 24,
+                   28, 29, 30, 31
                )
                AND t.cd_classificacao IS NULL
                AND NOT REGEXP_LIKE(
@@ -183,9 +189,9 @@ def _value(row: Any, name: str) -> Any:
     return None
 
 
-def _service_label(process_type: int, destination: str) -> str:
+def _service_label(process_type: int, destination: str, queue_id: int | None = None) -> str:
     normalized_destination = destination.upper().replace("-", " ")
-    if process_type in {50, 60, 70, 80} or any(
+    if queue_id in {29, 30} or process_type in {50, 60, 70, 80} or any(
         term in normalized_destination for term in EXAM_DESTINATION_TERMS
     ):
         return "Exame ou procedimento"
@@ -196,11 +202,13 @@ def _to_event(row: Any) -> PanelEvent:
     process_type = int(_value(row, "process_type"))
     destination = str(_value(row, "destination") or "AGUARDE").strip()
     patient_name = _value(row, "patient_name")
+    queue_id_value = _value(row, "queue_id")
+    queue_id = int(queue_id_value) if queue_id_value is not None else None
     return PanelEvent(
         id=str(_value(row, "event_id")),
         ticket=str(_value(row, "ticket") or "SEM SENHA").strip(),
         destination=destination,
-        service=_service_label(process_type, destination),
+        service=_service_label(process_type, destination, queue_id),
         called_at=_value(row, "called_at"),
         priority=bool(_value(row, "priority")),
         process_type=process_type,
