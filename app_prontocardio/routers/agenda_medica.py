@@ -18,6 +18,7 @@ from app_prontocardio.agenda_medica_models import (
     AgendaMedicaEvento,
     AgendaMedicaOferta,
     AgendaMedicaSolicitacao,
+    AgendaMedicaTriagem,
     AgendaMedicaVinculo,
 )
 from app_prontocardio.database import get_session_oracle, get_session_postgres
@@ -113,6 +114,8 @@ Medico = Annotated[tuple[Usuario, int], Depends(medico_atual)]
 class VinculoInput(BaseModel):
     usuario_id: int = Field(gt=0)
     cd_prestador: int = Field(gt=0)
+    # Sem nível informado: mantém o atual (ou 'pleno' num vínculo novo).
+    nivel: Literal['senior', 'pleno'] | None = None
 
 
 class OfertaInput(BaseModel):
@@ -222,6 +225,7 @@ def quem_sou(usuario: Leitor, session: SessionPostgres):
         'perfil': usuario.perfil,
         'papeis': papeis,
         'cd_prestador': vinculo.cd_prestador if vinculo else None,
+        'nivel': vinculo.nivel if vinculo else None,
     }
 
 
@@ -271,21 +275,26 @@ def vincular_prestador(
             usuario_id=payload.usuario_id,
             cd_prestador=payload.cd_prestador,
             criado_por=usuario.nome,
+            nivel=payload.nivel or 'pleno',
         )
         session.add(vinculo)
     else:
         vinculo.cd_prestador = payload.cd_prestador
+        if payload.nivel:
+            vinculo.nivel = payload.nivel
     _registrar(
         session,
         usuario,
         'VINCULO_PRESTADOR',
-        f'usuario {payload.usuario_id} -> prestador {payload.cd_prestador}',
+        f'usuario {payload.usuario_id} -> prestador {payload.cd_prestador}'
+        f' ({vinculo.nivel})',
     )
     session.commit()
     return {
         'usuario_id': payload.usuario_id,
         'cd_prestador': payload.cd_prestador,
         'nm_prestador': prestador.get('nm_prestador'),
+        'nivel': vinculo.nivel,
     }
 
 
@@ -294,7 +303,11 @@ def listar_vinculos(_: Admin, session: SessionPostgres):
     vinculos = session.scalars(select(AgendaMedicaVinculo)).all()
     return {
         'vinculos': [
-            {'usuario_id': v.usuario_id, 'cd_prestador': v.cd_prestador}
+            {
+                'usuario_id': v.usuario_id,
+                'cd_prestador': v.cd_prestador,
+                'nivel': v.nivel,
+            }
             for v in vinculos
         ]
     }
@@ -627,3 +640,163 @@ def listar_eventos(
             for e in eventos
         ]
     }
+
+
+# ---------------------------------------------------------------- triagem
+#
+# Médicos sêniores escolhem quais pacientes agendados (consultas
+# ambulatoriais dos próximos dias) ficam com eles e quais seguem para os
+# demais prestadores. A decisão fica na API e é auditada; o SoulMV não é
+# alterado. As evoluções do prontuário só são lidas por médicos sêniores, um
+# paciente por vez, e cada consulta fica registrada.
+
+TRIAGEM_DIAS = 30
+TRIAGEM_DIAS_MAXIMO = 60
+
+
+class TriagemDecisaoInput(BaseModel):
+    cd_it_agenda_central: int = Field(gt=0)
+    # None desfaz a decisão do próprio sênior.
+    decisao: Literal['senior', 'demais'] | None
+
+
+class TriagemEvolucoesInput(BaseModel):
+    cd_paciente: int = Field(gt=0)
+
+
+def medico_senior(
+    usuario: UsuarioAtual, session: SessionPostgres
+) -> tuple[Usuario, AgendaMedicaVinculo]:
+    vinculo = session.scalar(
+        select(AgendaMedicaVinculo).where(
+            AgendaMedicaVinculo.usuario_id == usuario.id
+        )
+    )
+    if (
+        TELA_MEDICO not in (usuario.telas_permitidas or [])
+        or vinculo is None
+        or vinculo.nivel != 'senior'
+    ):
+        raise _proibido('Triagem restrita aos médicos de nível sênior.')
+    return usuario, vinculo
+
+
+def acesso_triagem(usuario: UsuarioAtual, session: SessionPostgres) -> Usuario:
+    """Sêniores decidem; o administrador acompanha (somente leitura)."""
+    if _tem_tela(usuario, TELA_ADMIN):
+        return usuario
+    return medico_senior(usuario, session)[0]
+
+
+Senior = Annotated[tuple[Usuario, AgendaMedicaVinculo], Depends(medico_senior)]
+LeitorTriagem = Annotated[Usuario, Depends(acesso_triagem)]
+
+
+def _triagem_dict(item: AgendaMedicaTriagem) -> dict:
+    return {
+        'cd_it_agenda_central': item.cd_it_agenda_central,
+        'decisao': item.decisao,
+        'cd_prestador_senior': item.cd_prestador_senior,
+        'usuario': item.usuario_nome,
+        'decidido_em': (
+            item.decidido_em.isoformat() if item.decidido_em else None
+        ),
+    }
+
+
+@router.get('/triagem')
+def listar_triagem(
+    _: LeitorTriagem,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+    dias: int = Query(default=TRIAGEM_DIAS, ge=1, le=TRIAGEM_DIAS_MAXIMO),
+):
+    pacientes = soulmv.triagem_pacientes(dias)
+    itens = {p['cd_it_agenda_central'] for p in pacientes}
+    decisoes = session.scalars(select(AgendaMedicaTriagem)).all()
+    return {
+        'gerado_em': datetime.now().isoformat(timespec='seconds'),
+        'dias': dias,
+        'pacientes': pacientes,
+        'decisoes': [
+            _triagem_dict(d)
+            for d in decisoes
+            if d.cd_it_agenda_central in itens
+        ],
+    }
+
+
+@router.post('/triagem/decisoes')
+def decidir_triagem(
+    payload: TriagemDecisaoInput,
+    senior: Senior,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    usuario, vinculo = senior
+    item = soulmv.item_triagem(
+        payload.cd_it_agenda_central, TRIAGEM_DIAS_MAXIMO
+    )
+    if item is None:
+        raise _nao_encontrado('Agendamento fora da triagem.')
+    atual = session.scalar(
+        select(AgendaMedicaTriagem).where(
+            AgendaMedicaTriagem.cd_it_agenda_central
+            == payload.cd_it_agenda_central
+        )
+    )
+    if atual is not None and atual.cd_prestador_senior != vinculo.cd_prestador:
+        raise _conflito(f'Paciente já decidido por {atual.usuario_nome}.')
+    registro = f'agendamento {payload.cd_it_agenda_central}'
+    if payload.decisao is None:
+        if atual is None:
+            raise _nao_encontrado('Não há decisão para desfazer.')
+        session.delete(atual)
+        _registrar(session, usuario, 'TRIAGEM_DESFEITA', registro)
+        session.commit()
+        return {
+            'cd_it_agenda_central': payload.cd_it_agenda_central,
+            'decisao': None,
+        }
+    if atual is None:
+        atual = AgendaMedicaTriagem(
+            cd_it_agenda_central=payload.cd_it_agenda_central,
+            cd_paciente=item['cd_paciente'],
+            decisao=payload.decisao,
+            cd_prestador_senior=vinculo.cd_prestador,
+            usuario_id=usuario.id,
+            usuario_nome=usuario.nome,
+        )
+        session.add(atual)
+    else:
+        atual.decisao = payload.decisao
+    acao = (
+        'TRIAGEM_SENIOR' if payload.decisao == 'senior' else 'TRIAGEM_DEMAIS'
+    )
+    _registrar(session, usuario, acao, registro)
+    session.commit()
+    session.refresh(atual)
+    return _triagem_dict(atual)
+
+
+@router.post('/triagem/evolucoes')
+def evolucoes_triagem(
+    payload: TriagemEvolucoesInput,
+    senior: Senior,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    usuario, _ = senior
+    if not soulmv.paciente_na_triagem(
+        payload.cd_paciente, TRIAGEM_DIAS_MAXIMO
+    ):
+        raise _proibido('Paciente fora da triagem.')
+    evolucoes = soulmv.evolucoes_paciente(payload.cd_paciente)
+    _registrar(
+        session,
+        usuario,
+        'EVOLUCAO_CONSULTADA',
+        f'paciente {payload.cd_paciente} · {len(evolucoes)} evolução(ões)',
+    )
+    session.commit()
+    return {'cd_paciente': payload.cd_paciente, 'evolucoes': evolucoes}

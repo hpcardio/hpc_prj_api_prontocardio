@@ -14,6 +14,7 @@ from app_prontocardio.routers.agenda_medica import get_soulmv_agenda_medica
 from app_prontocardio.security import gera_hash_senha
 from app_prontocardio.services.agenda_medica_soulmv import (
     dias_geracao,
+    texto_evolucao,
     tp_dia_semana_de,
 )
 
@@ -321,3 +322,189 @@ def test_medico_nao_cancela_agenda_de_outro_prestador(cliente, perfis):
         headers=perfis['medico'],
     )
     assert resposta.status_code == HTTPStatus.NOT_FOUND
+
+
+# ---------------------------------------------------------------- triagem
+
+CD_IT_TRIAGEM = 900001
+CD_PACIENTE_TRIAGEM = 777
+SENIOR_A = 255
+SENIOR_B = 358
+
+
+def _paciente_falso():
+    return {
+        'cd_it_agenda_central': CD_IT_TRIAGEM,
+        'cd_agenda_central': CD_AGENDA,
+        'hr_agenda': f'{DATA_FUTURA.isoformat()}T08:00:00',
+        'cd_paciente': CD_PACIENTE_TRIAGEM,
+        'nm_paciente': 'PACIENTE FICTICIO',
+        'confirmado': 'N',
+        'nm_convenio': 'CONVENIO TESTE',
+        'ds_item_agendamento': 'CONSULTA',
+        'ds_tip_mar': 'CONSULTA SUBSEQUENTE',
+        'cd_prestador_agenda': CD_PRESTADOR,
+        'nm_prestador_agenda': 'DR TESTE',
+        'cd_setor': CD_SETOR_CLINICA,
+        'nm_setor': 'RECEPCAO CLINICA',
+        'turno': 'MANHA',
+        'dh_ult_atend_amb': None,
+        'cd_prestador_ult_amb': None,
+        'nm_prestador_ult_amb': None,
+        'dias_desde_ult_atend_amb': None,
+    }
+
+
+def _triagem_falsa(falso):
+    falso.triagem_pacientes = lambda dias: [_paciente_falso()]
+    falso.item_triagem = lambda cd_it, dias: (
+        _paciente_falso() if cd_it == CD_IT_TRIAGEM else None
+    )
+    falso.paciente_na_triagem = lambda cd_paciente, dias: (
+        cd_paciente == CD_PACIENTE_TRIAGEM
+    )
+    falso.evolucoes_paciente = lambda cd_paciente, quantidade=2: [
+        {
+            'data': '2026-09-30T10:15',
+            'medico': 'DR TESTE',
+            'atendimento': 'Ambulatorial',
+            'setor': 'RECEPCAO CLINICA',
+            'texto': 'Texto fictício.',
+        }
+    ]
+
+
+@pytest.fixture
+def seniores(cliente, session, soulmv, perfis):
+    _triagem_falsa(soulmv)
+    tokens = {}
+    for nome, cd in (('senior_a', SENIOR_A), ('senior_b', SENIOR_B)):
+        usuario = _usuario(session, nome, 'usuario', ['agenda_medica_medico'])
+        resposta = cliente.post(
+            '/agenda-medica/vinculos',
+            json={
+                'usuario_id': usuario.id,
+                'cd_prestador': cd,
+                'nivel': 'senior',
+            },
+            headers=perfis['admin'],
+        )
+        assert resposta.json()['nivel'] == 'senior'
+        tokens[nome] = _token(cliente, usuario)
+    return {**perfis, **tokens}
+
+
+def _decidir(cliente, token, decisao, cd_it=CD_IT_TRIAGEM):
+    return cliente.post(
+        '/agenda-medica/triagem/decisoes',
+        json={'cd_it_agenda_central': cd_it, 'decisao': decisao},
+        headers=token,
+    )
+
+
+def test_texto_evolucao_converte_rtf_e_html():
+    rtf = (
+        r'{\rtf1\ansi{\fonttbl{\f0 Arial;}}{\colortbl;\red0\green0\blue0;}'
+        r'\f0 Paciente est\'e1vel.\par Retorno em 30 dias.}'
+    )
+    assert texto_evolucao(rtf) == 'Paciente estável.\nRetorno em 30 dias.'
+    assert (
+        texto_evolucao('<p>Dor &amp; cansaço</p><p><b>ECG</b><br>retorno</p>')
+        == 'Dor & cansaço\nECG\nretorno'
+    )
+    assert texto_evolucao(None) == ''
+
+
+def test_me_informa_nivel_do_medico(cliente, seniores):
+    me = cliente.get('/agenda-medica/me', headers=seniores['senior_a'])
+    assert me.json()['nivel'] == 'senior'
+    pleno = cliente.get('/agenda-medica/me', headers=seniores['medico'])
+    assert pleno.json()['nivel'] == 'pleno'
+
+
+def test_triagem_bloqueada_para_medico_pleno(cliente, seniores):
+    medico = seniores['medico']
+    assert (
+        cliente.get('/agenda-medica/triagem', headers=medico).status_code
+        == HTTPStatus.FORBIDDEN
+    )
+    assert _decidir(cliente, medico, 'senior').status_code == (
+        HTTPStatus.FORBIDDEN
+    )
+    evolucoes = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': CD_PACIENTE_TRIAGEM},
+        headers=medico,
+    )
+    assert evolucoes.status_code == HTTPStatus.FORBIDDEN
+
+
+def test_senior_decide_e_outro_senior_nao_sobrescreve(
+    cliente, session, seniores
+):
+    lista = cliente.get('/agenda-medica/triagem', headers=seniores['senior_a'])
+    assert lista.status_code == HTTPStatus.OK
+    assert lista.json()['decisoes'] == []
+
+    decisao = _decidir(cliente, seniores['senior_a'], 'senior')
+    assert decisao.status_code == HTTPStatus.OK
+    assert decisao.json()['cd_prestador_senior'] == SENIOR_A
+
+    conflito = _decidir(cliente, seniores['senior_b'], 'demais')
+    assert conflito.status_code == HTTPStatus.CONFLICT
+
+    lista = cliente.get('/agenda-medica/triagem', headers=seniores['admin'])
+    assert lista.json()['decisoes'][0]['decisao'] == 'senior'
+
+    desfeita = _decidir(cliente, seniores['senior_a'], None)
+    assert desfeita.json()['decisao'] is None
+    assert _decidir(cliente, seniores['senior_b'], 'demais').status_code == (
+        HTTPStatus.OK
+    )
+
+    acoes = [e.acao for e in session.query(AgendaMedicaEvento).all()]
+    assert acoes.count('TRIAGEM_SENIOR') == 1
+    assert acoes.count('TRIAGEM_DESFEITA') == 1
+    assert acoes.count('TRIAGEM_DEMAIS') == 1
+
+
+def test_triagem_recusa_agendamento_fora_da_lista(cliente, seniores):
+    resposta = _decidir(cliente, seniores['senior_a'], 'senior', cd_it=1)
+    assert resposta.status_code == HTTPStatus.NOT_FOUND
+
+
+def test_admin_acompanha_mas_nao_decide(cliente, seniores):
+    admin = seniores['admin']
+    assert (
+        cliente.get('/agenda-medica/triagem', headers=admin).status_code
+        == HTTPStatus.OK
+    )
+    assert _decidir(cliente, admin, 'senior').status_code == (
+        HTTPStatus.FORBIDDEN
+    )
+
+
+def test_evolucoes_so_de_paciente_da_triagem_e_auditadas(
+    cliente, session, seniores
+):
+    fora = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': 1},
+        headers=seniores['senior_a'],
+    )
+    assert fora.status_code == HTTPStatus.FORBIDDEN
+
+    resposta = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': CD_PACIENTE_TRIAGEM},
+        headers=seniores['senior_a'],
+    )
+    assert resposta.status_code == HTTPStatus.OK
+    assert len(resposta.json()['evolucoes']) == 1
+    evento = (
+        session
+        .query(AgendaMedicaEvento)
+        .filter_by(acao='EVOLUCAO_CONSULTADA')
+        .one()
+    )
+    assert str(CD_PACIENTE_TRIAGEM) in evento.detalhe
