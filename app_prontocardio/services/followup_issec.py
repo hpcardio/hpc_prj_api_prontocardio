@@ -94,6 +94,24 @@ def portal_cards(
             )
         ).mappings()
     ]
+    # Skip the global Oracle aggregation if this request has no new portal
+    # process to return. Keep ALL rows for ambiguity detection when needed.
+    if not any(
+        not row.get('tratado')
+        and row['processo'] not in existing
+        and money(row['valor_total_itens_glosados']) > 0
+        and all(
+            not term
+            or str(term).strip().casefold() in row['processo'].casefold()
+            for term in (processo, protocolo)
+        )
+        and (
+            processos_permitidos is None
+            or row['processo'].casefold() in processos_permitidos
+        )
+        for row in rows
+    ):
+        return []
     # Preserve ambiguity detection even if only one of two equal processes
     # matches the user's search. Never filter candidates before matching.
     months = {value for row in rows for value in portal_months(row)}

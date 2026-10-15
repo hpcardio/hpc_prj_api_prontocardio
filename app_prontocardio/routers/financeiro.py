@@ -4562,22 +4562,19 @@ def _detalhar_cards_maida_issec(session, session_oracle, cards):
 
     if not cards or not _tabela_ipm_existe(session, 'demonstrativo_conta_ipm'):
         return
-    _, by_remessa = _itens_oracle_remessas_ipm(
-        session_oracle, {int(card['cd_remessa']) for card in cards},
-    )
-    guides = sorted({
-        str(item.get('nr_guia') or '').strip()
-        for items in by_remessa.values() for item in items
-        if str(item.get('nr_guia') or '').strip()
-    })
-    if not guides:
-        return
+    # Start with glosados, not every Oracle launch in every portal remittance.
     demos = list(session.execute(text(
         """SELECT * FROM api_prontocardio.demonstrativo_conta_ipm
             WHERE origem_maida IS NOT NULL AND COALESCE(valor_glosa, 0) > 0
-              AND BTRIM(numero_guia_senha) = ANY(:guias)
             ORDER BY id_registro"""
-    ), {'guias': guides}).mappings())
+    )).mappings())
+    guides = sorted({str(d.get('numero_guia_senha') or '').strip()
+                     for d in demos if str(d.get('numero_guia_senha') or '').strip()})
+    if not guides:
+        return
+    _, by_remessa = _itens_oracle_remessas_ipm(
+        session_oracle, {int(card['cd_remessa']) for card in cards}, guias=guides,
+    )
     codes = {str(d.get('codigo_glosa') or '').strip() for d in demos}
     descriptions = {
         t.codigo_termo: t.termo
@@ -5845,9 +5842,17 @@ def _mes_seguinte(valor: date) -> date:
 def _itens_oracle_remessas_ipm(
     session_oracle: Session,
     codigos_remessa: set[int],
+    *, guias: list[str] | None = None,
 ) -> tuple[dict[int, dict], dict[int, list[dict]]]:
-    if not codigos_remessa:
+    if not codigos_remessa or guias == []:
         return {}, {}
+    filtro_guias = []
+    if guias is not None:
+        # Oracle IN accepts at most 1000 expressions on supported versions.
+        filtro_guias.append(or_(*(
+            func.trim(ModelContaAtendimento.nr_guia).in_(guias[i:i + 900])
+            for i in range(0, len(guias), 900)
+        )))
     rows = session_oracle.execute(
         select(
             ModelContaAtendimento,
@@ -5863,7 +5868,7 @@ def _itens_oracle_remessas_ipm(
             ModelGruPro,
             ModelGruPro.cd_gru_pro == ModelProFat.cd_gru_pro,
         )
-        .where(ModelContaAtendimento.cd_remessa.in_(codigos_remessa))
+        .where(ModelContaAtendimento.cd_remessa.in_(codigos_remessa), *filtro_guias)
         .order_by(
             ModelContaAtendimento.cd_remessa,
             ModelContaAtendimento.cd_reg,
