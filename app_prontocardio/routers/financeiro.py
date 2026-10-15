@@ -4876,6 +4876,39 @@ def _processos_canonicos_por_protocolo_follow_up(
     }
 
 
+def _duplicatas_maida_pendentes(session, ids_registros):
+    """Suppress only untraced pending copies already represented by Maida."""
+    if not ids_registros or not all(_tabela_ipm_existe(session, table) for table in (
+        'demonstrativo_conta_ipm', 'registros_glosa_demonstrativo_ipm',
+    )):
+        return set()
+    return set(session.execute(text("""
+        SELECT g.id FROM api_prontocardio.registros_glosa g
+         WHERE g.id = ANY(:ids) AND g.sn_ativo = 'true'
+           AND UPPER(BTRIM(g.convenio)) = 'ISSEC'
+           AND g.origem_registro = 'triagem' AND g.dt_recurso IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM api_prontocardio.registros_glosa_demonstrativo_ipm own
+                WHERE own.registro_glosa_id = g.id)
+           AND EXISTS (
+               SELECT 1 FROM api_prontocardio.demonstrativo_conta_ipm d
+               JOIN api_prontocardio.registros_glosa_demonstrativo_ipm x
+                 ON x.id_registro = d.id_registro
+               JOIN api_prontocardio.registros_glosa canonical
+                 ON canonical.id = x.registro_glosa_id
+              WHERE canonical.sn_ativo = 'true'
+                AND canonical.cd_remessa = g.cd_remessa
+                AND UPPER(BTRIM(canonical.convenio)) = 'ISSEC'
+                AND d.origem_maida IS NOT NULL
+                AND BTRIM(d.numero_lote) = BTRIM(g.numero_lote)
+                AND BTRIM(d.numero_guia_senha) = BTRIM(g.guia)
+                AND BTRIM(d.codigo_servico) IN (BTRIM(g.procedimento), BTRIM(g.cd_tuss))
+                AND d.data_realizacao::date = COALESCE(g.data_lancamento, g.data_atendimento)::date
+                AND ROUND(d.valor_glosa, 2) = ROUND(g.valor_recursado, 2)
+           )
+    """), {'ids': sorted(ids_registros)}).scalars())
+
+
 def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     chaves_excluidas: set[tuple[str, int]],
@@ -4942,6 +4975,17 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         )
         if chave not in chaves_excluidas:
             grupos[chave].append(registro)
+    if not grupos:
+        return []
+
+    duplicatas = _duplicatas_maida_pendentes(
+        session, {registro.id for registros in grupos.values() for registro in registros},
+    )
+    grupos = {
+        chave: [registro for registro in registros if registro.id not in duplicatas]
+        for chave, registros in grupos.items()
+    }
+    grupos = {chave: registros for chave, registros in grupos.items() if registros}
     if not grupos:
         return []
 
