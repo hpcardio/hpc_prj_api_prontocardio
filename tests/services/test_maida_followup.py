@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from app_prontocardio.services.maida_followup import match_maida_items
 
 
@@ -73,7 +75,8 @@ def test_excludes_other_sources_and_insurers_and_paid_items():
     assert list(match_maida_items([demo()], [other])) == []
 
 
-def test_detail_groups_patients_and_preserves_portal_totals(monkeypatch):
+@pytest.mark.parametrize('use_brasindice', [False, True])
+def test_detail_groups_patients_and_preserves_portal_totals(monkeypatch, use_brasindice):
     from datetime import datetime
     from unittest.mock import Mock
     from app_prontocardio.routers import financeiro
@@ -106,7 +109,9 @@ def test_detail_groups_patients_and_preserves_portal_totals(monkeypatch):
         vl_total_conta=200,
         qt_lancamento=1,
     )
-    line = demo()
+    line = demo(codigo_servico='0000078358') if use_brasindice else demo()
+    if use_brasindice:
+        origin.update(cd_pro_fat='90425405', cd_tuss='0000091421')
     line.update(valor_processado=200, valor_liberado=10)
     pg.execute.return_value.mappings.return_value = [line]
     pg.scalars.return_value = []
@@ -116,6 +121,10 @@ def test_detail_groups_patients_and_preserves_portal_totals(monkeypatch):
         '_itens_oracle_remessas_ipm',
         lambda *a, **kw: ({}, {16437: [origin]}),
     )
+    monkeypatch.setattr(
+        'app_prontocardio.services.maida_followup.load_brasindice',
+        lambda session: {'78358': '90425405'} if use_brasindice else {},
+    )
     financeiro._detalhar_cards_maida_issec(pg, mv, [card])
     validated = CardFollowUpGlosaPublic.model_validate(card)
     assert validated.valor_itens == 7930
@@ -124,3 +133,58 @@ def test_detail_groups_patients_and_preserves_portal_totals(monkeypatch):
     assert validated.pacientes[0].itens[0].valor_glosa == 190
     assert validated.pacientes[0].itens[0].nr_guia == '123'
     pg.commit.assert_not_called()
+
+
+def test_brasindice_matches_medication_preserving_guide_and_value():
+    origin = item()
+    origin.update(cd_pro_fat='90425405', cd_tuss='0000091421')
+    line = demo(codigo_servico='0000078358', valor_glosa=Decimal('0.88'))
+    mapping = {'78358': '90425405'}
+    assert list(match_maida_items([line], [origin], mapping)) == [(line, origin)]
+    assert list(match_maida_items([line], [origin])) == []
+    assert list(match_maida_items(
+        [demo(codigo_servico='0000078358', numero_guia_senha='other')],
+        [origin], mapping,
+    )) == []
+    origin['nm_convenio'] = 'IPM'
+    assert list(match_maida_items([line], [origin], mapping)) == []
+
+
+def test_brasindice_does_not_pick_between_direct_and_catalog_candidates():
+    direct = item()
+    direct['cd_tuss'] = '0000078358'
+    mapped = item()
+    mapped.update(cd_lancamento=2, cd_pro_fat='90425405')
+    assert list(match_maida_items(
+        [demo(codigo_servico='0000078358')], [direct, mapped],
+        {'78358': '90425405'},
+    )) == []
+
+
+def test_brasindice_duplicate_catalog_and_direct_match_is_one_item():
+    origin = item()
+    origin.update(cd_pro_fat='90425405', cd_tuss='0000078358')
+    assert len(list(match_maida_items(
+        [demo(codigo_servico='0000078358')], [origin, origin],
+        {'78358': '90425405'},
+    ))) == 1
+
+
+def test_catalog_absent_preserves_legacy_matching():
+    from unittest.mock import Mock
+    from app_prontocardio.services.maida_followup import load_brasindice
+    session = Mock()
+    session.execute.return_value.scalar.return_value = None
+    assert load_brasindice(session) == {}
+    assert session.execute.call_count == 1
+
+
+def test_catalog_loaded_with_normalized_codes():
+    from unittest.mock import Mock
+    from app_prontocardio.services.maida_followup import load_brasindice
+    session = Mock()
+    session.execute.return_value.scalar.return_value = 'table'
+    session.execute.return_value.mappings.return_value = [
+        {'cd_tiss': '0000078358', 'cd_pro_fat': '90425405'},
+    ]
+    assert load_brasindice(session) == {'78358': '90425405'}
