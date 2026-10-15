@@ -1314,9 +1314,26 @@ def _render_prevent_current(data: dict[str, Any]) -> str:
         pa_situation = (
             'na_meta' if systolic < 130 and diastolic < 80 else 'fora_da_meta'
         )
+    risk_targets = {
+        'baixo_risco': (130.0, 'Baixo Risco'),
+        'risco_intermediario': (100.0, 'Risco Intermediário'),
+        'risco_alto': (70.0, 'Risco Alto'),
+        'risco_muito_alto': (50.0, 'Risco Muito Alto'),
+        'risco_extremo': (40.0, 'Risco Extremo'),
+    }
+    risk_value = _text(data, 'categoria_risco')
+    risk_key = {
+        'Baixo Risco': 'baixo_risco',
+        'Risco Intermediário': 'risco_intermediario',
+        'Risco Alto': 'risco_alto',
+        'Risco Muito Alto': 'risco_muito_alto',
+        'Risco Extremo': 'risco_extremo',
+    }.get(risk_value, risk_value)
+    risk_target = risk_targets.get(risk_key)
+    ldl_result = numeric('ldl_resultado')
+    ldl_target = risk_target[0] if risk_target else numeric('ldl_meta')
     ldl_situation = _text(data, 'ldl_situacao')
-    ldl_result, ldl_target = numeric('ldl_resultado'), numeric('ldl_meta')
-    if not ldl_situation and ldl_result is not None and ldl_target is not None:
+    if ldl_result is not None and ldl_target is not None:
         ldl_situation = 'na_meta' if ldl_result < ldl_target else 'fora_da_meta'
     hba1c_situation = _text(data, 'hba1c_situacao')
     hba1c_result = numeric('hba1c_resultado')
@@ -1409,10 +1426,12 @@ def _render_prevent_current(data: dict[str, Any]) -> str:
         f'LDL-C: {_text(data, "ldl_resultado")} mg/dL'
         f'{f" em {_text(data, "ldl_data")}" if _text(data, "ldl_data") else ""}.'
         if _text(data, 'ldl_resultado') else '',
+        f'Categoria de risco cardiovascular: {risk_target[1]}.'
+        if risk_target else '',
         f'Situação do LDL-C: {situation_labels.get(ldl_situation, _human(ldl_situation))}.'
         if ldl_situation else '',
-        f'Meta de LDL-C: {_text(data, "ldl_meta")} mg/dL.'
-        if _text(data, 'ldl_meta') else '',
+        f'Meta de LDL-C: {"< " if risk_target else ""}{ldl_target:g} mg/dL.'
+        if ldl_target is not None else '',
         f'Nova dosagem: {_human(ldl_repeat)}.' if ldl_repeat else '',
         f'HbA1c: {_text(data, "hba1c_resultado")}.'
         if _text(data, 'hba1c_resultado') else '',
@@ -1684,7 +1703,10 @@ def _render_ic_current(data: dict[str, Any]) -> str:
         'icfep': '12. TRATAMENTO — ICFEP',
     }.get(phenotype)
     treatment_lines: list[str] = []
-    if phenotype_heading == '10. TRATAMENTO — ICFEr':
+    if phenotype_heading in {
+        '10. TRATAMENTO — ICFEr',
+        '11. TRATAMENTO — ICFEmi',
+    }:
         labels = {
             'arni': 'ARNI/IECA/BRA',
             'betabloqueador': 'Betabloqueador',
@@ -1697,15 +1719,21 @@ def _render_ic_current(data: dict[str, Any]) -> str:
         }
         for key, label in labels.items():
             decision = _text(data, f'pilar_{key}_decisao')
+            if (
+                phenotype_heading == '11. TRATAMENTO — ICFEmi'
+                and key == 'isglt2'
+                and not decision
+            ):
+                decision = _text(data, 'icfemi_isglt2')
+            medication_dose = _text(data, f'pilar_{key}_medicacao_dose')
             if decision:
                 treatment_lines.append(
-                    f'{label}: {decisions.get(decision, decision)}.'
+                    f'{label}: {decisions.get(decision, _human(decision))}.'
                 )
-    elif phenotype_heading == '11. TRATAMENTO — ICFEmi':
-        if _text(data, 'icfemi_isglt2'):
-            treatment_lines.append(
-                'iSGLT2: ' + _human(_text(data, 'icfemi_isglt2')) + '.'
-            )
+            if medication_dose:
+                treatment_lines.append(
+                    f'{label} — medicação e dose: {medication_dose}.'
+                )
     elif phenotype_heading == '12. TRATAMENTO — ICFEP':
         if _text(data, 'icfep_isglt2'):
             treatment_lines.append(
