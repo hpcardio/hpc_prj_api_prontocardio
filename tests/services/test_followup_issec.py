@@ -157,3 +157,18 @@ def test_existing_card_accepts_production_month(monkeypatch):
     assert "TO_CHAR(mes_producao, 'MM/YYYY')" in str(
         pg.execute.call_args.args[0]
     )
+
+
+def test_existing_or_unmatched_process_does_not_scan_oracle():
+    pg, mv = sessions()
+    assert portal_cards(pg, mv, {'2600003764'}, processo='2600003764') == []
+    mv.execute.assert_not_called()
+    pg, mv = sessions()
+    assert portal_cards(pg, mv, set(), processo='missing') == []
+    mv.execute.assert_not_called()
+
+
+def test_early_skip_does_not_remove_ambiguous_existing_candidate():
+    pg, mv = sessions([portal(), portal('other')])
+    assert portal_cards(pg, mv, {'other'}, processo='2600003764') == []
+    mv.execute.assert_called_once()

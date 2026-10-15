@@ -114,7 +114,7 @@ def test_detail_groups_patients_and_preserves_portal_totals(monkeypatch):
     monkeypatch.setattr(
         financeiro,
         '_itens_oracle_remessas_ipm',
-        lambda *a: ({}, {16437: [origin]}),
+        lambda *a, **kw: ({}, {16437: [origin]}),
     )
     financeiro._detalhar_cards_maida_issec(pg, mv, [card])
     validated = CardFollowUpGlosaPublic.model_validate(card)
