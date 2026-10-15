@@ -1,6 +1,5 @@
 """Combine overlapping ISSEC cards without discarding existing treatments."""
 
-from copy import deepcopy
 from decimal import Decimal
 
 
@@ -74,7 +73,7 @@ def merge_issec_cards(cards):
                     pair[1].get('valor_total_tratado')
                 ) > money(combined[key][1].get('valor_total_tratado')):
                     combined[key] = pair
-            merged = deepcopy(target)
+            merged = dict(target)
             patients = {}
             for patient, item in combined.values():
                 key = (
@@ -83,14 +82,15 @@ def merge_issec_cards(cards):
                 )
                 if key not in patients:
                     patients[key] = {
-                        **deepcopy(patient),
+                        **patient,
                         'itens': [],
                         'valor_itens': Decimal(0),
                         'valor_glosado': Decimal(0),
                         'valor_total_tratado': Decimal(0),
                     }
                 group = patients[key]
-                group['itens'].append(deepcopy(item))
+                # Keep session-bound treatment records intact for response validation.
+                group['itens'].append(dict(item))
                 for dest, field in [
                     ('valor_itens', 'vl_total_conta'),
                     ('valor_glosado', 'valor_glosa'),

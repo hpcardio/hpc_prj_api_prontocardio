@@ -78,3 +78,49 @@ def test_does_not_guess_between_two_treatments_or_repeated_lines():
     b = card(medication=True)
     b['pacientes'][0]['itens'].append(deepcopy(b['pacientes'][0]['itens'][0]))
     assert merge_issec_cards([a, b]) == [a, b]
+
+
+def test_merge_preserves_session_bound_records_for_response_serialization():
+    from sqlalchemy import ForeignKey, Integer, create_engine, inspect
+    from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
+    from pydantic import BaseModel, ConfigDict
+
+    class Base(DeclarativeBase):
+        pass
+
+    class Parent(Base):
+        __tablename__ = 'parent'
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        value: Mapped[int]
+
+    class Treatment(Base):
+        __tablename__ = 'treatment'
+        id: Mapped[int] = mapped_column(Integer, primary_key=True)
+        parent_id: Mapped[int] = mapped_column(ForeignKey('parent.id'))
+        parent: Mapped[Parent] = relationship()
+
+        @property
+        def valor_glosa_origem(self):
+            return self.parent.value
+
+    class PublicTreatment(BaseModel):
+        model_config = ConfigDict(from_attributes=True)
+        valor_glosa_origem: int
+
+    engine = create_engine('sqlite://')
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Parent(id=1, value=580))
+        session.add(Treatment(id=1, parent_id=1))
+        session.commit()
+        record = session.get(Treatment, 1)
+        assert 'parent' in inspect(record).unloaded
+        a, b = card(True), card(medication=True)
+        a['pacientes'][0]['itens'][0]['registro_glosa'] = record
+        a['pacientes'][0]['itens'][0]['registro_recusa'] = record
+        merged = merge_issec_cards([a, b])[0]
+        item = merged['pacientes'][0]['itens'][0]
+        assert item['registro_glosa'] is record
+        assert item['registro_recusa'] is record
+        assert PublicTreatment.model_validate(item['registro_glosa']).model_dump_json() == '{"valor_glosa_origem":580}'
+        assert len(a['pacientes'][0]['itens']) == 2
