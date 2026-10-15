@@ -4535,6 +4535,9 @@ def _cards_cogestao_com_processo_issec(
         processo_original=None, convenio='ISSEC',
     ))
     _aplicar_processos_portal_issec(session, session_oracle, candidatos)
+    from app_prontocardio.services.issec_card_merge import merge_issec_cards
+
+    candidatos = merge_issec_cards(candidatos)
     chaves = {
         (card.get('cd_remessa'), str((card.get('processo') or {}).get(
             'numero_processo') or '').strip().casefold())
@@ -9064,6 +9067,9 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             session_oracle,
             cards_cogestao,
         )
+        from app_prontocardio.services.issec_card_merge import merge_issec_cards
+
+        cards_cogestao = merge_issec_cards(cards_cogestao)
 
         # O portal ISSEC também contém processos ainda sem conciliação ou
         # tratativa local. O vínculo é derivado; nenhum dado é persistido.
