@@ -4319,6 +4319,7 @@ def _dados_demonstrativo_registros_follow_up(
                    demo.codigo_glosa,
                    demo.origem_maida,
                    demo.referencia,
+                   demo.quantidade_executada,
                    demo.valor_processado,
                    demo.valor_glosa,
                    demo.valor_liberado
@@ -4344,6 +4345,8 @@ def _dados_demonstrativo_registros_follow_up(
                 'codigo_glosa': None,
                 'criterios': set(),
                 'origem_maida': False,
+                'quantidade_maida': Decimal('0'),
+                'quantidade_maida_completa': True,
                 'competencias': set(),
             },
         )
@@ -4354,6 +4357,11 @@ def _dados_demonstrativo_registros_follow_up(
         item['codigo_glosa'] = codigo or item['codigo_glosa']
         if row['origem_maida'] is not None:
             item['origem_maida'] = True
+            quantidade = row.get('quantidade_executada')
+            if quantidade is None or Decimal(str(quantidade)) <= 0:
+                item['quantidade_maida_completa'] = False
+            else:
+                item['quantidade_maida'] += Decimal(str(quantidade))
             if row['referencia'] is not None:
                 item['competencias'].add(row['referencia'])
         criterio = str(row['criterio_correspondencia'] or '').strip()
@@ -4671,6 +4679,13 @@ def _item_follow_up_glosa(
     if registro is None:  # pragma: no cover - protegido pelo agrupamento
         raise ValueError('Item de Follow-Up sem registro de glosa.')
     origem = dados_demonstrativo.get(registro.id, {})
+    quantidade = registro.qtd_registro or Decimal('1.00')
+    if (
+        origem.get('origem_maida')
+        and origem.get('quantidade_maida_completa')
+        and origem.get('quantidade_maida', 0) > 0
+    ):
+        quantidade = origem['quantidade_maida']
     valor_processado = _money(origem.get('valor_processado', registro.valor))
     valor_glosa = _money(origem.get('valor_glosa', registro.valor))
     valor_liberado = _money(origem.get('valor_liberado', 0))
@@ -4730,8 +4745,8 @@ def _item_follow_up_glosa(
         'dt_atendimento': registro.data_atendimento,
         'dt_alta': registro.data_alta,
         'dt_lancamento': registro.data_lancamento,
-        'qt_lancamento': registro.qtd_registro or Decimal('1.00'),
-        'qtd_glosada': registro.qtd_registro or Decimal('1.00'),
+        'qt_lancamento': quantidade,
+        'qtd_glosada': quantidade,
         'vl_total_conta': registro.valor,
         'valor_processado': valor_processado,
         'valor_glosa': valor_glosa,
