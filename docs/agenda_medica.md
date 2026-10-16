@@ -76,3 +76,21 @@ Fatos verificados no código do pacote:
 Sugestão: chave própria `AGENDA_MEDICA_MV_GRAVACAO_HABILITADA` (padrão `false`), separada
 de `MV_GRAVACAO_HABILITADA`, e primeiro teste controlado conforme o roteiro do projeto
 Agenda Médica (`docs/roteiro-primeiro-teste.md`).
+
+## Triagem sênior
+
+Médicos de nível **sênior** (vínculo com `nivel = 'senior'`, definido pelo
+administrador em `POST /agenda-medica/vinculos`) escolhem quais pacientes das
+consultas ambulatoriais dos próximos dias ficam com eles e quais seguem para os
+demais prestadores.
+
+| Rota | Quem | O que faz |
+|---|---|---|
+| `GET /agenda-medica/triagem?dias=30` | sênior ou administrador | Pacientes agendados (SoulMV, somente leitura) e decisões já tomadas |
+| `POST /agenda-medica/triagem/decisoes` | sênior | `{"cd_it_agenda_central": 1, "decisao": "senior" \| "demais" \| null}`; `null` desfaz a própria decisão |
+| `POST /agenda-medica/triagem/evolucoes` | sênior | As duas últimas evoluções médicas do paciente (documento tipo 36, fechadas, não confidenciais) |
+
+- Uma decisão por agendamento; outro sênior não sobrescreve (409).
+- Decisões e consultas às evoluções ficam em `agenda_medica_eventos`.
+- A triagem não altera o SoulMV: a consulta continua na agenda original.
+- O administrador acompanha a lista, mas não decide nem lê evoluções.

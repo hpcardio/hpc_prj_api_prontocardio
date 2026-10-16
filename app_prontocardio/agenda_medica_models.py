@@ -29,6 +29,10 @@ class AgendaMedicaVinculo:
     usuario_id: Mapped[int] = mapped_column(Integer, unique=True)
     cd_prestador: Mapped[int] = mapped_column(Integer, index=True)
     criado_por: Mapped[str] = mapped_column(String(200))
+    # 'senior' faz a triagem de pacientes; 'pleno' é o padrão.
+    nivel: Mapped[str] = mapped_column(
+        String(10), default='pleno', server_default='pleno'
+    )
     criado_em: Mapped[datetime] = mapped_column(
         DateTime, init=False, server_default=func.now()
     )
@@ -113,4 +117,31 @@ class AgendaMedicaEvento:
     detalhe: Mapped[str | None] = mapped_column(Text, default=None)
     criado_em: Mapped[datetime] = mapped_column(
         DateTime, init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
+class AgendaMedicaTriagem:
+    """Decisão de um médico sênior sobre um paciente agendado.
+
+    'senior': o sênior fica com o paciente; 'demais': segue para os demais
+    prestadores. Uma decisão por agendamento (IT_AGENDA_CENTRAL). Não altera
+    o SoulMV: a consulta continua na agenda original.
+    """
+
+    __tablename__ = 'agenda_medica_triagem'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cd_it_agenda_central: Mapped[int] = mapped_column(Integer, unique=True)
+    cd_paciente: Mapped[int] = mapped_column(Integer, index=True)
+    decisao: Mapped[str] = mapped_column(String(10))
+    cd_prestador_senior: Mapped[int] = mapped_column(Integer, index=True)
+    usuario_id: Mapped[int] = mapped_column(Integer)
+    usuario_nome: Mapped[str] = mapped_column(String(200))
+    decidido_em: Mapped[datetime] = mapped_column(
+        DateTime,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
