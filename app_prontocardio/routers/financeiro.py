@@ -4930,6 +4930,54 @@ def _duplicatas_maida_pendentes(session, ids_registros):
     """), {'ids': sorted(ids_registros)}).scalars())
 
 
+def _processos_lotes_maida_follow_up(session):
+    """Resolve lot placeholders only when their remittance has one portal process."""
+    if not all(_tabela_ipm_existe(session, name) for name in (
+        'demonstrativo_conta_ipm', 'registros_glosa_demonstrativo_ipm',
+    )) or not _tabela_schema_existe(session, 'raw_issec_portal', 'processos'):
+        return {}
+    rows = session.execute(text("""
+        WITH traced AS (
+            SELECT DISTINCT g.id, g.cd_remessa,
+                   BTRIM(d.numero_lote) AS lote,
+                   BTRIM(g.processo_controle_fatura_gab) AS processo
+              FROM api_prontocardio.registros_glosa g
+              JOIN api_prontocardio.registros_glosa origin
+                ON origin.cd_remessa = g.cd_remessa
+               AND origin.cd_atendimento = g.cd_atendimento
+               AND origin.conta = g.conta
+               AND origin.cd_lancamento = g.cd_lancamento
+               AND origin.motivo_glosa = g.motivo_glosa
+               AND origin.guia = g.guia
+               AND origin.procedimento = g.procedimento
+               AND origin.sn_ativo = 'true'
+               AND UPPER(BTRIM(origin.convenio)) = 'ISSEC'
+              JOIN api_prontocardio.registros_glosa_demonstrativo_ipm x
+                ON x.registro_glosa_id = origin.id
+              JOIN api_prontocardio.demonstrativo_conta_ipm d
+                ON d.id_registro = x.id_registro
+             WHERE g.sn_ativo = 'true' AND UPPER(BTRIM(g.convenio)) = 'ISSEC'
+               AND d.origem_maida IS NOT NULL
+               AND NULLIF(BTRIM(d.numero_lote), '') IS NOT NULL
+        ), canonical AS (
+            SELECT t.cd_remessa, t.lote, MIN(t.processo) AS processo
+              FROM traced t
+             WHERE t.processo <> t.lote
+               AND EXISTS (SELECT 1 FROM raw_issec_portal.processos p
+                            WHERE BTRIM(p.processo) = t.processo)
+             GROUP BY t.cd_remessa, t.lote
+            HAVING COUNT(DISTINCT t.processo) = 1
+        )
+        SELECT t.id, MIN(c.processo) AS processo
+          FROM traced t JOIN canonical c
+            ON c.cd_remessa = t.cd_remessa AND c.lote = t.lote
+         WHERE t.processo = t.lote OR t.processo = c.processo
+         GROUP BY t.id
+        HAVING COUNT(DISTINCT c.processo) = 1
+    """)).mappings()
+    return {int(row['id']): str(row['processo']) for row in rows}
+
+
 def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     chaves_excluidas: set[tuple[str, int]],
@@ -4949,6 +4997,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     # atendido pelos cards financeiros legados.
     if str(numero_nfse or '').strip():
         return []
+    processos_maida = _processos_lotes_maida_follow_up(session)
     filtros = [
         RegistroGlosa.sn_ativo == 'true',
         func.trim(RegistroGlosa.processo_controle_fatura_gab) != '',
@@ -4957,7 +5006,13 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         filtros.append(RegistroGlosa.cd_remessa == cd_remessa)
     if termo := str(processo_original or '').strip():
         filtros.append(
-            RegistroGlosa.processo_controle_fatura_gab.ilike(f'%{termo}%')
+            or_(
+                RegistroGlosa.processo_controle_fatura_gab.ilike(f'%{termo}%'),
+                RegistroGlosa.id.in_([
+                    ident for ident, processo in processos_maida.items()
+                    if termo.casefold() in processo.casefold()
+                ]),
+            )
         )
     if termo := str(processo_recurso or '').strip():
         filtros.append(RegistroGlosa.processo_recurso.ilike(f'%{termo}%'))
@@ -4991,7 +5046,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         select(RegistroGlosa).where(*filtros).order_by(RegistroGlosa.id)
     ):
         chave = (
-            str(registro.processo_controle_fatura_gab).strip().casefold(),
+            str(processos_maida.get(registro.id) or registro.processo_controle_fatura_gab).strip().casefold(),
             int(registro.cd_remessa),
         )
         if chave not in chaves_excluidas:
@@ -5128,7 +5183,9 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             'status_processo': None,
             'motivo_finalizacao': None,
         }
-        if registros_maida and len(registros_maida) == len(registros):
+        if any(registro.id in processos_maida for registro in registros):
+            processo = {**processo, 'numero_processo': chave[0]}
+        elif registros_maida and len(registros_maida) == len(registros):
             processo['numero_processo'] = ''
         protocolos = sorted({
             protocolo
