@@ -4317,6 +4317,7 @@ def _dados_demonstrativo_registros_follow_up(
             SELECT rastreio.registro_glosa_id,
                    rastreio.criterio_correspondencia,
                    demo.codigo_glosa,
+                   demo.numero_lote,
                    demo.origem_maida,
                    demo.referencia,
                    demo.quantidade_executada,
@@ -4335,6 +4336,7 @@ def _dados_demonstrativo_registros_follow_up(
         parametros,
     ).mappings()
     resultado: dict[int, dict] = {}
+    lotes_por_registro: dict[int, set[str]] = defaultdict(set)
     for row in rows:
         item = resultado.setdefault(
             int(row['registro_glosa_id']),
@@ -4350,6 +4352,9 @@ def _dados_demonstrativo_registros_follow_up(
                 'competencias': set(),
             },
         )
+        lote = str(row.get('numero_lote') or '').strip()
+        if lote:
+            lotes_por_registro[int(row['registro_glosa_id'])].add(lote)
         item['valor_processado'] += _money(row['valor_processado'])
         item['valor_glosa'] += _money(row['valor_glosa'])
         item['valor_liberado'] += _money(row['valor_liberado'])
@@ -4367,6 +4372,9 @@ def _dados_demonstrativo_registros_follow_up(
         criterio = str(row['criterio_correspondencia'] or '').strip()
         if criterio:
             item['criterios'].add(criterio)
+    for registro_id, item in resultado.items():
+        lotes = lotes_por_registro[registro_id]
+        item['numero_lote'] = next(iter(lotes)) if len(lotes) == 1 else None
     return resultado
 
 
