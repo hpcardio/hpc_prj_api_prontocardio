@@ -296,6 +296,79 @@ def texto_evolucao(bruto: str | None) -> str:
     return texto[:LIMITE_TEXTO_EVOLUCAO]
 
 
+# ---------------------------------------------------------------- gravação
+
+# Colunas de ESCALA_CENTRAL copiadas da escala-modelo para a escala do médico
+# (CD_ESCALA_CENTRAL e CD_PRESTADOR são definidos na cópia).
+COLUNAS_ESCALA_COPIADAS = (
+    'TP_ESCALA',
+    'HR_INICIO',
+    'HR_FIM',
+    'TP_DIA_SEMANA',
+    'QT_ENCAIXE',
+    'QT_ATENDIMENTO',
+    'SN_AGENDA_DINAMICA',
+    'SN_AGENDA_PUBLICA',
+    'SN_ATENDE_FERIADO',
+    'SN_SIA',
+    'CD_RECURSO_CENTRAL',
+    'CD_UNIDADE_ATENDIMENTO',
+    'CD_SETOR',
+    'SN_SERVICO_LIVRE',
+    'SN_TIPO_LIVRE',
+    'TP_PRODUCAO',
+    'DS_CONSULTORIO',
+    'CD_MULTI_EMPRESA',
+    'SN_ATIVO',
+    'SN_PERMITE_ENCAIXE_EXTRA',
+    'SN_SOLICITA_SENHA_ENCAIXE',
+    'SN_PERMITE_FILA_ESPERA',
+    'QT_HORARIO',
+    'TP_HORARIO',
+    'QT_PESO_MAXIMO',
+    'QT_ALTURA_MAXIMA',
+    'NR_IDADE_MINIMA',
+    'NR_IDADE_MAXIMA',
+    'QT_DIAS_LIBERACAO',
+    'CD_COR_AREA_FAMILIA',
+)
+# Configuração da escala: convênios, itens, serviços/tipos, horários, usuários.
+TABELAS_FILHAS_ESCALA = {
+    'ESCALA_CENTRAL_CONVENIO': ('CD_CONVENIO', 'QT_ATENDIMENTO'),
+    'ESCALA_CENTRAL_ITEM_AGENDA': (
+        'CD_ITEM_AGENDAMENTO',
+        'QT_MAX_ITEM_AGENDAMENTO',
+    ),
+    'ESCALA_CENTRAL_SER_TIPO': (
+        'CD_SER_DIS',
+        'CD_TIP_MAR',
+        'QT_ATENDIMENTO',
+        'QT_ATENDIMENTO_ENCAIXE',
+    ),
+    'ESCALA_CENTRAL_HORARIO': (
+        'HR_HORARIO',
+        'QT_VAGAS',
+        'CD_SER_DIS',
+        'CD_TIP_MAR',
+        'TP_VISUALIZACAO',
+    ),
+    'ESCALA_CENTRAL_USUARIO': ('CD_USUARIO',),
+}
+DIAS_GERACAO_COLUNAS = (
+    'SN_OPERA_SEGUNDA',
+    'SN_OPERA_TERCA',
+    'SN_OPERA_QUARTA',
+    'SN_OPERA_QUINTA',
+    'SN_OPERA_SEXTA',
+    'SN_OPERA_SABADO',
+    'SN_OPERA_DOMINGO',
+)
+
+
+class GeracaoAgendaErro(Exception):
+    """A geração oficial não criou a agenda; nada foi gravado (rollback)."""
+
+
 class AgendaMedicaSoulMV:
     """Consultas somente leitura ao SoulMV."""
 
@@ -398,6 +471,175 @@ class AgendaMedicaSoulMV:
             """,
             {'cd': cd_agenda_central},
         )
+
+    def gerar_agenda_aprovada(
+        self,
+        escala: dict,
+        cd_prestador: int,
+        data_agenda: date,
+        usuario_mv: str,
+    ) -> dict:
+        """Grava no SoulMV a grade aprovada, pelo mesmo caminho do SoulMV.
+
+        1. Nova ESCALA_CENTRAL do médico, cópia da escala-modelo, e cópia
+           da configuração (convênios, itens, serviços/tipos, horários e
+           usuários). As tabelas de escala só têm gatilhos de log.
+        2. GERACAO_AGENDA + IT_GERACAO_AGENDA e a função oficial
+           DBAMV.PKG_SCMA_M_GERA_AGENDA.FNC_GERA_AGENDA, como no job oficial
+           PRC_SCMA_GERAR_AGENDA (retorno 1 = sucesso).
+        3. Confere que a agenda do dia foi criada.
+
+        Tudo numa transação: qualquer falha desfaz tudo. AGENDA_CENTRAL e
+        IT_AGENDA_CENTRAL só são criadas pela função oficial da MV.
+        """
+        modelo = escala['cd_escala_central']
+        empresa = escala['cd_multi_empresa']
+        dias = dias_geracao(escala['tp_dia_semana'])
+        connection = self.session.connection().connection
+        cursor = connection.cursor()
+        try:
+            cursor.execute('SELECT DBAMV.SEQ_ESCALA_CENTRAL.NEXTVAL FROM DUAL')
+            cd_escala = cursor.fetchone()[0]
+            colunas = ', '.join(COLUNAS_ESCALA_COPIADAS)
+            cursor.execute(
+                f"""
+                INSERT INTO DBAMV.ESCALA_CENTRAL
+                       (CD_ESCALA_CENTRAL, CD_PRESTADOR, {colunas})
+                SELECT :cd_escala, :cd_prestador, {colunas}
+                  FROM DBAMV.ESCALA_CENTRAL
+                 WHERE CD_ESCALA_CENTRAL = :modelo
+                """,
+                cd_escala=cd_escala,
+                cd_prestador=cd_prestador,
+                modelo=modelo,
+            )
+            if cursor.rowcount != 1:
+                raise GeracaoAgendaErro('Escala-modelo não encontrada.')
+            for tabela, campos in TABELAS_FILHAS_ESCALA.items():
+                lista = ', '.join(campos)
+                cursor.execute(
+                    f"""
+                    INSERT INTO DBAMV.{tabela} (CD_ESCALA_CENTRAL, {lista})
+                    SELECT :cd_escala, {lista}
+                      FROM DBAMV.{tabela}
+                     WHERE CD_ESCALA_CENTRAL = :modelo
+                    """,
+                    cd_escala=cd_escala,
+                    modelo=modelo,
+                )
+
+            cursor.execute('SELECT DBAMV.SEQ_GERACAO_AGENDA.NEXTVAL FROM DUAL')
+            cd_geracao = cursor.fetchone()[0]
+            opera = {
+                coluna: 'S' if dia != '0' else 'N'
+                for coluna, dia in zip(DIAS_GERACAO_COLUNAS, dias)
+            }
+            cursor.execute(
+                f"""
+                INSERT INTO DBAMV.GERACAO_AGENDA (
+                    DT_GERACAO_AGENDA, TP_AGENDA, CD_ESCALA, CD_PRESTADOR,
+                    CD_UNIDADE_ATENDIMENTO, CD_RECURSO_CENTRAL, CD_SETOR,
+                    CD_SERVICO, CD_ITEM_AGENDAMENTO, SN_SOBREPOR_AGENDAS,
+                    {', '.join(DIAS_GERACAO_COLUNAS)},
+                    DT_INICIO, DT_FIM, DT_LIBERACAO, CD_USUARIO,
+                    CD_GERACAO_AGENDA, TP_PERIODO, CD_MULTI_EMPRESA)
+                VALUES (
+                    SYSDATE, 'A', :cd_escala, :cd_prestador,
+                    :unidade, :recurso, :setor,
+                    NULL, NULL, 'N',
+                    {', '.join(':' + c.lower() for c in DIAS_GERACAO_COLUNAS)},
+                    :dia, :dia, TRUNC(SYSDATE), :usuario,
+                    :cd_geracao, 'S', :empresa)
+                """,
+                cd_escala=cd_escala,
+                cd_prestador=cd_prestador,
+                unidade=escala['cd_unidade_atendimento'],
+                recurso=escala['cd_recurso_central'],
+                setor=escala['cd_setor'],
+                dia=data_agenda,
+                usuario=usuario_mv,
+                cd_geracao=cd_geracao,
+                empresa=empresa,
+                **{c.lower(): v for c, v in opera.items()},
+            )
+            cursor.execute(
+                'SELECT DBAMV.SEQ_IT_GERACAO_AGENDA.NEXTVAL FROM DUAL'
+            )
+            cd_it_geracao = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                INSERT INTO DBAMV.IT_GERACAO_AGENDA (
+                    CD_GERACAO_AGENDA, CD_IT_GERACAO_AGENDA, DT_INICIO,
+                    DT_FIM, DT_INI_PROC_GERACAO, DT_FIM_PROC_GERACAO)
+                VALUES (:cd_geracao, :cd_it, :dia, :dia, SYSDATE, SYSDATE)
+                """,
+                cd_geracao=cd_geracao,
+                cd_it=cd_it_geracao,
+                dia=data_agenda,
+            )
+
+            cursor.callproc('DBAMV.PKG_MV2000.ATRIBUI_EMPRESA', [empresa])
+            mensagem = cursor.var(str, 4000)
+            retorno = cursor.callfunc(
+                'DBAMV.PKG_SCMA_M_GERA_AGENDA.FNC_GERA_AGENDA',
+                int,
+                [
+                    'A',
+                    cd_escala,
+                    cd_prestador,
+                    escala['cd_unidade_atendimento'],
+                    escala['cd_recurso_central'],
+                    escala['cd_setor'],
+                    None,
+                    None,
+                    *dias,
+                    empresa,
+                    data_agenda,
+                    data_agenda,
+                    date.today(),
+                    'N',
+                    usuario_mv,
+                    mensagem,
+                    cd_it_geracao,
+                    cd_geracao,
+                    'S',
+                ],
+            )
+            if retorno != 1:
+                raise GeracaoAgendaErro(
+                    f'O SoulMV não gerou a agenda (retorno {retorno}): '
+                    f'{mensagem.getvalue() or "sem mensagem"}'
+                )
+            cursor.execute(
+                """
+                SELECT CD_AGENDA_CENTRAL FROM DBAMV.AGENDA_CENTRAL
+                 WHERE CD_ESCALA_CENTRAL = :cd_escala
+                   AND TRUNC(DT_AGENDA) = :dia
+                """,
+                cd_escala=cd_escala,
+                dia=data_agenda,
+            )
+            agendas = [linha[0] for linha in cursor.fetchall()]
+            if not agendas:
+                raise GeracaoAgendaErro(
+                    'A função oficial respondeu sucesso, mas nenhuma agenda '
+                    'foi criada para o dia.'
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+        return {
+            'modo': 'gravado',
+            'gravado_no_soulmv': True,
+            'cd_escala_central': cd_escala,
+            'cd_escala_modelo': modelo,
+            'cd_geracao_agenda': cd_geracao,
+            'cd_agenda_central': agendas,
+            'data_agenda': data_agenda.isoformat(),
+        }
 
     def triagem_pacientes(self, dias: int) -> list[dict]:
         return self._varias(CONSULTA_TRIAGEM.format(filtro=''), {'dias': dias})
