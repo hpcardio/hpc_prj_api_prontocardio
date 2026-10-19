@@ -13,6 +13,7 @@ from app_prontocardio.permissions import TELAS_PADRAO
 from app_prontocardio.routers.agenda_medica import get_soulmv_agenda_medica
 from app_prontocardio.security import gera_hash_senha
 from app_prontocardio.services.agenda_medica_soulmv import (
+    GeracaoAgendaErro,
     dias_geracao,
     texto_evolucao,
     tp_dia_semana_de,
@@ -252,6 +253,60 @@ def test_fluxo_interesse_aprovado_devolve_plano_sem_gravar(
         'INTERESSE_MANIFESTADO',
         'INTERESSE_APROVADA',
     }
+
+
+def _pedir_e_aprovar(cliente, perfis):
+    oferta_id = _oferta(cliente, perfis)
+    pedido = cliente.post(
+        f'/agenda-medica/ofertas/{oferta_id}/interesse',
+        headers=perfis['medico'],
+    ).json()
+    decisao = cliente.post(
+        f'/agenda-medica/solicitacoes/{pedido["id"]}/decisao',
+        json={'acao': 'aprovar'},
+        headers=perfis['admin'],
+    )
+    return oferta_id, decisao
+
+
+def test_gravacao_ligada_gera_agenda_no_soulmv(
+    cliente, session, perfis, soulmv, monkeypatch
+):
+    monkeypatch.setenv('AGENDA_MEDICA_MV_GRAVACAO_HABILITADA', 'true')
+    chamadas = []
+
+    def gerar(escala, cd_prestador, data_agenda, usuario_mv):
+        chamadas.append((escala['cd_escala_central'], cd_prestador))
+        return {'modo': 'gravado', 'gravado_no_soulmv': True}
+
+    soulmv.gerar_agenda_aprovada = gerar
+    status = cliente.get('/agenda-medica/status', headers=perfis['admin'])
+    assert status.json()['gravacao_soulmv'] is True
+
+    oferta_id, decisao = _pedir_e_aprovar(cliente, perfis)
+    assert decisao.status_code == HTTPStatus.OK
+    assert decisao.json()['resultado_mv']['gravado_no_soulmv'] is True
+    assert chamadas == [(CD_ESCALA, CD_PRESTADOR)]
+    assert session.get(AgendaMedicaOferta, oferta_id).status == 'PREENCHIDA'
+
+
+def test_falha_na_gravacao_mantem_pedido_pendente(
+    cliente, session, perfis, soulmv, monkeypatch
+):
+    monkeypatch.setenv('AGENDA_MEDICA_MV_GRAVACAO_HABILITADA', 'true')
+
+    def falhar(*_):
+        raise GeracaoAgendaErro('O SoulMV não gerou a agenda (retorno 3).')
+
+    soulmv.gerar_agenda_aprovada = falhar
+    oferta_id, decisao = _pedir_e_aprovar(cliente, perfis)
+    assert decisao.status_code == HTTPStatus.CONFLICT
+    assert 'retorno 3' in decisao.json()['detail']['pendencias'][0]
+    assert session.get(AgendaMedicaOferta, oferta_id).status == 'ABERTA'
+    lista = cliente.get(
+        '/agenda-medica/solicitacoes', headers=perfis['medico']
+    ).json()
+    assert lista['solicitacoes'][0]['status'] == 'PENDENTE'
 
 
 def test_aprovacao_bloqueada_por_conflito_no_soulmv(cliente, perfis, soulmv):

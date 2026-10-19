@@ -5,6 +5,7 @@ Os pedidos ficam no PostgreSQL da API até a decisão. A gravação no SoulMV n�
 exato do que a rotina oficial da MV receberia (ver plano_geracao).
 """
 
+import os
 from datetime import date, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
@@ -27,6 +28,7 @@ from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.agenda_medica_soulmv import (
     DIAS_SEMANA,
     AgendaMedicaSoulMV,
+    GeracaoAgendaErro,
     plano_geracao,
     tp_dia_semana_de,
 )
@@ -38,6 +40,18 @@ TELA_ADMIN = 'agenda_medica_admin'
 TELA_RESPONSAVEL = 'agenda_medica_responsavel'
 PERFIS_GESTAO = {'ti', 'administrador'}
 USUARIO_MV = 'AGENDA_MEDICA'
+# Usuário do MV registrado na geração (GERACAO_AGENDA.CD_USUARIO / FNC).
+USUARIO_MV_GRAVACAO = os.getenv('AGENDA_MEDICA_USUARIO_MV', 'DBAMV')
+
+
+def gravacao_soulmv_habilitada() -> bool:
+    """Chave própria da Agenda Médica; começa desligada."""
+    return (
+        os.getenv('AGENDA_MEDICA_MV_GRAVACAO_HABILITADA', 'false').lower()
+        == 'true'
+    )
+
+
 MOTIVO_MINIMO = 5
 
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
@@ -231,11 +245,19 @@ def quem_sou(usuario: Leitor, session: SessionPostgres):
 
 @router.get('/status')
 def status_agenda_medica(_: Leitor):
+    if gravacao_soulmv_habilitada():
+        return {
+            'gravacao_soulmv': True,
+            'mensagem': (
+                'Aprovar uma grade gera a agenda do médico no SoulMV pela '
+                'rotina oficial. Cancelamentos ainda dependem da MV.'
+            ),
+        }
     return {
         'gravacao_soulmv': False,
         'mensagem': (
-            'Decisões registradas na API. A geração da agenda no SoulMV '
-            'ainda não está implementada: a aprovação devolve o plano.'
+            'Decisões registradas na API. A gravação no SoulMV está '
+            'desligada: a aprovação devolve o plano.'
         ),
     }
 
@@ -548,6 +570,27 @@ def _avaliar_interesse(
     return pendencias, plano
 
 
+def _resultado_aprovacao(
+    pedido: AgendaMedicaSolicitacao,
+    oferta: AgendaMedicaOferta,
+    plano: dict,
+    soulmv: AgendaMedicaSoulMV,
+) -> dict:
+    """Gravação ligada: gera a agenda no SoulMV; desligada: devolve o plano."""
+    if not gravacao_soulmv_habilitada():
+        return {**plano, 'gravado_no_soulmv': False}
+    escala = soulmv.escala_modelo(oferta.cd_escala_modelo)
+    try:
+        return soulmv.gerar_agenda_aprovada(
+            escala,
+            pedido.cd_prestador,
+            oferta.data_agenda,
+            USUARIO_MV_GRAVACAO,
+        )
+    except GeracaoAgendaErro as erro:
+        raise _conflito({'pendencias': [str(erro)]}) from erro
+
+
 @router.post('/solicitacoes/{solicitacao_id}/decisao')
 def decidir_solicitacao(
     solicitacao_id: int,
@@ -574,8 +617,8 @@ def decidir_solicitacao(
         pendencias, plano = _avaliar_interesse(pedido, oferta, session, soulmv)
         if pendencias:
             raise _conflito({'pendencias': pendencias})
+        resultado = _resultado_aprovacao(pedido, oferta, plano, soulmv)
         oferta.status = 'PREENCHIDA'
-        resultado = {**plano, 'gravado_no_soulmv': False}
         status = 'APROVADA'
     else:
         agenda = soulmv.agenda(pedido.cd_agenda_central)

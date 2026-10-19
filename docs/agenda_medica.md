@@ -94,3 +94,25 @@ demais prestadores.
 - Decisões e consultas às evoluções ficam em `agenda_medica_eventos`.
 - A triagem não altera o SoulMV: a consulta continua na agenda original.
 - O administrador acompanha a lista, mas não decide nem lê evoluções.
+
+## Gravação da grade aprovada no SoulMV
+
+Controlada pela variável `AGENDA_MEDICA_MV_GRAVACAO_HABILITADA` (padrão `false`),
+separada da `MV_GRAVACAO_HABILITADA` do agendamento de pacientes.
+
+Com a chave ligada, aprovar o interesse de um médico (`POST /agenda-medica/solicitacoes/{id}/decisao`)
+faz, numa única transação Oracle (rollback em qualquer falha):
+
+1. nova `ESCALA_CENTRAL` do médico (`SEQ_ESCALA_CENTRAL`), cópia da escala-modelo, e cópia da
+   configuração: `ESCALA_CENTRAL_CONVENIO`, `_ITEM_AGENDA`, `_SER_TIPO`, `_HORARIO`, `_USUARIO`
+   (essas tabelas só têm gatilhos de log);
+2. `GERACAO_AGENDA` + `IT_GERACAO_AGENDA` e `DBAMV.PKG_SCMA_M_GERA_AGENDA.FNC_GERA_AGENDA`,
+   como no job oficial `PRC_SCMA_GERAR_AGENDA` (retorno 1 = sucesso);
+3. conferência de que a `AGENDA_CENTRAL` do dia foi criada; só então `COMMIT`.
+
+`AGENDA_CENTRAL` e `IT_AGENDA_CENTRAL` nunca são escritas diretamente. Se a geração falhar, a
+solicitação continua `PENDENTE` e a resposta é 409 com o motivo. O usuário registrado na geração
+vem de `AGENDA_MEDICA_USUARIO_MV` (padrão `DBAMV`, como no job oficial).
+
+Antes de ligar em produção: primeiro teste controlado com uma oferta real num dia sem pacientes
+e conferência no SoulMV. Cancelamentos continuam sem gravação até a MV confirmar a rotina de bloqueio.
