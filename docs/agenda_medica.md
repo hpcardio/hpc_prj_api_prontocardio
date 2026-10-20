@@ -134,3 +134,11 @@ Falha, concorrência ou bloqueio incompleto provocam `ROLLBACK`, resposta 409 e
 mantêm a solicitação pendente. Antes de ligar a chave em produção, validar uma
 agenda futura sem pacientes no ambiente de homologação e conferir o bloqueio
 pela tela do SoulMV.
+
+### Geração automática do SoulMV (atenção)
+
+O job `SCMA_GERAR_AGENDA` (diário, 00:10) chama `PRC_SCMA_GERAR_AGENDA`, que estende para frente
+toda escala ativa (`SN_ATIVO = 'S'`) que já tenha agenda futura. Hoje ele **não gera nada**, porque
+`CONFIG_SCMA.SN_GERA_AGENDA_AMBULATORIO` está vazio (levantado em 20/10/2026, sem gerações automáticas
+nos 7 dias anteriores). Se essa configuração for ligada no SoulMV, a escala criada por uma aprovação
+passa a gerar agendas toda semana — a grade aprovada vira recorrente.
