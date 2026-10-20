@@ -540,6 +540,20 @@ def _desfazer_tratativa_glosa_conciliada(
 
 def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     for chave, valor in filtros.items():
+        if chave == 'escopo_lote':
+            if not valor:
+                query = query.where(false())
+                continue
+            query = query.where(or_(*(
+                and_(
+                    ModelContaAtendimento.cd_remessa == remessa,
+                    ModelContaAtendimento.cd_atendimento == atendimento,
+                    ModelContaAtendimento.cd_reg == conta,
+                    func.trim(ModelContaAtendimento.nr_guia) == guia,
+                )
+                for remessa, atendimento, conta, guia in valor
+            )))
+            continue
         if chave == 'identidades_processo':
             if not valor:
                 query = query.where(false())
@@ -723,10 +737,24 @@ def conta_atendimento(
                 ),
             )
 
+        lote = str(filtros.pop('numero_lote', '') or '').strip()
+        if lote:
+            from app_prontocardio.services.filtros_guia_lote import (
+                registros_no_escopo,
+            )
+
+            escopo = registros_no_escopo(session_postgres, lote=lote)
+            filtros['escopo_lote'] = sorted({
+                (r['cd_remessa'], r['cd_atendimento'], r['conta'], r['guia'])
+                for r in escopo if r['cd_atendimento'] and r['guia']
+            })
         filtros = _resolver_filtro_processo(session_postgres, filtros)
         filtros = _resolver_filtro_guia(session, filtros)
         filtros = _resolver_filtro_nome_paciente(session, filtros)
         guia_resolvida = filtros.pop('guia_resolvida', None)
+        if guia_resolvida:
+            # Apply the exact guide to counts and pagination as well.
+            filtros['nr_guia'] = guia_resolvida
 
         codigos_desabilitados = tuple(
             session_postgres.scalars(
