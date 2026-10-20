@@ -83,6 +83,7 @@ class FilterPage(BaseModel):
 
 
 class FilterSearch(FilterPage):
+    numero_lote: str | None = None
     processo: str | None = None
     cd_remessa: int | None = None
     cd_atendimento: int | None = None

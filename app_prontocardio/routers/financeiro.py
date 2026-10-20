@@ -8788,7 +8788,22 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     agrupar_por_processo: bool = False,
     somente_processos_com_valor_tratado: bool = False,
     somente_remessas_com_valor_tratado: bool = False,
+    nr_guia: Annotated[str | None, Query(max_length=100)] = None,
+    numero_lote: Annotated[str | None, Query(max_length=100)] = None,
 ):
+    if str(nr_guia or '').strip() or str(numero_lote or '').strip():
+        from app_prontocardio.services.filtros_guia_lote import (
+            consultar_filtrado,
+        )
+
+        parametros = dict(locals())
+        parametros.pop('nr_guia')
+        parametros.pop('numero_lote')
+        parametros.pop('consultar_filtrado')
+        return consultar_filtrado(
+            session, consultar_follow_up_glosas, parametros,
+            str(nr_guia or '').strip(), str(numero_lote or '').strip(),
+        )
     processos_permitidos: set[str] | None = None
     remessas_permitidas: set[int] | None = None
     if (
