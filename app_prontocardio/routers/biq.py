@@ -535,11 +535,19 @@ CONSULTA_TESTE_ERGOMETRICO_POR_COMPETENCIA = text(
     WITH faturamento AS (
         SELECT rc.CD_ATENDIMENTO,
                MAX(rc.CD_REPASSE_CONSOLIDADO) AS CD_REPASSE_CONSOLIDADO,
-               MAX(rc.CD_REMESSA) AS CD_REMESSA,
+               MAX(rc.CD_REMESSA) KEEP (
+                   DENSE_RANK LAST ORDER BY rc.CD_REPASSE_CONSOLIDADO
+               ) AS CD_REMESSA,
+               MAX(NVL(rp.CD_PRESTADOR_REPASSE, rp.CD_PRESTADOR)) KEEP (
+                   DENSE_RANK LAST ORDER BY rc.CD_REPASSE_CONSOLIDADO
+               ) AS CD_PRESTADOR_REPASSE,
                TRUNC(r.DT_COMPETENCIA, 'MM') AS COMPETENCIA_FATURAMENTO
           FROM DBAMV.REPASSE_CONSOLIDADO rc
           JOIN DBAMV.REPASSE r
             ON r.CD_REPASSE = rc.CD_REPASSE
+          JOIN DBAMV.REPASSE_PRESTADOR rp
+            ON rp.CD_REPASSE = rc.CD_REPASSE
+           AND rp.CD_PRESTADOR = rc.CD_PRESTADOR
          WHERE r.DT_COMPETENCIA >= :data_inicio
            AND r.DT_COMPETENCIA < :data_fim
            AND NVL(rc.CD_PROCEDIMENTO, rc.CD_PRO_FAT) IN (
@@ -565,9 +573,12 @@ CONSULTA_TESTE_ERGOMETRICO_POR_COMPETENCIA = text(
            ipr.CD_ITPED_RX AS cd_itped_rx,
            lr.CD_LAUDO AS cd_laudo,
            lr.DT_LAUDO AS dt_laudo,
-           NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) AS cd_prestador,
-           p.NM_PRESTADOR AS nm_prestador,
-           p.DS_CODIGO_CONSELHO AS crm,
+           fat.CD_PRESTADOR_REPASSE AS cd_prestador,
+           pr.NM_PRESTADOR AS nm_prestador,
+           pr.DS_CODIGO_CONSELHO AS crm,
+           NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) AS cd_prestador_laudo,
+           p.NM_PRESTADOR AS nm_prestador_laudo,
+           p.DS_CODIGO_CONSELHO AS crm_laudo,
            a.CD_PRESTADOR AS cd_prestador_atendimento,
            pa.NM_PRESTADOR AS nm_prestador_atendimento,
            pa.DS_CODIGO_CONSELHO AS crm_atendimento,
@@ -582,7 +593,7 @@ CONSULTA_TESTE_ERGOMETRICO_POR_COMPETENCIA = text(
       JOIN DBAMV.EXA_RX exa
         ON exa.CD_EXA_RX = ipr.CD_EXA_RX
        AND exa.EXA_RX_CD_PRO_FAT IN (
-            40101037, 40101045, 20101056, 18000002,
+            40101010, 40101037, 40101045, 20101056, 18000002,
             70051021, 22051014, 10210004, 20010028
        )
       JOIN DBAMV.LAUDO_RX lr
@@ -595,6 +606,8 @@ CONSULTA_TESTE_ERGOMETRICO_POR_COMPETENCIA = text(
         ON conv.CD_CONVENIO = a.CD_CONVENIO
       LEFT JOIN DBAMV.PRESTADOR p
         ON p.CD_PRESTADOR = NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR)
+      LEFT JOIN DBAMV.PRESTADOR pr
+        ON pr.CD_PRESTADOR = fat.CD_PRESTADOR_REPASSE
       LEFT JOIN DBAMV.PRESTADOR pa
         ON pa.CD_PRESTADOR = a.CD_PRESTADOR
      WHERE NVL(lr.CD_PRESTADOR_ASSINATURA, lr.CD_PRESTADOR) IS NOT NULL
