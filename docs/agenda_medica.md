@@ -115,4 +115,22 @@ solicitação continua `PENDENTE` e a resposta é 409 com o motivo. O usuário r
 vem de `AGENDA_MEDICA_USUARIO_MV` (padrão `DBAMV`, como no job oficial).
 
 Antes de ligar em produção: primeiro teste controlado com uma oferta real num dia sem pacientes
-e conferência no SoulMV. Cancelamentos continuam sem gravação até a MV confirmar a rotina de bloqueio.
+e conferência no SoulMV.
+
+## Bloqueio da agenda após cancelamento aprovado
+
+Controlado separadamente por `AGENDA_MEDICA_MV_CANCELAMENTO_HABILITADO`
+(padrão `false`). Com a chave ligada, a aprovação do responsável institucional:
+
+1. recusa a operação se houver pacientes marcados;
+2. registra `LOG_OPERA_AGENDA_CENTRAL` como bloqueio do tipo 6,
+   **A PEDIDO DO MEDICO**, com a justificativa da solicitação;
+3. chama `DBAMV.FNC_BLOQUEIA_DESBLOQUEIA`, a mesma função oficial usada pelo
+   fluxo do SoulMV;
+4. confere que todos os horários da agenda ficaram bloqueados e só então faz
+   `COMMIT`.
+
+Falha, concorrência ou bloqueio incompleto provocam `ROLLBACK`, resposta 409 e
+mantêm a solicitação pendente. Antes de ligar a chave em produção, validar uma
+agenda futura sem pacientes no ambiente de homologação e conferir o bloqueio
+pela tela do SoulMV.
