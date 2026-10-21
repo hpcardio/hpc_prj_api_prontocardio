@@ -4588,7 +4588,7 @@ def _cards_cogestao_com_processo_issec(
 
 def _detalhar_cards_maida_issec(session, session_oracle, cards):
     from app_prontocardio.services.maida_followup import (
-        load_brasindice, match_maida_items,
+        load_brasindice, match_maida_remittances,
     )
 
     if not cards or not _tabela_ipm_existe(session, 'demonstrativo_conta_ipm'):
@@ -4612,11 +4612,10 @@ def _detalhar_cards_maida_issec(session, session_oracle, cards):
         for t in session.scalars(select(Tiss).where(Tiss.codigo_termo.in_(codes)))
     } if codes else {}
     brasindice = load_brasindice(session)
+    matches = match_maida_remittances(demos, by_remessa, brasindice)
     for card in cards:
         patients = {}
-        for demo, origin in match_maida_items(
-            demos, by_remessa.get(int(card['cd_remessa']), []), brasindice,
-        ):
+        for demo, origin in matches.get(int(card['cd_remessa']), []):
             item = _item_demonstrativo_follow_up(
                 demo, origin, 'guia_procedimento_maida',
                 descriptions.get(str(demo.get('codigo_glosa') or '').strip()),
