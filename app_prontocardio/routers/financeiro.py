@@ -4306,6 +4306,8 @@ def _dados_demonstrativo_registros_follow_up(
         )
     ):
         return {}
+    from app_prontocardio.services.maida_followup import unique_document_lines
+
     parametros = {
         f'registro_{indice}': valor
         for indice, valor in enumerate(sorted(ids_registros))
@@ -4316,6 +4318,9 @@ def _dados_demonstrativo_registros_follow_up(
             f"""
             SELECT rastreio.registro_glosa_id,
                    rastreio.criterio_correspondencia,
+                   demo.documento_maida_id, demo.aba_maida, demo.linha_maida,
+                   demo.numero_guia_senha, demo.codigo_servico,
+                   demo.data_realizacao,
                    demo.codigo_glosa,
                    demo.numero_lote,
                    demo.origem_maida,
@@ -4337,7 +4342,7 @@ def _dados_demonstrativo_registros_follow_up(
     ).mappings()
     resultado: dict[int, dict] = {}
     lotes_por_registro: dict[int, set[str]] = defaultdict(set)
-    for row in rows:
+    for row in unique_document_lines(rows, scope=('registro_glosa_id',)):
         item = resultado.setdefault(
             int(row['registro_glosa_id']),
             {
