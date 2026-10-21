@@ -1,8 +1,10 @@
 # ruff: noqa: PLR2004
 
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from app_prontocardio.routers import contas_pagar
 
@@ -74,9 +76,11 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
     resultado = contas_pagar._agrupar_fornecedores(
         titulos,
         {
-            99: [{
-                'valor_pago': Decimal('50000'),
-            }]
+            99: [
+                {
+                    'valor_pago': Decimal('50000'),
+                }
+            ]
         },
     )
 
@@ -168,9 +172,10 @@ def test_titulo_sem_saldo_mostra_dias_sem_alterar_prioridade(monkeypatch):
     fornecedor = contas_pagar._agrupar_fornecedores(titulos, {})[0]
 
     assert fornecedor['titulos'][0]['codigo_parcela'] == 1
-    assert fornecedor['titulos'][0]['dias_vencidos'] == (
-        date(2026, 9, 20) - date(2022, 9, 10)
-    ).days
+    assert (
+        fornecedor['titulos'][0]['dias_vencidos']
+        == (date(2026, 9, 20) - date(2022, 9, 10)).days
+    )
     assert fornecedor['titulos'][1]['dias_vencidos'] == 17
     assert fornecedor['dias_atraso'] == 17
     assert fornecedor['total_dias_vencidos'] == 17
@@ -326,3 +331,84 @@ def test_excluir_remove_apenas_tratamento_operacional():
     assert 'HPC_V_CONTAS_A_PAGAR' not in sql
     assert params == {'codigo': 10}
     assert resposta.status_code == 204
+
+
+def test_exportacao_completa_preserva_filtros_e_nao_registra_snapshot(
+    monkeypatch,
+):
+
+    suppliers = []
+    for codigo in range(1, 206):
+        item = dict(
+            codigo_fornecedor=codigo,
+            nome_fornecedor='Fornecedor',
+            dias_atraso=codigo,
+            vencimento_mais_antigo=date(2026, 1, 1),
+            titulos=[],
+            titulos_vencidos=1,
+            titulos_correntes=0,
+        )
+        for campo in (
+            'valor_total',
+            'valor_total_vencido',
+            'valor_total_honrado',
+            'saldo_a_pagar',
+            'valor_corrente',
+            'novos_vencidos_7d',
+        ):
+            item[campo] = Decimal('10')
+        suppliers.append(item)
+    consulta = Mock(side_effect=lambda *a, **k: deepcopy(suppliers))
+    detalhes = Mock(return_value=[])
+    snapshot = Mock()
+    monkeypatch.setattr(contas_pagar, '_consultar_oracle', consulta)
+    monkeypatch.setattr(contas_pagar, '_consultar_titulos_oracle', detalhes)
+    monkeypatch.setattr(contas_pagar, '_pagamentos_manuais', lambda s: {})
+    monkeypatch.setattr(
+        contas_pagar,
+        '_tratamentos',
+        lambda s: {
+            i: {'critico': True, 'status': 'NEGOCIACAO'} for i in range(1, 151)
+        },
+    )
+    monkeypatch.setattr(contas_pagar, '_registrar_snapshot', snapshot)
+    monkeypatch.setattr(contas_pagar, '_historico', lambda s: [])
+    monkeypatch.setattr(
+        contas_pagar, '_valor_vencido_inicio_acompanhamento', lambda s: None
+    )
+    args = dict(
+        _=None,
+        session=None,
+        oracle=None,
+        q='Fornecedor',
+        criticidade='criticos',
+        status='NEGOCIACAO',
+        page=9,
+        page_size=20,
+    )
+    result = contas_pagar.listar_contas_pagar(**args, exportar=True)
+    assert result['total'] == 150
+    assert len(result['fornecedores']) == 150
+    assert result['total_pages'] == 1
+    assert result['page'] == 1
+    assert result['fornecedores'][0]['codigo_fornecedor'] == 150
+    assert result['fornecedores'][-1]['codigo_fornecedor'] == 1
+    consulta.assert_called_once()
+    detalhes.assert_called_once()
+    assert len(detalhes.call_args.args[1]) == 150
+    snapshot.assert_not_called()
+    args['page'] = 1
+    paged = contas_pagar.listar_contas_pagar(**args)
+    assert len(paged['fornecedores']) == 20
+    assert paged['total_pages'] == 8
+    snapshot.assert_called_once()
+
+
+def test_titulos_exportacao_respeita_limite_oracle():
+    oracle = FakeSession([[], []])
+    assert (
+        contas_pagar._consultar_titulos_oracle(oracle, list(range(1001))) == []
+    )
+    assert [
+        len(params['codigos_fornecedor']) for _, params in oracle.executions
+    ] == [1000, 1]
