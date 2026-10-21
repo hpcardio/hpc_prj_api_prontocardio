@@ -47,7 +47,7 @@ def match_maida_items(demonstrativos, oracle_items, brasindice=None):
         if guide and procedure:
             catalog_index[guide, procedure][identity] = item
     seen = set()
-    for demo in demonstrativos:
+    for demo in unique_document_lines(demonstrativos):
         identity = key(demo.get('id_registro'))
         if not identity or identity in seen:
             continue
@@ -69,3 +69,30 @@ def match_maida_items(demonstrativos, oracle_items, brasindice=None):
         if len(candidates) == 1:
             seen.add(identity)
             yield demo, next(iter(candidates.values()))
+
+
+def unique_document_lines(rows, *, scope=()):
+    """Count a physical Maida document line once across the two lot filters.
+
+    Require document/sheet/line provenance and identical business values;
+    equal amounts alone never establish a duplicate.
+    """
+    seen = set()
+    origins = {'lote_glosa_recursado', 'lote_glosa_nao_recursado'}
+    provenance = ('documento_maida_id', 'aba_maida', 'linha_maida')
+    fields = provenance + (
+        'numero_lote', 'numero_guia_senha', 'codigo_servico',
+        'codigo_glosa', 'data_realizacao', 'referencia',
+        'valor_processado', 'valor_glosa', 'valor_liberado',
+        'quantidade_executada',
+    )
+    for row in rows:
+        if row.get('origem_maida') not in origins or not all(
+            row.get(field) for field in provenance
+        ):
+            yield row
+            continue
+        identity = tuple(row.get(field) for field in scope + fields)
+        if identity not in seen:
+            seen.add(identity)
+            yield row
