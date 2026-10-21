@@ -4399,6 +4399,11 @@ def _aplicar_processos_portal_issec(
     session_oracle: Session,
     cards: list[dict],
 ) -> None:
+    # Imported Maida lots are placeholders, not process identifiers. Resolve
+    # them even when an untraced historical item shares the same card.
+    from app_prontocardio.services.issec_process_identity import clear_lot_processes
+
+    clear_lot_processes(session, cards)
     elegiveis = [
         card
         for card in cards
@@ -5008,7 +5013,10 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     processos_maida = _processos_lotes_maida_follow_up(session)
     filtros = [
         RegistroGlosa.sn_ativo == 'true',
-        func.trim(RegistroGlosa.processo_controle_fatura_gab) != '',
+        or_(
+            func.trim(RegistroGlosa.processo_controle_fatura_gab) != '',
+            func.upper(func.trim(RegistroGlosa.convenio)) == 'ISSEC',
+        ),
     ]
     if cd_remessa is not None:
         filtros.append(RegistroGlosa.cd_remessa == cd_remessa)
@@ -5054,7 +5062,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         select(RegistroGlosa).where(*filtros).order_by(RegistroGlosa.id)
     ):
         chave = (
-            str(processos_maida.get(registro.id) or registro.processo_controle_fatura_gab).strip().casefold(),
+            str(processos_maida.get(registro.id) or registro.processo_controle_fatura_gab or "").strip().casefold(),
             int(registro.cd_remessa),
         )
         if chave not in chaves_excluidas:
@@ -9162,6 +9170,15 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             session_oracle,
             cards_cogestao,
         )
+        # Recheck the derived identifier: a lot must not match a process search.
+        if termo_processo := str(processo_original or '').strip().casefold():
+            cards_cogestao = [
+                card for card in cards_cogestao
+                if str(card.get('convenio') or '').strip().casefold() != 'issec'
+                or termo_processo in str(
+                    (card.get('processo') or {}).get('numero_processo') or ''
+                ).strip().casefold()
+            ]
         from app_prontocardio.services.issec_card_merge import merge_issec_cards
 
         cards_cogestao = merge_issec_cards(cards_cogestao)
