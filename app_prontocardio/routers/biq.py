@@ -2288,6 +2288,8 @@ def consultar_teste_ergometrico(
     session: Session = Depends(get_session_oracle),
     competencia_faturamento: date | None = None,
 ):
+    from app_prontocardio.services.ergometrico_divergencias import CONSULTA_DIVERGENCIAS
+
     del usuario_atual
     if data_fim <= data_inicio:
         raise HTTPException(
@@ -2296,6 +2298,7 @@ def consultar_teste_ergometrico(
         )
 
     params = {"data_inicio": data_inicio, "data_fim": data_fim}
+    divergencia_rows = []
     try:
         if competencia_faturamento is not None:
             laudo_rows = (
@@ -2306,6 +2309,9 @@ def consultar_teste_ergometrico(
                 .mappings()
                 .all()
             )
+            divergencia_rows = session.execute(
+                CONSULTA_DIVERGENCIAS, params,
+            ).mappings().all()
             agenda_rows = []
             atendimento_rows = laudo_rows
             atendimento_checkup_rows = []
@@ -2348,6 +2354,7 @@ def consultar_teste_ergometrico(
             detail="Não foi possível consultar os exames de teste ergométrico no MV.",
         ) from exc
 
+    divergencias = _rows_to_dict(divergencia_rows)
     agendados = _rows_to_dict(agenda_rows)
     atendimentos = _rows_to_dict(atendimento_rows)
     atendimentos.extend(_rows_to_dict(atendimento_checkup_rows))
@@ -2387,6 +2394,7 @@ def consultar_teste_ergometrico(
             "conciliados": len(exames),
             "pendentes": len(pendentes),
             "prestadores": len(prestadores),
+            "divergencias_faturamento_sem_laudo": len(divergencias),
         },
         "prestadores": list(prestadores.values()),
         "agendados": agendados,
@@ -2394,6 +2402,7 @@ def consultar_teste_ergometrico(
         "exames": exames,
         "pendentes": pendentes,
         "total": len(exames),
+        "divergencias": divergencias,
     }
 
 
