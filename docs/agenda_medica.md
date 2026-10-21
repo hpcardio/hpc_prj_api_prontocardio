@@ -88,7 +88,7 @@ demais prestadores.
 |---|---|---|
 | `GET /agenda-medica/triagem?dias=30` | sênior ou administrador | Pacientes agendados (SoulMV, somente leitura) e decisões já tomadas |
 | `POST /agenda-medica/triagem/decisoes` | sênior | `{"cd_it_agenda_central": 1, "decisao": "senior" \| "demais" \| null}`; `null` desfaz a própria decisão |
-| `POST /agenda-medica/triagem/evolucoes` | sênior | As duas últimas evoluções médicas do paciente (documento tipo 36, fechadas, não confidenciais) |
+| `POST /agenda-medica/triagem/evolucoes` | sênior ou permissão explícita `agenda_medica_evolucoes` | As duas últimas evoluções médicas do paciente (documento tipo 36, fechadas, não confidenciais); toda consulta é auditada |
 
 - Uma decisão por agendamento; outro sênior não sobrescreve (409).
 - Decisões e consultas às evoluções ficam em `agenda_medica_eventos`.

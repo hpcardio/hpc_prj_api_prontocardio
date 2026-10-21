@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from http import HTTPStatus
 
 import pytest
+from sqlalchemy import select
 
 from app_prontocardio.agenda_medica_models import (
     AgendaMedicaEvento,
@@ -630,6 +631,35 @@ def test_admin_acompanha_mas_nao_decide(cliente, seniores):
     assert _decidir(cliente, admin, 'senior').status_code == (
         HTTPStatus.FORBIDDEN
     )
+
+
+def test_evolucoes_exigem_senior_ou_permissao_explicita(
+    cliente, session, seniores
+):
+    admin = seniores['admin']
+    negada = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': CD_PACIENTE_TRIAGEM},
+        headers=admin,
+    )
+    assert negada.status_code == HTTPStatus.FORBIDDEN
+
+    usuario = session.scalar(
+        select(Usuario).where(Usuario.email == 'admin_agenda@teste.com')
+    )
+    usuario.telas_permitidas = [
+        *usuario.telas_permitidas,
+        'agenda_medica_evolucoes',
+    ]
+    session.commit()
+
+    autorizada = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': CD_PACIENTE_TRIAGEM},
+        headers=admin,
+    )
+    assert autorizada.status_code == HTTPStatus.OK
+    assert len(autorizada.json()['evolucoes']) == 1
 
 
 def test_evolucoes_so_de_paciente_da_triagem_e_auditadas(

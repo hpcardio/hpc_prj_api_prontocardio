@@ -39,6 +39,7 @@ router = APIRouter(prefix='/agenda-medica', tags=['agenda-medica'])
 TELA_MEDICO = 'agenda_medica_medico'
 TELA_ADMIN = 'agenda_medica_admin'
 TELA_RESPONSAVEL = 'agenda_medica_responsavel'
+TELA_EVOLUCOES = 'agenda_medica_evolucoes'
 PERFIS_GESTAO = {'ti', 'administrador'}
 USUARIO_MV = 'AGENDA_MEDICA'
 # Usuário do MV registrado na geração (GERACAO_AGENDA.CD_USUARIO / FNC).
@@ -787,6 +788,36 @@ Senior = Annotated[tuple[Usuario, AgendaMedicaVinculo], Depends(medico_senior)]
 LeitorTriagem = Annotated[Usuario, Depends(acesso_triagem)]
 
 
+def acesso_evolucoes(
+    usuario: UsuarioAtual, session: SessionPostgres
+) -> Usuario:
+    """Autoriza sênior ou usuário com permissão clínica explícita.
+
+    Perfis de gestão não recebem este acesso automaticamente: o prontuário só
+    pode ser consultado quando ``agenda_medica_evolucoes`` tiver sido atribuída
+    nominalmente ao usuário.
+    """
+    vinculo = session.scalar(
+        select(AgendaMedicaVinculo).where(
+            AgendaMedicaVinculo.usuario_id == usuario.id
+        )
+    )
+    eh_senior = (
+        TELA_MEDICO in (usuario.telas_permitidas or [])
+        and vinculo is not None
+        and vinculo.nivel == 'senior'
+    )
+    acesso_explicito = TELA_EVOLUCOES in (usuario.telas_permitidas or [])
+    if not eh_senior and not acesso_explicito:
+        raise _proibido(
+            'Evoluções restritas a médicos sêniores ou usuários autorizados.'
+        )
+    return usuario
+
+
+LeitorEvolucoes = Annotated[Usuario, Depends(acesso_evolucoes)]
+
+
 def _triagem_dict(item: AgendaMedicaTriagem) -> dict:
     return {
         'cd_it_agenda_central': item.cd_it_agenda_central,
@@ -877,11 +908,10 @@ def decidir_triagem(
 @router.post('/triagem/evolucoes')
 def evolucoes_triagem(
     payload: TriagemEvolucoesInput,
-    senior: Senior,
+    usuario: LeitorEvolucoes,
     session: SessionPostgres,
     soulmv: SoulMV,
 ):
-    usuario, _ = senior
     if not soulmv.paciente_na_triagem(
         payload.cd_paciente, TRIAGEM_DIAS_MAXIMO
     ):
