@@ -4921,6 +4921,7 @@ def _duplicatas_maida_pendentes(session, ids_registros):
          WHERE g.id = ANY(:ids) AND g.sn_ativo = 'true'
            AND UPPER(BTRIM(g.convenio)) = 'ISSEC'
            AND g.origem_registro = 'triagem' AND g.dt_recurso IS NULL
+           AND g.sn_glosado = 'true'
            AND NOT EXISTS (
                SELECT 1 FROM api_prontocardio.registros_glosa_demonstrativo_ipm own
                 WHERE own.registro_glosa_id = g.id)
@@ -4932,13 +4933,19 @@ def _duplicatas_maida_pendentes(session, ids_registros):
                  ON canonical.id = x.registro_glosa_id
               WHERE canonical.sn_ativo = 'true'
                 AND canonical.cd_remessa = g.cd_remessa
+                AND canonical.cd_atendimento = g.cd_atendimento
+                AND canonical.conta = g.conta
+                AND canonical.motivo_glosa = g.motivo_glosa
                 AND UPPER(BTRIM(canonical.convenio)) = 'ISSEC'
                 AND d.origem_maida IS NOT NULL
-                AND BTRIM(d.numero_lote) = BTRIM(g.numero_lote)
+                AND BTRIM(d.numero_lote) = COALESCE(
+                    NULLIF(BTRIM(g.numero_lote), ''),
+                    NULLIF(BTRIM(g.processo_controle_fatura_gab), '')
+                )
                 AND BTRIM(d.numero_guia_senha) = BTRIM(g.guia)
                 AND BTRIM(d.codigo_servico) IN (BTRIM(g.procedimento), BTRIM(g.cd_tuss))
                 AND d.data_realizacao::date = COALESCE(g.data_lancamento, g.data_atendimento)::date
-                AND ROUND(d.valor_glosa, 2) = ROUND(g.valor_recursado, 2)
+                AND ROUND(d.valor_glosa, 2) = ROUND(COALESCE(g.valor_recursado, g.valor), 2)
            )
     """), {'ids': sorted(ids_registros)}).scalars())
 
