@@ -96,3 +96,22 @@ def unique_document_lines(rows, *, scope=()):
         if identity not in seen:
             seen.add(identity)
             yield row
+
+
+def match_maida_remittances(demonstrativos, items_by_remittance, brasindice=None):
+    """Index document lines once; each remittance sees only its own guides."""
+    by_guide = defaultdict(list)
+    for position, demo in enumerate(unique_document_lines(demonstrativos)):
+        guide = key(demo.get('numero_guia_senha'))
+        if guide:
+            by_guide[guide].append((position, demo))
+    result = {}
+    for remittance, items in items_by_remittance.items():
+        guides = {key(item.get('nr_guia')) for item in items}
+        candidates = [
+            demo for _, demo in sorted(
+                pair for guide in guides for pair in by_guide.get(guide, ())
+            )
+        ]
+        result[remittance] = list(match_maida_items(candidates, items, brasindice))
+    return result
