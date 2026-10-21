@@ -268,14 +268,17 @@ def _consultar_titulos_oracle(
     if not codigos_fornecedor:
         return []
     try:
-        rows = session.execute(
-            ORACLE_TITULOS_QUERY,
-            {
-                'codigos_fornecedor': codigos_fornecedor,
-                'data_inicio': data_inicio,
-                'data_fim': data_fim,
-            },
-        ).mappings().all()
+        rows = []
+        # Oracle supports at most 1000 expressions per IN list.
+        for inicio in range(0, len(codigos_fornecedor), 1000):
+            rows.extend(session.execute(
+                ORACLE_TITULOS_QUERY,
+                {
+                    'codigos_fornecedor': codigos_fornecedor[inicio:inicio + 1000],
+                    'data_inicio': data_inicio,
+                    'data_fim': data_fim,
+                },
+            ).mappings().all())
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -517,6 +520,7 @@ def listar_contas_pagar(
     data_fim: date | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    exportar: bool = False,
 ):
     if data_inicio and data_fim and data_inicio > data_fim:
         raise HTTPException(
@@ -598,7 +602,7 @@ def listar_contas_pagar(
     enriquecer(fornecedores)
 
     vencidos = [item for item in fornecedores if item['saldo_a_pagar'] > 0]
-    if not data_inicio and not data_fim:
+    if not exportar and not data_inicio and not data_fim:
         _registrar_snapshot(session, fornecedores)
     resumo = {
         'valor_vencido_atual': sum(
@@ -652,7 +656,7 @@ def listar_contas_pagar(
     filtrados.sort(key=_chave_prioridade_fornecedor)
     total = len(filtrados)
     inicio = (page - 1) * page_size
-    pagina = filtrados[inicio : inicio + page_size]
+    pagina = filtrados if exportar else filtrados[inicio : inicio + page_size]
     codigos_pagina = [item['codigo_fornecedor'] for item in pagina]
     titulos_pagina = _consultar_titulos_oracle(
         oracle,
@@ -741,8 +745,8 @@ def listar_contas_pagar(
             serializar(item) for item in pagina
         ],
         'total': total,
-        'page': page,
-        'total_pages': max(ceil(total / page_size), 1),
+        'page': 1 if exportar else page,
+        'total_pages': 1 if exportar else max(ceil(total / page_size), 1),
         'resumo': {
             key: _serializar_decimal(value)
             if isinstance(value, Decimal)
