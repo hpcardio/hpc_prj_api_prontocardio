@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 from jwt import decode
 
@@ -46,8 +47,7 @@ def test_link_redefinicao_usa_url_explicitada_do_frontend(monkeypatch):
     monkeypatch.setattr(autenticacao, 'settings', settings)
 
     assert autenticacao._montar_link_redefinicao('abc_123') == (
-        'https://app.exemplo.local'
-        '/autenticacao/redefinir-senha#token=abc_123'
+        'https://app.exemplo.local/autenticacao/redefinir-senha#token=abc_123'
     )
 
 
@@ -114,8 +114,7 @@ def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
 
     conteudo = smtp.mensagem.get_content()
     assert (
-        'https://app.exemplo.local'
-        '/autenticacao/redefinir-senha#token=token'
+        'https://app.exemplo.local/autenticacao/redefinir-senha#token=token'
     ) in conteudo
     assert '?token=' not in conteudo
     assert 'https://api.exemplo.local' not in conteudo
@@ -143,3 +142,15 @@ def test_token_painel_medicos_tem_audiencia_e_expiracao(
     )
     assert payload['sub'] == usuario_teste.email
     assert payload['exp'] > payload.get('iat', 0)
+
+
+def test_link_receita_certa_entrega_token_por_query(monkeypatch):
+    settings = _settings_teste(
+        FRONTEND_PASSWORD_RESET_URL='http://receitacerta.hospitalprontocardio.com.br/redefinir-senha/'
+    )
+    monkeypatch.setattr(autenticacao, 'settings', settings)
+    link = urlsplit(autenticacao._montar_link_redefinicao('token+teste/='))
+    assert link.hostname == 'receitacerta.hospitalprontocardio.com.br'
+    assert link.path == '/redefinir-senha/'
+    assert parse_qs(link.query) == {'token': ['token+teste/=']}
+    assert not link.fragment

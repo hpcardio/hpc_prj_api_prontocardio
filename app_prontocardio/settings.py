@@ -1,3 +1,4 @@
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -182,11 +183,32 @@ class Settings(BaseSettings):
 
     @property
     def frontend_password_reset_url(self) -> str:
-        if self.FRONTEND_PASSWORD_RESET_URL:
-            url = self.FRONTEND_PASSWORD_RESET_URL.strip()
-            if url:
-                return url
-
+        explicit = (self.FRONTEND_PASSWORD_RESET_URL or '').strip()
+        if self.APP_ENV.strip().casefold() in {'prod', 'production'}:
+            message = (
+                'Configure FRONTEND_PASSWORD_RESET_URL com a URL publica '
+                'da tela de redefinicao de senha.'
+            )
+            if not explicit:
+                raise ValueError(message)
+            parsed = urlsplit(explicit)
+            host = (parsed.hostname or '').rstrip('.').casefold()
+            local = host == 'localhost' or host.endswith('.localhost')
+            try:
+                address = ip_address(host)
+                local = local or address.is_loopback or address.is_unspecified
+            except ValueError:
+                pass
+            if (
+                parsed.scheme not in {'http', 'https'}
+                or not host
+                or local
+                or parsed.username
+                or parsed.password
+            ):
+                raise ValueError(message)
+        if explicit:
+            return explicit
         return (
             f'{self.FRONTEND_BASE_URL.rstrip("/")}'
             '/autenticacao/redefinir-senha'

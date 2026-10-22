@@ -8,6 +8,7 @@ services:
     environment:
       WHATSAPP_AGENDA_USUARIOS: prontogestao@hospitalprontocardio.com.br
       APP_ENV: production
+      FRONTEND_PASSWORD_RESET_URL: ${FRONTEND_PASSWORD_RESET_URL:?configure a URL publica de redefinicao de senha}
       EXPECTED_POSTGRES_HOST: ${EXPECTED_POSTGRES_HOST:?configure o host oficial}
       EXPECTED_POSTGRES_DATABASE: ${EXPECTED_POSTGRES_DATABASE:?configure o banco oficial}
     expose:
