@@ -64,6 +64,7 @@ class WhatsAppTemplateInput(BaseModel):
     nome_template: str = Field(min_length=1, max_length=512)
     idioma: str = Field(default='pt_BR', min_length=2, max_length=16)
     parametros: list[str] = Field(default_factory=list, max_length=20)
+    parametro_botao_url: str | None = Field(default=None, max_length=512)
 
 
 class WhatsAppComprovanteInput(BaseModel):
@@ -273,4 +274,5 @@ def enviar_template_whatsapp(
         nome_template=payload.nome_template,
         idioma=payload.idioma,
         parametros=payload.parametros,
+        parametro_botao_url=payload.parametro_botao_url,
     )
