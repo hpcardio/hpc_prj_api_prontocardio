@@ -132,6 +132,7 @@ SELECT codigo_fornecedor,
        SUM(valor_duplicata) AS valor_total,
        SUM(valor_honrado) AS valor_total_honrado,
        SUM(saldo) AS saldo_a_pagar,
+       SUM(CASE WHEN data_vencimento <= :hoje THEN saldo ELSE 0 END) AS valor_a_pagar_ate_hoje,
        SUM(CASE WHEN data_vencimento < TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_total_vencido,
        SUM(CASE WHEN data_vencimento >= TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_corrente,
        MIN(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN data_vencimento END) AS vencimento_mais_antigo,
@@ -224,7 +225,7 @@ def _consultar_oracle(
     try:
         rows = session.execute(
             ORACLE_FORNECEDORES_QUERY,
-            {'data_inicio': data_inicio, 'data_fim': data_fim},
+            {'data_inicio': data_inicio, 'data_fim': data_fim, 'hoje': _hoje_hospital()},
         ).mappings().all()
     except SQLAlchemyError as exc:
         raise HTTPException(
@@ -247,6 +248,7 @@ def _consultar_oracle(
             'valor_total_vencido': _decimal(row['valor_total_vencido']),
             'valor_total_honrado': _decimal(row['valor_total_honrado']),
             'saldo_a_pagar': _decimal(row['saldo_a_pagar']),
+            'valor_a_pagar_ate_hoje': _decimal(row.get('valor_a_pagar_ate_hoje')),
             'valor_corrente': _decimal(row['valor_corrente']),
             'vencimento_mais_antigo': vencimento,
             'dias_atraso': dias_atraso,
@@ -373,6 +375,7 @@ def _agrupar_fornecedores(
                 'titulos_vencidos': 0,
                 'titulos_correntes': 0,
                 'saldo_a_pagar': Decimal('0'),
+                'valor_a_pagar_ate_hoje': Decimal('0'),
                 'titulos': [],
             },
         )
@@ -380,6 +383,8 @@ def _agrupar_fornecedores(
         fornecedor['valor_total'] += titulo['valor_total']
         fornecedor['valor_total_honrado'] += valor_honrado
         fornecedor['saldo_a_pagar'] += saldo
+        if vencimento and vencimento <= hoje:
+            fornecedor['valor_a_pagar_ate_hoje'] += saldo
         if saldo > 0:
             fornecedor['total_dias_vencidos'] += dias_vencidos
             fornecedor['dias_atraso'] = max(
@@ -561,6 +566,7 @@ def listar_contas_pagar(
             'titulos_vencidos',
             'titulos_correntes',
             'saldo_a_pagar',
+            'valor_a_pagar_ate_hoje',
         }
         for fornecedor in fornecedores:
             calculado = fornecedores_manuais.get(
@@ -605,6 +611,10 @@ def listar_contas_pagar(
     if not exportar and not data_inicio and not data_fim:
         _registrar_snapshot(session, fornecedores)
     resumo = {
+        'valor_a_pagar_ate_hoje': sum(
+            (item.get('valor_a_pagar_ate_hoje', Decimal('0')) for item in fornecedores),
+            Decimal('0'),
+        ),
         'valor_vencido_atual': sum(
             (item['valor_vencido'] for item in vencidos), Decimal('0')
         ),
