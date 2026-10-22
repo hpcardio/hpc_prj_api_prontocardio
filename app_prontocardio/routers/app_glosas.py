@@ -611,23 +611,37 @@ def _resolver_filtro_processo(
 ) -> dict:
     filtros_resolvidos = dict(filtros)
     processo = str(filtros_resolvidos.pop('processo', '') or '').strip()
-    if not processo:
+    recurso = str(filtros_resolvidos.pop('processo_recurso', '') or '').strip()
+    protocolo = str(filtros_resolvidos.pop('numero_protocolo', '') or '').strip()
+    if not any((processo, recurso, protocolo)):
         return filtros_resolvidos
-    identidades = tuple(session.execute(
-        select(
-            RegistroGlosa.cd_remessa,
-            RegistroGlosa.cd_atendimento,
-            RegistroGlosa.conta,
-            RegistroGlosa.cd_lancamento,
-        ).where(
-            func.lower(
-                func.trim(RegistroGlosa.processo_controle_fatura_gab)
-            ) == processo.casefold(),
+    query = select(
+        RegistroGlosa.cd_remessa, RegistroGlosa.cd_atendimento,
+        RegistroGlosa.conta, RegistroGlosa.cd_lancamento,
+    ).where(RegistroGlosa.sn_ativo == 'true')
+    if processo or recurso:
+        query = query.where(
             RegistroGlosa.origem_registro == 'triagem',
-            RegistroGlosa.sn_ativo == 'true',
             RegistroGlosa.dt_recurso.is_not(None),
-        ).distinct()
-    ).all())
+        )
+    if processo:
+        query = query.where(func.lower(func.trim(
+            RegistroGlosa.processo_controle_fatura_gab
+        )) == processo.casefold())
+    if recurso:
+        query = query.where(func.lower(func.trim(
+            RegistroGlosa.processo_recurso
+        )) == recurso.casefold())
+    if protocolo:
+        ids = session.execute(text("""
+            SELECT DISTINCT t.registro_glosa_id
+              FROM api_prontocardio.registros_glosa_demonstrativo_ipm t
+              JOIN api_prontocardio.demonstrativo_conta_ipm d
+                ON d.id_registro = t.id_registro
+             WHERE LOWER(BTRIM(d.numero_protocolo)) = :protocolo
+        """), {'protocolo': protocolo.casefold()}).scalars().all()
+        query = query.where(RegistroGlosa.id.in_(ids))
+    identidades = tuple(session.execute(query.distinct()).all())
     filtros_resolvidos['identidades_processo'] = identidades
     return filtros_resolvidos
 

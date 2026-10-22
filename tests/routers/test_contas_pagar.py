@@ -353,6 +353,7 @@ def test_exportacao_completa_preserva_filtros_e_nao_registra_snapshot(
             'valor_total_vencido',
             'valor_total_honrado',
             'saldo_a_pagar',
+            'valor_a_pagar_ate_hoje',
             'valor_corrente',
             'novos_vencidos_7d',
         ):
@@ -387,6 +388,7 @@ def test_exportacao_completa_preserva_filtros_e_nao_registra_snapshot(
         page_size=20,
     )
     result = contas_pagar.listar_contas_pagar(**args, exportar=True)
+    assert result['resumo']['valor_a_pagar_ate_hoje'] == '2050.00'
     assert result['total'] == 150
     assert len(result['fornecedores']) == 150
     assert result['total_pages'] == 1
@@ -401,6 +403,7 @@ def test_exportacao_completa_preserva_filtros_e_nao_registra_snapshot(
     paged = contas_pagar.listar_contas_pagar(**args)
     assert len(paged['fornecedores']) == 20
     assert paged['total_pages'] == 8
+    assert paged['resumo']['valor_a_pagar_ate_hoje'] == '2050.00'
     snapshot.assert_called_once()
 
 
@@ -412,3 +415,36 @@ def test_titulos_exportacao_respeita_limite_oracle():
     assert [
         len(params['codigos_fornecedor']) for _, params in oracle.executions
     ] == [1000, 1]
+
+
+def test_total_ate_hoje_inclui_hoje_exclui_futuro_e_desconta_pagamentos(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 10, 22)
+    )
+    titulos = [
+        dict(
+            codigo_fornecedor=1,
+            nome_fornecedor='Teste',
+            codigo_parcela=n,
+            valor_total=Decimal('100'),
+            valor_honrado_oracle=Decimal('20'),
+            data_vencimento=day,
+        )
+        for n, day in enumerate(
+            (date(2026, 10, 21), date(2026, 10, 22), date(2026, 10, 23), None),
+            1,
+        )
+    ]
+    result = contas_pagar._agrupar_fornecedores(
+        titulos, {2: [{'valor_pago': Decimal('30')}]}
+    )[0]
+    assert result['valor_a_pagar_ate_hoje'] == Decimal('130')
+    assert result['valor_total_vencido'] == Decimal('80')
+    monkeypatch.setattr(
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 10, 23)
+    )
+    assert contas_pagar._agrupar_fornecedores(titulos, {})[0][
+        'valor_a_pagar_ate_hoje'
+    ] == Decimal('240')
