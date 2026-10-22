@@ -165,6 +165,7 @@ def enviar_template_whatsapp(
     nome_template: str,
     idioma: str = 'pt_BR',
     parametros: list[str] | None = None,
+    parametro_botao_url: str | None = None,
 ) -> dict[str, Any]:
     telefone_normalizado = normalizar_telefone_whatsapp(telefone)
     template: dict[str, Any] = {
@@ -181,6 +182,14 @@ def enviar_template_whatsapp(
                 ],
             }
         ]
+
+    if parametro_botao_url:
+        template.setdefault('components', []).append({
+            'type': 'button',
+            'sub_type': 'url',
+            'index': '0',
+            'parameters': [{'type': 'text', 'text': parametro_botao_url}],
+        })
 
     resposta = post_graph_messages({
         'messaging_product': 'whatsapp',
