@@ -83,12 +83,14 @@ def post_graph_messages(payload: dict[str, Any]) -> dict[str, Any]:
 def upload_whatsapp_media(*, content: bytes, mime_type: str) -> str:
     versao, phone_number_id, token = whatsapp_config()
     boundary = f'----prontocardio-{uuid.uuid4().hex}'
+    extension = 'jpg' if mime_type == 'image/jpeg' else 'png'
     body = (
         (
             f'--{boundary}\r\nContent-Disposition: form-data; '
             'name="messaging_product"\r\n\r\nwhatsapp\r\n'
             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-            'filename="comprovante.png"\r\nContent-Type: image/png\r\n\r\n'
+            f'filename="imagem.{extension}"\r\n'
+            f'Content-Type: {mime_type}\r\n\r\n'
         ).encode()
         + content
         + f'\r\n--{boundary}--\r\n'.encode()
@@ -213,31 +215,29 @@ def enviar_otp_whatsapp(
     """Envia um código usando o template de autenticação aprovado pela Meta."""
 
     telefone_normalizado = normalizar_telefone_whatsapp(telefone)
-    resposta = post_graph_messages(
-        {
-            'messaging_product': 'whatsapp',
-            'to': telefone_normalizado,
-            'type': 'template',
-            'template': {
-                'name': settings.WHATSAPP_TEMPLATE_PATIENT_OTP,
-                'language': {
-                    'code': settings.WHATSAPP_TEMPLATE_PATIENT_OTP_LANGUAGE
-                },
-                'components': [
-                    {
-                        'type': 'body',
-                        'parameters': [{'type': 'text', 'text': codigo}],
-                    },
-                    {
-                        'type': 'button',
-                        'sub_type': 'url',
-                        'index': '0',
-                        'parameters': [{'type': 'text', 'text': codigo}],
-                    },
-                ],
+    resposta = post_graph_messages({
+        'messaging_product': 'whatsapp',
+        'to': telefone_normalizado,
+        'type': 'template',
+        'template': {
+            'name': settings.WHATSAPP_TEMPLATE_PATIENT_OTP,
+            'language': {
+                'code': settings.WHATSAPP_TEMPLATE_PATIENT_OTP_LANGUAGE
             },
-        }
-    )
+            'components': [
+                {
+                    'type': 'body',
+                    'parameters': [{'type': 'text', 'text': codigo}],
+                },
+                {
+                    'type': 'button',
+                    'sub_type': 'url',
+                    'index': '0',
+                    'parameters': [{'type': 'text', 'text': codigo}],
+                },
+            ],
+        },
+    })
     return {
         'status': 'enviado',
         'telefone_final': telefone_normalizado[-4:],
@@ -259,3 +259,69 @@ def enviar_texto_whatsapp(*, telefone: str, mensagem: str) -> dict[str, Any]:
         'telefone': telefone_normalizado,
         'retorno_meta': resposta,
     }
+
+
+def enviar_midia_template_whatsapp(
+    *,
+    telefone: str,
+    nome_template: str,
+    idioma: str,
+    imagem: bytes,
+    parametros: list[str] | None = None,
+) -> dict[str, Any]:
+    mime = validar_imagem_template(imagem)
+    destination = normalizar_telefone_whatsapp(telefone)
+    media = upload_whatsapp_media(content=imagem, mime_type=mime)
+    parts = [
+        {
+            'type': 'header',
+            'parameters': [
+                {'type': 'image', 'image': {'id': media}},
+            ],
+        }
+    ]
+    if parametros:
+        parts.append({
+            'type': 'body',
+            'parameters': [
+                {'type': 'text', 'text': str(value)} for value in parametros
+            ],
+        })
+    response = post_graph_messages({
+        'messaging_product': 'whatsapp',
+        'to': destination,
+        'type': 'template',
+        'template': {
+            'name': nome_template,
+            'language': {'code': idioma},
+            'components': parts,
+        },
+    })
+    entries = response.get('messages') or []
+    identifier = entries[0].get('id') if entries else None
+    if not identifier:
+        raise HTTPException(
+            status_code=502, detail='Envio sem confirmacao da Meta.'
+        )
+    return {
+        'status': 'enviado',
+        'id_externo': str(identifier),
+        'telefone_final': destination[-4:],
+    }
+
+
+def validar_imagem_template(content: bytes) -> str:
+    if len(content) <= settings.WHATSAPP_COMPROVANTE_MAX_BYTES:
+        for signature, mime in [
+            (PNG_SIGNATURE, 'image/png'),
+            (bytes.fromhex('ffd8ff'), 'image/jpeg'),
+        ]:
+            if content.startswith(signature):
+                return mime
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            'Imagem invalida: utilize PNG ou JPEG '
+            'dentro do limite configurado.'
+        ),
+    )

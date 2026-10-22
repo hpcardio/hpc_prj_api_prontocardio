@@ -881,12 +881,17 @@ CONSULTA_DADOS_CANCELAMENTO_WHATSAPP = text(
 )
 
 
-def _enviar_confirmacao_whatsapp_agendamento(
+def _enviar_confirmacao_whatsapp_agendamento(  # noqa: PLR0911
     *,
     session: Session,
     payload: ConfirmarAgendamentoInput,
     protocolo: int,
 ) -> tuple[str | None, str | None]:
+    if not payload.enviar_confirmacao_whatsapp:
+        return (
+            'suprimido_origem',
+            'Confirmação gerenciada pelo sistema de origem.',
+        )
     if os.getenv('WHATSAPP_CONFIRMAR_AGENDAMENTO_AUTO', 'true').lower() != 'true':
         return 'desabilitado', 'Envio automatico de WhatsApp desabilitado.'
 
@@ -944,6 +949,12 @@ def _enviar_confirmacao_whatsapp_agendamento(
                 hora_texto,
                 _nome_unidade_exibicao(dados.get('ds_unidade_atendimento')),
                 str(protocolo),
+                (
+                    'R$ ' + format(payload.valor_exame, ',.2f').translate(
+                        str.maketrans(',.', '.,')
+                    ) if payload.valor_exame is not None
+                    else 'Consulte a equipe'
+                ),
             ],
         )
     except HTTPException as exc:

@@ -1,3 +1,4 @@
+import json
 from typing import Annotated, Any
 
 from fastapi import (
@@ -12,7 +13,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,9 +25,13 @@ from app_prontocardio.settings import Settings
 from app_prontocardio.whatsapp_service import (
     TELEFONE_E164_MAX_LENGTH,
     TELEFONE_E164_MIN_LENGTH,
+    validar_imagem_template,
 )
 from app_prontocardio.whatsapp_service import (
     enviar_comprovante_whatsapp as enviar_comprovante_whatsapp_service,
+)
+from app_prontocardio.whatsapp_service import (
+    enviar_midia_template_whatsapp as enviar_midia_template_whatsapp_service,
 )
 from app_prontocardio.whatsapp_service import (
     enviar_template_whatsapp as enviar_template_whatsapp_service,
@@ -75,6 +80,7 @@ class WhatsAppComprovanteInput(BaseModel):
     nome_template: str = Field(min_length=1, max_length=512)
     idioma: str = Field(default='pt_BR', min_length=2, max_length=16)
     chave_idempotencia: str = Field(min_length=8, max_length=160)
+    parametros: list[str] = Field(default_factory=list, max_length=20)
 
 
 def comprovante_form(
@@ -82,13 +88,20 @@ def comprovante_form(
     nome_template: Annotated[str, Form()],
     idioma: Annotated[str, Form()] = 'pt_BR',
     chave_idempotencia: Annotated[str, Form()] = '',
+    parametros: Annotated[str, Form()] = '[]',
 ) -> WhatsAppComprovanteInput:
-    return WhatsAppComprovanteInput(
-        telefone=telefone,
-        nome_template=nome_template,
-        idioma=idioma,
-        chave_idempotencia=chave_idempotencia,
-    )
+    try:
+        return WhatsAppComprovanteInput(
+            telefone=telefone,
+            nome_template=nome_template,
+            idioma=idioma,
+            chave_idempotencia=chave_idempotencia,
+            parametros=json.loads(parametros),
+        )
+    except (ValueError, TypeError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=422, detail='Parametros invalidos.'
+        ) from exc
 
 
 @router.post('/enviar-comprovante')
@@ -276,3 +289,86 @@ def enviar_template_whatsapp(
         parametros=payload.parametros,
         parametro_botao_url=payload.parametro_botao_url,
     )
+
+
+@router.post('/enviar-midia-template')
+async def enviar_midia_template_whatsapp(
+    usuario_atual: ValidaUsuarioAtual,
+    payload: Annotated[WhatsAppComprovanteInput, Depends(comprovante_form)],
+    arquivo: UploadFile = File(),
+    session: Session = Depends(get_session_postgres),
+) -> dict[str, Any]:
+    del usuario_atual
+    if not settings.WHATSAPP_MIDIA_TEMPLATE_ENABLED:
+        raise HTTPException(
+            status_code=503, detail='Envio de midia desabilitado.'
+        )
+    allowed = {
+        name.strip()
+        for name in settings.WHATSAPP_MIDIA_TEMPLATE_ALLOWLIST.split(',')
+    }
+    if payload.nome_template not in allowed:
+        raise HTTPException(status_code=422, detail='Template nao autorizado.')
+    content = await arquivo.read(settings.WHATSAPP_COMPROVANTE_MAX_BYTES + 1)
+    validar_imagem_template(content)
+    query = select(WhatsappEnvioIdempotente).where(
+        WhatsappEnvioIdempotente.chave == payload.chave_idempotencia,
+    )
+    record = session.scalar(query)
+    if record and record.status == 'ENVIADO':
+        return {
+            'status': 'ja_enviado',
+            'id_externo': record.id_externo,
+            'telefone_final': record.telefone_final,
+        }
+    if record and record.status != 'FALHOU':
+        raise HTTPException(
+            status_code=409, detail='Envio pendente de verificacao.'
+        )
+    if record:
+        record.status = 'PENDENTE'
+        record.erro_sanitizado = None
+    else:
+        record = WhatsappEnvioIdempotente(chave=payload.chave_idempotencia)
+        session.add(record)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        previous = session.scalar(query)
+        if previous and previous.status == 'ENVIADO':
+            return {
+                'status': 'ja_enviado',
+                'id_externo': previous.id_externo,
+                'telefone_final': previous.telefone_final,
+            }
+        raise HTTPException(
+            status_code=409, detail='Envio concorrente pendente.'
+        ) from exc
+    try:
+        result = enviar_midia_template_whatsapp_service(
+            telefone=payload.telefone,
+            nome_template=payload.nome_template,
+            idioma=payload.idioma,
+            imagem=content,
+            parametros=payload.parametros,
+        )
+    except Exception as exc:
+        record.status = (
+            'FALHOU'
+            if isinstance(exc, HTTPException)
+            and exc.status_code < status.HTTP_500_INTERNAL_SERVER_ERROR
+            else 'INCERTO'
+        )
+        record.erro_sanitizado = (
+            str(exc.detail)[:240]
+            if isinstance(exc, HTTPException)
+            else 'Falha inesperada no envio.'
+        )
+        session.commit()
+        raise
+    record.status = 'ENVIADO'
+    record.id_externo = result['id_externo']
+    record.telefone_final = result['telefone_final']
+    session.commit()
+    return result

@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
     WHATSAPP_ACCESS_TOKEN: str | None = None
     WHATSAPP_AUTO_REPLY_TEXT: str | None = None
+    WHATSAPP_MIDIA_TEMPLATE_ENABLED: bool = False
+    WHATSAPP_MIDIA_TEMPLATE_ALLOWLIST: str = "preparo_angiotc_coronariana_v1"
     WHATSAPP_COMPROVANTE_ENABLED: bool = False
     WHATSAPP_COMPROVANTE_TEMPLATE: str = 'confirmacao_agendamento_rede'
     WHATSAPP_COMPROVANTE_MAX_BYTES: int = 5 * 1024 * 1024
