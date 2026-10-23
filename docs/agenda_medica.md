@@ -88,7 +88,7 @@ demais prestadores.
 |---|---|---|
 | `GET /agenda-medica/triagem?dias=30` | sênior ou administrador | Pacientes agendados (SoulMV, somente leitura) e decisões já tomadas |
 | `POST /agenda-medica/triagem/decisoes` | sênior | `{"cd_it_agenda_central": 1, "decisao": "senior" \| "demais" \| null}`; `null` desfaz a própria decisão |
-| `POST /agenda-medica/triagem/evolucoes` | sênior | As duas últimas evoluções médicas do paciente (documento tipo 36, fechadas, não confidenciais) |
+| `POST /agenda-medica/triagem/evolucoes` | sênior ou permissão explícita `agenda_medica_evolucoes` | As duas últimas evoluções médicas do paciente (documento tipo 36, fechadas, não confidenciais); toda consulta é auditada |
 
 - Uma decisão por agendamento; outro sênior não sobrescreve (409).
 - Decisões e consultas às evoluções ficam em `agenda_medica_eventos`.
@@ -115,4 +115,30 @@ solicitação continua `PENDENTE` e a resposta é 409 com o motivo. O usuário r
 vem de `AGENDA_MEDICA_USUARIO_MV` (padrão `DBAMV`, como no job oficial).
 
 Antes de ligar em produção: primeiro teste controlado com uma oferta real num dia sem pacientes
-e conferência no SoulMV. Cancelamentos continuam sem gravação até a MV confirmar a rotina de bloqueio.
+e conferência no SoulMV.
+
+## Bloqueio da agenda após cancelamento aprovado
+
+Controlado separadamente por `AGENDA_MEDICA_MV_CANCELAMENTO_HABILITADO`
+(padrão `false`). Com a chave ligada, a aprovação do responsável institucional:
+
+1. recusa a operação se houver pacientes marcados;
+2. registra `LOG_OPERA_AGENDA_CENTRAL` como bloqueio do tipo 6,
+   **A PEDIDO DO MEDICO**, com a justificativa da solicitação;
+3. chama `DBAMV.FNC_BLOQUEIA_DESBLOQUEIA`, a mesma função oficial usada pelo
+   fluxo do SoulMV;
+4. confere que todos os horários da agenda ficaram bloqueados e só então faz
+   `COMMIT`.
+
+Falha, concorrência ou bloqueio incompleto provocam `ROLLBACK`, resposta 409 e
+mantêm a solicitação pendente. Antes de ligar a chave em produção, validar uma
+agenda futura sem pacientes no ambiente de homologação e conferir o bloqueio
+pela tela do SoulMV.
+
+### Geração automática do SoulMV (atenção)
+
+O job `SCMA_GERAR_AGENDA` (diário, 00:10) chama `PRC_SCMA_GERAR_AGENDA`, que estende para frente
+toda escala ativa (`SN_ATIVO = 'S'`) que já tenha agenda futura. Hoje ele **não gera nada**, porque
+`CONFIG_SCMA.SN_GERA_AGENDA_AMBULATORIO` está vazio (levantado em 20/10/2026, sem gerações automáticas
+nos 7 dias anteriores). Se essa configuração for ligada no SoulMV, a escala criada por uma aprovação
+passa a gerar agendas toda semana — a grade aprovada vira recorrente.

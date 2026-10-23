@@ -26,6 +26,7 @@ TELAS_SISTEMA = (
     'agenda_medica_medico',
     'agenda_medica_admin',
     'agenda_medica_responsavel',
+    'agenda_medica_evolucoes',
 )
 # Telas concedidas só por atribuição explícita (fora do padrão).
 TELAS_RESTRITAS = {
@@ -34,6 +35,7 @@ TELAS_RESTRITAS = {
     'agenda_medica_medico',
     'agenda_medica_admin',
     'agenda_medica_responsavel',
+    'agenda_medica_evolucoes',
 }
 TELAS_PADRAO = tuple(
     tela for tela in TELAS_SISTEMA if tela not in TELAS_RESTRITAS

@@ -1,14 +1,15 @@
-"""Leituras do SoulMV para a Agenda Médica (somente leitura).
+"""Integração do SoulMV para a Agenda Médica.
 
-Escalas-modelo, especialidades, conflitos de horário e agendas do prestador.
-A gravação no SoulMV não é feita aqui: `plano_geracao` descreve exatamente o
-que a rotina oficial da MV (PKG_SCMA_M_GERA_AGENDA) receberia, para revisão.
+As leituras são usadas na operação diária. As duas escritas possíveis ficam
+protegidas por chaves independentes no router e usam rotinas oficiais do MV:
+geração da grade aprovada e bloqueio da agenda após cancelamento aprovado.
 """
 
 import html
 import re
 from datetime import date
 
+import oracledb
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,44 @@ CONSULTA_ESCALA = """
       LEFT JOIN DBAMV.SETOR s ON s.CD_SETOR = e.CD_SETOR
      WHERE e.TP_ESCALA = 'A'
        AND NVL(e.SN_ATIVO, 'S') = 'S'
+"""
+
+CONSULTA_AGENDAS_ATUAIS = """
+    SELECT a.CD_AGENDA_CENTRAL AS cd_agenda_central,
+           a.CD_SETOR AS cd_setor,
+           s.NM_SETOR AS nm_setor,
+           a.CD_MULTI_EMPRESA AS cd_multi_empresa,
+           a.TP_AGENDA AS tp_agenda,
+           TO_CHAR(a.DT_AGENDA, 'YYYY-MM-DD') AS dt_agenda,
+           TO_CHAR(a.HR_INICIO, 'YYYY-MM-DD"T"HH24:MI:SS') AS hr_inicio,
+           TO_CHAR(a.HR_FIM, 'YYYY-MM-DD"T"HH24:MI:SS') AS hr_fim,
+           a.QT_ATENDIMENTO AS qt_atendimento,
+           a.QT_MARCADOS AS qt_marcados,
+           a.QT_ENCAIXES AS qt_encaixes,
+           a.QT_ENCAIXES_MARCADOS AS qt_encaixes_marcados,
+           a.SN_AGENDA_PUBLICA AS sn_agenda_publica,
+           a.SN_PERMITE_ENCAIXE_EXTRA AS sn_permite_encaixe_extra,
+           p.CD_PRESTADOR AS cd_prestador,
+           p.NM_PRESTADOR AS nm_prestador,
+           u.CD_UNIDADE_ATENDIMENTO AS cd_unidade_atendimento,
+           u.DS_UNIDADE_ATENDIMENTO AS ds_unidade_atendimento,
+           u.DS_LOCAL_UNIDADE_ATENDIMENTO AS ds_local_unidade_atendimento,
+           r.CD_RECURSO_CENTRAL AS cd_recurso_central,
+           r.DS_RECURSO_CENTRAL AS ds_recurso_central
+      FROM DBAMV.AGENDA_CENTRAL a
+      LEFT JOIN DBAMV.PRESTADOR p ON p.CD_PRESTADOR = a.CD_PRESTADOR
+      LEFT JOIN DBAMV.UNIDADE_ATENDIMENTO u
+        ON u.CD_UNIDADE_ATENDIMENTO = a.CD_UNIDADE_ATENDIMENTO
+      LEFT JOIN DBAMV.RECURSO_CENTRAL r
+        ON r.CD_RECURSO_CENTRAL = a.CD_RECURSO_CENTRAL
+      LEFT JOIN DBAMV.SETOR s ON s.CD_SETOR = a.CD_SETOR
+     WHERE a.DT_AGENDA >= TRUNC(SYSDATE)
+       AND a.DT_AGENDA < TRUNC(SYSDATE) + :dias + 1
+       AND NVL(a.SN_ATIVO, 'S') = 'S'
+       AND NVL(a.CD_PRESTADOR, -1) NOT IN (
+            SELECT g.CD_PRESTADOR FROM DBAMV.PRESTADOR g
+             WHERE UPPER(g.NM_PRESTADOR) LIKE '%GENERIC%')
+     ORDER BY a.DT_AGENDA, a.HR_INICIO, a.CD_AGENDA_CENTRAL
 """
 
 
@@ -369,8 +408,12 @@ class GeracaoAgendaErro(Exception):
     """A geração oficial não criou a agenda; nada foi gravado (rollback)."""
 
 
+class BloqueioAgendaErro(Exception):
+    """O bloqueio oficial falhou; nada foi gravado (rollback)."""
+
+
 class AgendaMedicaSoulMV:
-    """Consultas somente leitura ao SoulMV."""
+    """Consultas e operações transacionais protegidas no SoulMV."""
 
     def __init__(self, session: Session):
         self.session = session
@@ -405,6 +448,10 @@ class AgendaMedicaSoulMV:
             'e.HR_INICIO',
             binds,
         )
+
+    def agendas_atuais(self, dias: int) -> list[dict]:
+        """Agendas ativas lidas no momento da requisição, sem pacientes."""
+        return self._varias(CONSULTA_AGENDAS_ATUAIS, {'dias': dias})
 
     def prestador(self, cd_prestador: int) -> dict | None:
         return self._uma(
@@ -639,6 +686,123 @@ class AgendaMedicaSoulMV:
             'cd_geracao_agenda': cd_geracao,
             'cd_agenda_central': agendas,
             'data_agenda': data_agenda.isoformat(),
+        }
+
+    def bloquear_agenda_aprovada(
+        self,
+        cd_agenda_central: int,
+        motivo: str,
+        usuario_mv: str,
+    ) -> dict:
+        """Bloqueia toda a agenda pela função oficial do SoulMV.
+
+        Registra a operação como ``A PEDIDO DO MEDICO`` (tipo 6) e chama
+        ``DBAMV.FNC_BLOQUEIA_DESBLOQUEIA``. A conferência final e o COMMIT
+        acontecem na mesma transação; qualquer divergência causa rollback.
+        """
+        connection = self.session.connection().connection
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT A.HR_INICIO, A.HR_FIM, A.CD_MULTI_EMPRESA,
+                       NVL(A.QT_MARCADOS, 0),
+                       (SELECT COUNT(*)
+                          FROM DBAMV.IT_AGENDA_CENTRAL I
+                         WHERE I.CD_AGENDA_CENTRAL = A.CD_AGENDA_CENTRAL)
+                  FROM DBAMV.AGENDA_CENTRAL A
+                 WHERE A.CD_AGENDA_CENTRAL = :cd_agenda
+                   FOR UPDATE NOWAIT
+                """,
+                cd_agenda=cd_agenda_central,
+            )
+            agenda = cursor.fetchone()
+            if agenda is None:
+                raise BloqueioAgendaErro('Agenda não encontrada no SoulMV.')
+            hr_inicio, hr_fim, empresa, marcados, total_horarios = agenda
+            if marcados:
+                raise BloqueioAgendaErro(
+                    f'Há {marcados} paciente(s) marcado(s). Remaneje os '
+                    'pacientes antes de bloquear a agenda.'
+                )
+            if not total_horarios:
+                raise BloqueioAgendaErro(
+                    'A agenda não possui horários que possam ser bloqueados.'
+                )
+
+            cursor.execute(
+                'SELECT DBAMV.SEQ_LOG_OPERA_AGENDA_CENTRAL.NEXTVAL FROM DUAL'
+            )
+            cd_log = cursor.fetchone()[0]
+            cursor.callproc('DBAMV.PKG_MV2000.ATRIBUI_EMPRESA', [empresa])
+            cursor.execute(
+                """
+                INSERT INTO DBAMV.LOG_OPERA_AGENDA_CENTRAL (
+                    CD_LOG_OPERA_AGENDA, DT_OPERA_AGENDA, TP_OPERACAO,
+                    CD_AGENDA_CENTRAL, CD_USUARIO, HR_INICIO_OPERACAO,
+                    HR_FIM_OPERACAO, DS_MOTIVO, CD_MULTI_EMPRESA,
+                    CD_TIPO_BLOQUEIO, DS_TELA)
+                VALUES (
+                    :cd_log, SYSDATE, 'B', :cd_agenda, :usuario,
+                    :hr_inicio, :hr_fim, :motivo, :empresa, 6,
+                    'AGENDA_MEDICA_API')
+                """,
+                cd_log=cd_log,
+                cd_agenda=cd_agenda_central,
+                usuario=usuario_mv,
+                hr_inicio=hr_inicio,
+                hr_fim=hr_fim,
+                motivo=motivo[:200],
+                empresa=empresa,
+            )
+            mensagem = cursor.var(str, 4000)
+            agendas_com_paciente = cursor.var(oracledb.DB_TYPE_CLOB)
+            retorno = cursor.callfunc(
+                'DBAMV.FNC_BLOQUEIA_DESBLOQUEIA',
+                int,
+                [
+                    cd_log,
+                    cd_agenda_central,
+                    hr_inicio,
+                    hr_fim,
+                    mensagem,
+                    agendas_com_paciente,
+                ],
+            )
+            if retorno != 1:
+                raise BloqueioAgendaErro(
+                    f'O SoulMV não bloqueou a agenda (retorno {retorno}): '
+                    f'{mensagem.getvalue() or "sem mensagem"}'
+                )
+            cursor.execute(
+                """
+                SELECT COUNT(*),
+                       SUM(CASE WHEN NVL(SN_BLOQUEADO, 'N') = 'S'
+                                THEN 1 ELSE 0 END)
+                  FROM DBAMV.IT_AGENDA_CENTRAL
+                 WHERE CD_AGENDA_CENTRAL = :cd_agenda
+                """,
+                cd_agenda=cd_agenda_central,
+            )
+            total, bloqueados = cursor.fetchone()
+            if total == 0 or bloqueados != total:
+                raise BloqueioAgendaErro(
+                    f'Bloqueio incompleto: {bloqueados or 0} de {total or 0} '
+                    'horários foram bloqueados.'
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+        return {
+            'modo': 'gravado',
+            'gravado_no_soulmv': True,
+            'cd_agenda_central': cd_agenda_central,
+            'cd_log_opera_agenda': cd_log,
+            'horarios_bloqueados': bloqueados,
+            'tipo_bloqueio': 'A PEDIDO DO MEDICO',
         }
 
     def triagem_pacientes(self, dias: int) -> list[dict]:

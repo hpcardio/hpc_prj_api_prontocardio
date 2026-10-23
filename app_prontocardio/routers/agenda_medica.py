@@ -1,8 +1,8 @@
 """Agenda Médica: ofertas de grade, pedidos dos médicos e decisões.
 
-Os pedidos ficam no PostgreSQL da API até a decisão. A gravação no SoulMV não
-é feita por este módulo: a aprovação registra a decisão e devolve o plano
-exato do que a rotina oficial da MV receberia (ver plano_geracao).
+Os pedidos ficam no PostgreSQL da API até a decisão. Quando a chave
+transacional está habilitada, a aprovação administrativa executa a rotina
+oficial da MV; com a chave desligada, devolve apenas o plano técnico.
 """
 
 import os
@@ -28,6 +28,7 @@ from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.agenda_medica_soulmv import (
     DIAS_SEMANA,
     AgendaMedicaSoulMV,
+    BloqueioAgendaErro,
     GeracaoAgendaErro,
     plano_geracao,
     tp_dia_semana_de,
@@ -38,6 +39,7 @@ router = APIRouter(prefix='/agenda-medica', tags=['agenda-medica'])
 TELA_MEDICO = 'agenda_medica_medico'
 TELA_ADMIN = 'agenda_medica_admin'
 TELA_RESPONSAVEL = 'agenda_medica_responsavel'
+TELA_EVOLUCOES = 'agenda_medica_evolucoes'
 PERFIS_GESTAO = {'ti', 'administrador'}
 USUARIO_MV = 'AGENDA_MEDICA'
 # Usuário do MV registrado na geração (GERACAO_AGENDA.CD_USUARIO / FNC).
@@ -48,6 +50,14 @@ def gravacao_soulmv_habilitada() -> bool:
     """Chave própria da Agenda Médica; começa desligada."""
     return (
         os.getenv('AGENDA_MEDICA_MV_GRAVACAO_HABILITADA', 'false').lower()
+        == 'true'
+    )
+
+
+def cancelamento_soulmv_habilitado() -> bool:
+    """Chave independente para o bloqueio de agendas após aprovação."""
+    return (
+        os.getenv('AGENDA_MEDICA_MV_CANCELAMENTO_HABILITADO', 'false').lower()
         == 'true'
     )
 
@@ -245,19 +255,15 @@ def quem_sou(usuario: Leitor, session: SessionPostgres):
 
 @router.get('/status')
 def status_agenda_medica(_: Leitor):
-    if gravacao_soulmv_habilitada():
-        return {
-            'gravacao_soulmv': True,
-            'mensagem': (
-                'Aprovar uma grade gera a agenda do médico no SoulMV pela '
-                'rotina oficial. Cancelamentos ainda dependem da MV.'
-            ),
-        }
+    grade = gravacao_soulmv_habilitada()
+    cancelamento = cancelamento_soulmv_habilitado()
     return {
-        'gravacao_soulmv': False,
+        'gravacao_soulmv': grade,
+        'cancelamento_soulmv': cancelamento,
         'mensagem': (
-            'Decisões registradas na API. A gravação no SoulMV está '
-            'desligada: a aprovação devolve o plano.'
+            f'Criação de grade: {"habilitada" if grade else "protegida"}. '
+            f'Bloqueio após cancelamento: '
+            f'{"habilitado" if cancelamento else "protegido"}.'
         ),
     }
 
@@ -270,6 +276,37 @@ def listar_escalas_modelo(
     tp_dia_semana: int | None = Query(default=None, ge=1, le=7),
 ):
     return {'escalas': soulmv.escalas_modelo(cd_unidade, tp_dia_semana)}
+
+
+@router.get('/agendas')
+def listar_agendas_atuais(
+    _: Leitor,
+    soulmv: SoulMV,
+    dias: int = Query(default=30, ge=1, le=90),
+):
+    """Visão operacional atual do SoulMV, consultada a cada carregamento."""
+    agendas = soulmv.agendas_atuais(dias)
+    vagas = sum(int(item.get('qt_atendimento') or 0) for item in agendas)
+    marcados = sum(int(item.get('qt_marcados') or 0) for item in agendas)
+    livres = sum(
+        max(
+            int(item.get('qt_atendimento') or 0)
+            - int(item.get('qt_marcados') or 0),
+            0,
+        )
+        for item in agendas
+    )
+    return {
+        'consultado_em': datetime.now().isoformat(),
+        'dias': dias,
+        'summary': {
+            'agendas': len(agendas),
+            'vagas_configuradas': vagas,
+            'horarios_marcados': marcados,
+            'vagas_livres': livres,
+        },
+        'agendas': agendas,
+    }
 
 
 # ---------------------------------------------------------------- vínculos
@@ -591,6 +628,40 @@ def _resultado_aprovacao(
         raise _conflito({'pendencias': [str(erro)]}) from erro
 
 
+def _resultado_cancelamento(
+    pedido: AgendaMedicaSolicitacao,
+    soulmv: AgendaMedicaSoulMV,
+) -> dict:
+    agenda = soulmv.agenda(pedido.cd_agenda_central)
+    if agenda is None:
+        raise _nao_encontrado('Agenda não encontrada no SoulMV.')
+    if agenda['qt_marcados'] > 0:
+        raise _conflito({
+            'pendencias': [
+                f'Há {agenda["qt_marcados"]} paciente(s) marcado(s). '
+                'Remaneje os pacientes antes de cancelar.'
+            ]
+        })
+    if not cancelamento_soulmv_habilitado():
+        return {
+            'modo': 'protegido',
+            'gravado_no_soulmv': False,
+            'orientacao': (
+                'A rotina oficial de bloqueio foi identificada, mas a chave '
+                'transacional de cancelamento está desligada.'
+            ),
+            'cd_agenda_central': pedido.cd_agenda_central,
+        }
+    try:
+        return soulmv.bloquear_agenda_aprovada(
+            pedido.cd_agenda_central,
+            pedido.motivo,
+            USUARIO_MV_GRAVACAO,
+        )
+    except BloqueioAgendaErro as erro:
+        raise _conflito({'pendencias': [str(erro)]}) from erro
+
+
 @router.post('/solicitacoes/{solicitacao_id}/decisao')
 def decidir_solicitacao(
     solicitacao_id: int,
@@ -621,25 +692,7 @@ def decidir_solicitacao(
         oferta.status = 'PREENCHIDA'
         status = 'APROVADA'
     else:
-        agenda = soulmv.agenda(pedido.cd_agenda_central)
-        if agenda is None:
-            raise _nao_encontrado('Agenda não encontrada no SoulMV.')
-        if agenda['qt_marcados'] > 0:
-            raise _conflito({
-                'pendencias': [
-                    f'Há {agenda["qt_marcados"]} paciente(s) marcado(s). '
-                    'Remaneje os pacientes antes de cancelar.'
-                ]
-            })
-        resultado = {
-            'modo': 'simulacao',
-            'gravado_no_soulmv': False,
-            'orientacao': (
-                'Bloquear a agenda pela tela do SoulMV até a confirmação '
-                'da rotina oficial de bloqueio com a MV.'
-            ),
-            'cd_agenda_central': pedido.cd_agenda_central,
-        }
+        resultado = _resultado_cancelamento(pedido, soulmv)
         status = 'APROVADA'
 
     pedido.status = status
@@ -735,6 +788,36 @@ Senior = Annotated[tuple[Usuario, AgendaMedicaVinculo], Depends(medico_senior)]
 LeitorTriagem = Annotated[Usuario, Depends(acesso_triagem)]
 
 
+def acesso_evolucoes(
+    usuario: UsuarioAtual, session: SessionPostgres
+) -> Usuario:
+    """Autoriza sênior ou usuário com permissão clínica explícita.
+
+    Perfis de gestão não recebem este acesso automaticamente: o prontuário só
+    pode ser consultado quando ``agenda_medica_evolucoes`` tiver sido atribuída
+    nominalmente ao usuário.
+    """
+    vinculo = session.scalar(
+        select(AgendaMedicaVinculo).where(
+            AgendaMedicaVinculo.usuario_id == usuario.id
+        )
+    )
+    eh_senior = (
+        TELA_MEDICO in (usuario.telas_permitidas or [])
+        and vinculo is not None
+        and vinculo.nivel == 'senior'
+    )
+    acesso_explicito = TELA_EVOLUCOES in (usuario.telas_permitidas or [])
+    if not eh_senior and not acesso_explicito:
+        raise _proibido(
+            'Evoluções restritas a médicos sêniores ou usuários autorizados.'
+        )
+    return usuario
+
+
+LeitorEvolucoes = Annotated[Usuario, Depends(acesso_evolucoes)]
+
+
 def _triagem_dict(item: AgendaMedicaTriagem) -> dict:
     return {
         'cd_it_agenda_central': item.cd_it_agenda_central,
@@ -825,11 +908,10 @@ def decidir_triagem(
 @router.post('/triagem/evolucoes')
 def evolucoes_triagem(
     payload: TriagemEvolucoesInput,
-    senior: Senior,
+    usuario: LeitorEvolucoes,
     session: SessionPostgres,
     soulmv: SoulMV,
 ):
-    usuario, _ = senior
     if not soulmv.paciente_na_triagem(
         payload.cd_paciente, TRIAGEM_DIAS_MAXIMO
     ):

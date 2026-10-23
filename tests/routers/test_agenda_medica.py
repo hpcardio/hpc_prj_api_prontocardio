@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from http import HTTPStatus
 
 import pytest
+from sqlalchemy import select
 
 from app_prontocardio.agenda_medica_models import (
     AgendaMedicaEvento,
@@ -13,6 +14,7 @@ from app_prontocardio.permissions import TELAS_PADRAO
 from app_prontocardio.routers.agenda_medica import get_soulmv_agenda_medica
 from app_prontocardio.security import gera_hash_senha
 from app_prontocardio.services.agenda_medica_soulmv import (
+    BloqueioAgendaErro,
     GeracaoAgendaErro,
     dias_geracao,
     texto_evolucao,
@@ -24,6 +26,7 @@ CD_PRESTADOR = 245
 CD_ESCALA = 757
 CD_AGENDA = 55211
 CD_SETOR_CLINICA = 56
+DIAS_AGENDAS = 30
 
 
 class SoulMVFalso:
@@ -32,6 +35,7 @@ class SoulMVFalso:
     def __init__(self):
         self.conflitos_retorno = []
         self.marcados = 0
+        self.bloqueios = []
 
     def escala_modelo(self, cd_escala):
         if cd_escala != CD_ESCALA:
@@ -56,6 +60,25 @@ class SoulMVFalso:
         return [self.escala_modelo(CD_ESCALA)]
 
     @staticmethod
+    def agendas_atuais(dias):
+        assert dias == DIAS_AGENDAS
+        return [
+            {
+                'cd_agenda_central': CD_AGENDA,
+                'tp_agenda': 'A',
+                'dt_agenda': DATA_FUTURA.isoformat(),
+                'hr_inicio': f'{DATA_FUTURA.isoformat()}T08:00:00',
+                'hr_fim': f'{DATA_FUTURA.isoformat()}T12:00:00',
+                'qt_atendimento': 8,
+                'qt_marcados': 3,
+                'cd_prestador': CD_PRESTADOR,
+                'nm_prestador': 'DR TESTE',
+                'cd_unidade_atendimento': 1,
+                'ds_unidade_atendimento': 'CLINICA PRONTOCARDIO SAUDE',
+            }
+        ]
+
+    @staticmethod
     def prestador(cd_prestador):
         return {'cd_prestador': cd_prestador, 'nm_prestador': 'DR TESTE'}
 
@@ -78,6 +101,15 @@ class SoulMVFalso:
             'qt_atendimento': 18,
             'qt_marcados': self.marcados,
             'ds_unidade_atendimento': 'UNIDADE DIAGNOSTICO 2',
+        }
+
+    def bloquear_agenda_aprovada(self, cd_agenda, motivo, usuario_mv):
+        self.bloqueios.append((cd_agenda, motivo, usuario_mv))
+        return {
+            'modo': 'gravado',
+            'gravado_no_soulmv': True,
+            'cd_agenda_central': cd_agenda,
+            'horarios_bloqueados': 8,
         }
 
 
@@ -188,6 +220,21 @@ def test_status_informa_que_soulmv_nao_e_gravado(cliente, perfis):
     resposta = cliente.get('/agenda-medica/status', headers=perfis['medico'])
     assert resposta.status_code == HTTPStatus.OK
     assert resposta.json()['gravacao_soulmv'] is False
+    assert resposta.json()['cancelamento_soulmv'] is False
+
+
+def test_agendas_sao_consultadas_no_momento_da_requisicao(cliente, perfis):
+    resposta = cliente.get('/agenda-medica/agendas', headers=perfis['medico'])
+    assert resposta.status_code == HTTPStatus.OK
+    dados = resposta.json()
+    assert dados['dias'] == DIAS_AGENDAS
+    assert dados['summary'] == {
+        'agendas': 1,
+        'vagas_configuradas': 8,
+        'horarios_marcados': 3,
+        'vagas_livres': 5,
+    }
+    assert dados['agendas'][0]['cd_agenda_central'] == CD_AGENDA
 
 
 def test_oferta_em_dia_diferente_da_escala_e_recusada(cliente, perfis):
@@ -370,6 +417,53 @@ def test_cancelamento_sem_paciente_exige_responsavel(cliente, perfis):
     assert resultado['gravado_no_soulmv'] is False
 
 
+def test_cancelamento_habilitado_bloqueia_agenda_no_soulmv(
+    cliente, perfis, soulmv, monkeypatch
+):
+    monkeypatch.setenv('AGENDA_MEDICA_MV_CANCELAMENTO_HABILITADO', 'true')
+    pedido = cliente.post(
+        '/agenda-medica/cancelamentos',
+        json={'cd_agenda_central': CD_AGENDA, 'motivo': 'Congresso médico'},
+        headers=perfis['medico'],
+    ).json()
+    decisao = cliente.post(
+        f'/agenda-medica/solicitacoes/{pedido["id"]}/decisao',
+        json={'acao': 'aprovar'},
+        headers=perfis['resp'],
+    )
+    assert decisao.status_code == HTTPStatus.OK
+    assert decisao.json()['resultado_mv']['gravado_no_soulmv'] is True
+    assert soulmv.bloqueios == [
+        (CD_AGENDA, 'Congresso médico', 'DBAMV')
+    ]
+
+
+def test_falha_no_bloqueio_mantem_cancelamento_pendente(
+    cliente, perfis, soulmv, monkeypatch
+):
+    monkeypatch.setenv('AGENDA_MEDICA_MV_CANCELAMENTO_HABILITADO', 'true')
+
+    def falhar(*_):
+        raise BloqueioAgendaErro('Bloqueio incompleto: 7 de 8 horários.')
+
+    soulmv.bloquear_agenda_aprovada = falhar
+    pedido = cliente.post(
+        '/agenda-medica/cancelamentos',
+        json={'cd_agenda_central': CD_AGENDA, 'motivo': 'Congresso médico'},
+        headers=perfis['medico'],
+    ).json()
+    decisao = cliente.post(
+        f'/agenda-medica/solicitacoes/{pedido["id"]}/decisao',
+        json={'acao': 'aprovar'},
+        headers=perfis['resp'],
+    )
+    assert decisao.status_code == HTTPStatus.CONFLICT
+    lista = cliente.get(
+        '/agenda-medica/solicitacoes', headers=perfis['medico']
+    ).json()
+    assert lista['solicitacoes'][0]['status'] == 'PENDENTE'
+
+
 def test_medico_nao_cancela_agenda_de_outro_prestador(cliente, perfis):
     resposta = cliente.post(
         '/agenda-medica/cancelamentos',
@@ -537,6 +631,35 @@ def test_admin_acompanha_mas_nao_decide(cliente, seniores):
     assert _decidir(cliente, admin, 'senior').status_code == (
         HTTPStatus.FORBIDDEN
     )
+
+
+def test_evolucoes_exigem_senior_ou_permissao_explicita(
+    cliente, session, seniores
+):
+    admin = seniores['admin']
+    negada = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': CD_PACIENTE_TRIAGEM},
+        headers=admin,
+    )
+    assert negada.status_code == HTTPStatus.FORBIDDEN
+
+    usuario = session.scalar(
+        select(Usuario).where(Usuario.email == 'admin_agenda@teste.com')
+    )
+    usuario.telas_permitidas = [
+        *usuario.telas_permitidas,
+        'agenda_medica_evolucoes',
+    ]
+    session.commit()
+
+    autorizada = cliente.post(
+        '/agenda-medica/triagem/evolucoes',
+        json={'cd_paciente': CD_PACIENTE_TRIAGEM},
+        headers=admin,
+    )
+    assert autorizada.status_code == HTTPStatus.OK
+    assert len(autorizada.json()['evolucoes']) == 1
 
 
 def test_evolucoes_so_de_paciente_da_triagem_e_auditadas(
