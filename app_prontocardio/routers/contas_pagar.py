@@ -8,13 +8,19 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, field_validator
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import Usuario
+from app_prontocardio.payables_priority import (
+    age_level,
+    build_matrix,
+    classification,
+)
 from app_prontocardio.security import valida_token_usuario_atual
 
 router = APIRouter(
@@ -83,7 +89,22 @@ class PagamentoTituloInput(BaseModel):
 
 
 class CriticidadeFornecedorInput(BaseModel):
-    critico: bool
+    critico: bool | None = None
+    nivel_criticidade: int | None = Field(
+        default=None, ge=1, le=5, strict=True
+    )
+    justificativa: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode='after')
+    def validar_classificacao(self):
+        if self.nivel_criticidade is None and self.critico is None:
+            raise ValueError('Informe a classificação.')
+        if self.nivel_criticidade is not None:
+            if not self.justificativa or not self.justificativa.strip():
+                raise ValueError('Informe a justificativa da classificação.')
+            self.justificativa = self.justificativa.strip()
+            self.critico = self.nivel_criticidade > 1
+        return self
 
 
 ORACLE_FORNECEDORES_QUERY = text("""
@@ -223,10 +244,19 @@ def _consultar_oracle(
     data_fim: date | None = None,
 ) -> list[dict]:
     try:
-        rows = session.execute(
-            ORACLE_FORNECEDORES_QUERY,
-            {'data_inicio': data_inicio, 'data_fim': data_fim, 'hoje': _hoje_hospital()},
-        ).mappings().all()
+        rows = (
+            session
+            .execute(
+                ORACLE_FORNECEDORES_QUERY,
+                {
+                    'data_inicio': data_inicio,
+                    'data_fim': data_fim,
+                    'hoje': _hoje_hospital(),
+                },
+            )
+            .mappings()
+            .all()
+        )
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -238,9 +268,7 @@ def _consultar_oracle(
         if row['codigo_fornecedor'] is None:
             continue
         vencimento = _normalizar_data(row['vencimento_mais_antigo'])
-        dias_atraso = (
-            max((hoje - vencimento).days, 0) if vencimento else 0
-        )
+        dias_atraso = max((hoje - vencimento).days, 0) if vencimento else 0
         resultado.append({
             'codigo_fornecedor': int(row['codigo_fornecedor']),
             'nome_fornecedor': row['nome_fornecedor'] or 'Fornecedor sem nome',
@@ -248,7 +276,9 @@ def _consultar_oracle(
             'valor_total_vencido': _decimal(row['valor_total_vencido']),
             'valor_total_honrado': _decimal(row['valor_total_honrado']),
             'saldo_a_pagar': _decimal(row['saldo_a_pagar']),
-            'valor_a_pagar_ate_hoje': _decimal(row.get('valor_a_pagar_ate_hoje')),
+            'valor_a_pagar_ate_hoje': _decimal(
+                row.get('valor_a_pagar_ate_hoje')
+            ),
             'valor_corrente': _decimal(row['valor_corrente']),
             'vencimento_mais_antigo': vencimento,
             'dias_atraso': dias_atraso,
@@ -273,14 +303,21 @@ def _consultar_titulos_oracle(
         rows = []
         # Oracle supports at most 1000 expressions per IN list.
         for inicio in range(0, len(codigos_fornecedor), 1000):
-            rows.extend(session.execute(
-                ORACLE_TITULOS_QUERY,
-                {
-                    'codigos_fornecedor': codigos_fornecedor[inicio:inicio + 1000],
-                    'data_inicio': data_inicio,
-                    'data_fim': data_fim,
-                },
-            ).mappings().all())
+            rows.extend(
+                session
+                .execute(
+                    ORACLE_TITULOS_QUERY,
+                    {
+                        'codigos_fornecedor': codigos_fornecedor[
+                            inicio : inicio + 1000
+                        ],
+                        'data_inicio': data_inicio,
+                        'data_fim': data_fim,
+                    },
+                )
+                .mappings()
+                .all()
+            )
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -288,7 +325,10 @@ def _consultar_titulos_oracle(
         ) from exc
     resultado = []
     for row in rows:
-        if row['codigo_fornecedor'] is None or row['codigo_parcela_pk'] is None:
+        if (
+            row['codigo_fornecedor'] is None
+            or row['codigo_parcela_pk'] is None
+        ):
             continue
         resultado.append({
             'codigo_fornecedor': int(row['codigo_fornecedor']),
@@ -305,9 +345,7 @@ def _consultar_titulos_oracle(
             'valor_total': _decimal(row['valor_duplicata']),
             'data_vencimento': _normalizar_data(row['data_vencimento']),
             'tipo_quitacao': row['tipo_quitacao'],
-            'valor_honrado_oracle': _decimal(
-                row['valor_honrado_oracle']
-            ),
+            'valor_honrado_oracle': _decimal(row['valor_honrado_oracle']),
         })
     return resultado
 
@@ -346,11 +384,7 @@ def _agrupar_fornecedores(
         )
         saldo = max(titulo['valor_total'] - valor_honrado, Decimal('0'))
         vencimento = titulo['data_vencimento']
-        dias_vencidos = (
-            max((hoje - vencimento).days, 0)
-            if vencimento
-            else 0
-        )
+        dias_vencidos = max((hoje - vencimento).days, 0) if vencimento else 0
         titulo.update({
             'valor_honrado_manual': valor_manual,
             'valor_total_honrado': valor_honrado,
@@ -415,7 +449,7 @@ def _agrupar_fornecedores(
 
 def _chave_prioridade_fornecedor(item: dict):
     return (
-        not item['critico'],
+        -(item.get('nivel_criticidade') or (5 if item['critico'] else 1)),
         -item['dias_atraso'],
         -item['valor_total_vencido'],
     )
@@ -424,9 +458,10 @@ def _chave_prioridade_fornecedor(item: dict):
 def _tratamentos(session: Session) -> dict[int, dict]:
     rows = session.execute(
         text("""
-        SELECT t.*, u.nome AS usuario_nome
+        SELECT t.*, u.nome AS usuario_nome, uc.nome AS classificado_por
           FROM api_prontocardio.contas_pagar_tratamentos t
           JOIN api_prontocardio.usuarios_api u ON u.id = t.usuario_id
+          LEFT JOIN api_prontocardio.usuarios_api uc ON uc.id = t.usuario_criticidade_id
     """)
     ).mappings()
     return {int(row['codigo_fornecedor']): dict(row) for row in rows}
@@ -513,6 +548,84 @@ def _valor_vencido_inicio_acompanhamento(
     return _decimal(valor) if valor is not None else None
 
 
+def _filtrar_prioridade(
+    filtrados,
+    somente_vencidos,
+    nivel_criticidade,
+    faixa_atraso,
+    oracle,
+    pagamentos_por_titulo,
+    data_inicio,
+    data_fim,
+):
+    if somente_vencidos:
+        filtrados = [
+            item for item in filtrados if item['valor_total_vencido'] > 0
+        ]
+    if nivel_criticidade == 'pendente':
+        filtrados = [
+            item for item in filtrados if item['criticidade_pendente']
+        ]
+    elif nivel_criticidade != 'todos':
+        filtrados = [
+            item
+            for item in filtrados
+            if item['nivel_criticidade'] == int(nivel_criticidade)
+        ]
+    detalhes_filtrados = None
+    if faixa_atraso != 'todos':
+        titulos_faixa = _consultar_titulos_oracle(
+            oracle,
+            [item['codigo_fornecedor'] for item in filtrados],
+            data_inicio=data_inicio,
+            data_fim=data_fim,
+        )
+        detalhes_filtrados = {
+            item['codigo_fornecedor']: [
+                titulo
+                for titulo in item['titulos']
+                if titulo['saldo_a_pagar'] > 0
+                and age_level(titulo['dias_vencidos']) == int(faixa_atraso)
+            ]
+            for item in _agrupar_fornecedores(
+                titulos_faixa, pagamentos_por_titulo
+            )
+        }
+        filtrados = [
+            item
+            for item in filtrados
+            if detalhes_filtrados.get(item['codigo_fornecedor'])
+        ]
+    filtrados.sort(key=_chave_prioridade_fornecedor)
+    return filtrados, detalhes_filtrados
+
+
+def _enriquecer_fornecedores(itens, tratamentos):
+    for item in itens:
+        tratamento = tratamentos.get(item['codigo_fornecedor'], {})
+        item.update({
+            'critico': bool(tratamento.get('critico', False)),
+            'pagamento_imediato': _decimal(
+                tratamento.get('pagamento_imediato')
+            ),
+            'status': tratamento.get('status') or 'PENDENTE',
+            'responsavel': tratamento.get('responsavel'),
+            'proxima_acao': tratamento.get('proxima_acao'),
+            'data_proxima_acao': tratamento.get('data_proxima_acao'),
+            'condicao_negociada': tratamento.get('condicao_negociada'),
+            'observacao': tratamento.get('observacao'),
+            'usuario_atualizacao': tratamento.get('usuario_nome'),
+            'data_atualizacao': tratamento.get('data_atualizacao'),
+        })
+        item.update(classification(tratamento))
+        item['faixa_atraso'] = age_level(item['dias_atraso'])
+        item['saldo_negociar'] = max(
+            item['valor_total_vencido'] - item['pagamento_imediato'],
+            Decimal('0'),
+        )
+        item['valor_vencido'] = item['valor_total_vencido']
+
+
 @router.get('')
 def listar_contas_pagar(
     _: UsuarioAtual,
@@ -526,6 +639,11 @@ def listar_contas_pagar(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     exportar: bool = False,
+    nivel_criticidade: Literal[
+        'todos', 'pendente', '1', '2', '3', '4', '5'
+    ] = 'todos',
+    faixa_atraso: Literal['todos', '1', '2', '3', '4', '5'] = 'todos',
+    somente_vencidos: bool = False,
 ):
     if data_inicio and data_fim and data_inicio > data_fim:
         raise HTTPException(
@@ -574,45 +692,21 @@ def listar_contas_pagar(
             )
             if calculado:
                 fornecedor.update({
-                    campo: calculado[campo]
-                    for campo in campos_calculados
+                    campo: calculado[campo] for campo in campos_calculados
                 })
     tratamentos = _tratamentos(session)
 
-    def enriquecer(itens):
-        for item in itens:
-            tratamento = tratamentos.get(item['codigo_fornecedor'], {})
-            item.update({
-                'critico': bool(tratamento.get('critico', False)),
-                'pagamento_imediato': _decimal(
-                    tratamento.get('pagamento_imediato')
-                ),
-                'status': tratamento.get('status') or 'PENDENTE',
-                'responsavel': tratamento.get('responsavel'),
-                'proxima_acao': tratamento.get('proxima_acao'),
-                'data_proxima_acao': tratamento.get('data_proxima_acao'),
-                'condicao_negociada': tratamento.get(
-                    'condicao_negociada'
-                ),
-                'observacao': tratamento.get('observacao'),
-                'usuario_atualizacao': tratamento.get('usuario_nome'),
-                'data_atualizacao': tratamento.get('data_atualizacao'),
-            })
-            item['saldo_negociar'] = max(
-                item['valor_total_vencido']
-                - item['pagamento_imediato'],
-                Decimal('0'),
-            )
-            item['valor_vencido'] = item['valor_total_vencido']
-
-    enriquecer(fornecedores)
+    _enriquecer_fornecedores(fornecedores, tratamentos)
 
     vencidos = [item for item in fornecedores if item['saldo_a_pagar'] > 0]
     if not exportar and not data_inicio and not data_fim:
         _registrar_snapshot(session, fornecedores)
     resumo = {
         'valor_a_pagar_ate_hoje': sum(
-            (item.get('valor_a_pagar_ate_hoje', Decimal('0')) for item in fornecedores),
+            (
+                item.get('valor_a_pagar_ate_hoje', Decimal('0'))
+                for item in fornecedores
+            ),
             Decimal('0'),
         ),
         'valor_vencido_atual': sum(
@@ -663,27 +757,37 @@ def listar_contas_pagar(
         filtrados = [
             item for item in filtrados if item['status'] == status.upper()
         ]
-    filtrados.sort(key=_chave_prioridade_fornecedor)
+    filtrados, detalhes_filtrados = _filtrar_prioridade(
+        filtrados,
+        somente_vencidos,
+        nivel_criticidade,
+        faixa_atraso,
+        oracle,
+        pagamentos_por_titulo,
+        data_inicio,
+        data_fim,
+    )
     total = len(filtrados)
     inicio = (page - 1) * page_size
     pagina = filtrados if exportar else filtrados[inicio : inicio + page_size]
     codigos_pagina = [item['codigo_fornecedor'] for item in pagina]
-    titulos_pagina = _consultar_titulos_oracle(
-        oracle,
-        codigos_pagina,
-        data_inicio=data_inicio,
-        data_fim=data_fim,
-    )
-    detalhes_pagina = {
-        item['codigo_fornecedor']: item['titulos']
-        for item in _agrupar_fornecedores(
-            titulos_pagina, pagamentos_por_titulo
+    if detalhes_filtrados is not None:
+        detalhes_pagina = detalhes_filtrados
+    else:
+        titulos_pagina = _consultar_titulos_oracle(
+            oracle,
+            codigos_pagina,
+            data_inicio=data_inicio,
+            data_fim=data_fim,
         )
-    }
+        detalhes_pagina = {
+            item['codigo_fornecedor']: item['titulos']
+            for item in _agrupar_fornecedores(
+                titulos_pagina, pagamentos_por_titulo
+            )
+        }
     for item in pagina:
-        item['titulos'] = detalhes_pagina.get(
-            item['codigo_fornecedor'], []
-        )
+        item['titulos'] = detalhes_pagina.get(item['codigo_fornecedor'], [])
 
     def serializar(item):
         titulos_serializados = []
@@ -692,9 +796,7 @@ def listar_contas_pagar(
                 {
                     **pagamento,
                     'data_pagamento': pagamento['data_pagamento'].isoformat(),
-                    'valor_pago': _serializar_decimal(
-                        pagamento['valor_pago']
-                    ),
+                    'valor_pago': _serializar_decimal(pagamento['valor_pago']),
                     'data_criacao': pagamento['data_criacao'].isoformat(),
                     'data_atualizacao': pagamento[
                         'data_atualizacao'
@@ -723,9 +825,7 @@ def listar_contas_pagar(
                 'valor_total_honrado': _serializar_decimal(
                     titulo['valor_total_honrado']
                 ),
-                'saldo_a_pagar': _serializar_decimal(
-                    titulo['saldo_a_pagar']
-                ),
+                'saldo_a_pagar': _serializar_decimal(titulo['saldo_a_pagar']),
                 'pagamentos': pagamentos,
             })
         return {
@@ -751,9 +851,7 @@ def listar_contas_pagar(
         }
 
     return {
-        'fornecedores': [
-            serializar(item) for item in pagina
-        ],
+        'fornecedores': [serializar(item) for item in pagina],
         'total': total,
         'page': 1 if exportar else page,
         'total_pages': 1 if exportar else max(ceil(total / page_size), 1),
@@ -783,7 +881,8 @@ def salvar_tratamento(
         VALUES (:codigo, :critico, :pagamento, :status, :responsavel,
                 :proxima_acao, :data_proxima_acao, :condicao, :observacao, :usuario)
         ON CONFLICT (codigo_fornecedor) DO UPDATE SET
-            critico = EXCLUDED.critico,
+            critico = CASE WHEN contas_pagar_tratamentos.nivel_criticidade IS NOT NULL
+                THEN contas_pagar_tratamentos.nivel_criticidade > 1 ELSE EXCLUDED.critico END,
             pagamento_imediato = EXCLUDED.pagamento_imediato,
             status = EXCLUDED.status,
             responsavel = EXCLUDED.responsavel,
@@ -837,13 +936,50 @@ def atualizar_criticidade_fornecedor(
     usuario: UsuarioAtual,
     session: SessionPostgres,
 ):
+    if payload.nivel_criticidade is None:
+        session.execute(
+            text("""
+            INSERT INTO api_prontocardio.contas_pagar_tratamentos
+                (codigo_fornecedor, critico, usuario_id)
+            VALUES (:codigo, :critico, :usuario_id)
+            ON CONFLICT (codigo_fornecedor) DO UPDATE SET
+                critico = EXCLUDED.critico,
+                nivel_criticidade = CASE WHEN NOT EXCLUDED.critico THEN 1
+                    WHEN contas_pagar_tratamentos.nivel_criticidade > 1
+                    THEN contas_pagar_tratamentos.nivel_criticidade ELSE NULL END,
+                justificativa_criticidade = CASE
+                    WHEN contas_pagar_tratamentos.critico = EXCLUDED.critico
+                    THEN contas_pagar_tratamentos.justificativa_criticidade ELSE NULL END,
+                usuario_criticidade_id = :usuario_id,
+                data_classificacao = timezone('America/Sao_Paulo', now()),
+                usuario_id = EXCLUDED.usuario_id,
+                data_atualizacao = timezone('America/Sao_Paulo', now())
+        """),
+            {
+                'codigo': codigo_fornecedor,
+                'critico': payload.critico,
+                'usuario_id': usuario.id,
+            },
+        )
+        session.commit()
+        return {
+            'detail': 'Fornecedor marcado como crítico.'
+            if payload.critico
+            else 'Criticidade removida do fornecedor.'
+        }
     session.execute(
         text("""
         INSERT INTO api_prontocardio.contas_pagar_tratamentos
-            (codigo_fornecedor, critico, usuario_id)
-        VALUES (:codigo, :critico, :usuario_id)
+            (codigo_fornecedor, critico, usuario_id, nivel_criticidade,
+             justificativa_criticidade, usuario_criticidade_id, data_classificacao)
+        VALUES (:codigo, :critico, :usuario_id, :nivel, :justificativa, :usuario_id,
+                timezone('America/Sao_Paulo', now()))
         ON CONFLICT (codigo_fornecedor) DO UPDATE SET
             critico = EXCLUDED.critico,
+            nivel_criticidade = EXCLUDED.nivel_criticidade,
+            justificativa_criticidade = EXCLUDED.justificativa_criticidade,
+            usuario_criticidade_id = EXCLUDED.usuario_criticidade_id,
+            data_classificacao = EXCLUDED.data_classificacao,
             usuario_id = EXCLUDED.usuario_id,
             data_atualizacao = timezone('America/Sao_Paulo', now())
     """),
@@ -851,16 +987,12 @@ def atualizar_criticidade_fornecedor(
             'codigo': codigo_fornecedor,
             'critico': payload.critico,
             'usuario_id': usuario.id,
+            'nivel': payload.nivel_criticidade,
+            'justificativa': payload.justificativa,
         },
     )
     session.commit()
-    return {
-        'detail': (
-            'Fornecedor marcado como crítico.'
-            if payload.critico
-            else 'Criticidade removida do fornecedor.'
-        )
-    }
+    return {'detail': 'Classificação atualizada com sucesso.'}
 
 
 @router.post(
@@ -985,3 +1117,132 @@ def excluir_pagamento_titulo(
         )
     session.commit()
     return Response(status_code=HTTPStatus.NO_CONTENT)
+
+
+class OrcamentoInput(BaseModel):
+    valor: Decimal = Field(ge=0, max_digits=15, decimal_places=2)
+
+
+@router.put('/orcamento/{competencia}')
+def salvar_orcamento(
+    competencia: date,
+    payload: OrcamentoInput,
+    usuario: UsuarioAtual,
+    session: SessionPostgres,
+):
+    if competencia.day != 1:
+        raise HTTPException(422, 'Informe o primeiro dia da competência.')
+    session.execute(
+        text("""
+        INSERT INTO api_prontocardio.contas_pagar_orcamentos (competencia, valor, usuario_id)
+        VALUES (:competencia, :valor, :usuario)
+        ON CONFLICT (competencia) DO UPDATE SET valor = EXCLUDED.valor,
+            usuario_id = EXCLUDED.usuario_id,
+            data_atualizacao = timezone('America/Sao_Paulo', now())
+    """),
+        {
+            'competencia': competencia,
+            'valor': payload.valor,
+            'usuario': usuario.id,
+        },
+    )
+    session.commit()
+    return {
+        'detail': 'Orçamento mensal salvo. Nenhum pagamento foi executado.'
+    }
+
+
+@router.get('/matriz')
+def consultar_matriz(
+    _: UsuarioAtual,
+    session: SessionPostgres,
+    oracle: SessionOracle,
+    competencia: date | None = None,
+    q: str | None = None,
+    status: str | None = None,
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
+    criticidade: Literal['todos', 'criticos', 'nao_criticos'] = 'todos',
+    nivel_criticidade: Literal[
+        'todos', 'pendente', '1', '2', '3', '4', '5'
+    ] = 'todos',
+    faixa_atraso: Literal['todos', '1', '2', '3', '4', '5'] = 'todos',
+):
+    competencia = (competencia or _hoje_hospital()).replace(day=1)
+    if data_inicio and data_fim and data_inicio > data_fim:
+        raise HTTPException(
+            422, 'A data inicial não pode ser posterior à data final.'
+        )
+    tratamentos = _tratamentos(session)
+    fornecedores = _consultar_oracle(
+        oracle, data_inicio=data_inicio, data_fim=data_fim
+    )
+    termo = (q or '').strip().casefold()
+    selecionados = []
+    for item in fornecedores:
+        tratamento = tratamentos.get(item['codigo_fornecedor'], {})
+        if (
+            termo
+            and termo not in item['nome_fornecedor'].casefold()
+            and termo not in str(item['codigo_fornecedor'])
+        ):
+            continue
+        if status and tratamento.get('status', 'PENDENTE') != status.upper():
+            continue
+        if criticidade == 'criticos' and not tratamento.get('critico', False):
+            continue
+        if criticidade == 'nao_criticos' and tratamento.get('critico', False):
+            continue
+        selecionados.append(item['codigo_fornecedor'])
+    titulos = _consultar_titulos_oracle(
+        oracle, selecionados, data_inicio=data_inicio, data_fim=data_fim
+    )
+    grupos = _agrupar_fornecedores(titulos, _pagamentos_manuais(session))
+    for item in grupos:
+        item.update(
+            classification(tratamentos.get(item['codigo_fornecedor'], {}))
+        )
+    if nivel_criticidade != 'todos':
+        grupos = [
+            item
+            for item in grupos
+            if (
+                item['nivel_criticidade'] is None
+                if nivel_criticidade == 'pendente'
+                else item['nivel_criticidade'] == int(nivel_criticidade)
+            )
+        ]
+    if faixa_atraso != 'todos':
+        for item in grupos:
+            item['titulos'] = [
+                titulo
+                for titulo in item['titulos']
+                if age_level(titulo['dias_vencidos']) == int(faixa_atraso)
+            ]
+    orcamento = (
+        session
+        .execute(
+            text("""
+        SELECT o.valor, o.data_atualizacao, u.nome AS usuario_nome
+          FROM api_prontocardio.contas_pagar_orcamentos o
+          LEFT JOIN api_prontocardio.usuarios_api u ON u.id = o.usuario_id
+         WHERE o.competencia = :competencia
+    """),
+            {'competencia': competencia},
+        )
+        .mappings()
+        .all()
+    )
+    registro = dict(orcamento[0]) if orcamento else {}
+    matriz = build_matrix(grupos, registro.get('valor', Decimal('0')))
+    return jsonable_encoder(
+        {
+            **matriz,
+            'competencia': competencia,
+            'orcamento_cadastrado': bool(orcamento),
+            'atualizado_por': registro.get('usuario_nome'),
+            'data_atualizacao': registro.get('data_atualizacao'),
+            'gerado_em': _hoje_hospital(),
+        },
+        custom_encoder={Decimal: _serializar_decimal},
+    )
