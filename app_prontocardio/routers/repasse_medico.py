@@ -50,9 +50,7 @@ SessionOracle = Annotated[Session, Depends(get_session_oracle)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 UsuarioTi = Annotated[Usuario, Depends(valida_usuario_ti)]
-UsuarioFinanceiro = Annotated[
-    Usuario, Depends(valida_acesso_financeiro_mv)
-]
+UsuarioFinanceiro = Annotated[Usuario, Depends(valida_acesso_financeiro_mv)]
 
 
 class EnvioRepasseInput(BaseModel):
@@ -188,13 +186,16 @@ def _capturar_titulos_enviados(
 ) -> list[dict]:
     return [
         dict(row)
-        for row in session.execute(
+        for row in session
+        .execute(
             TITULOS_ENVIADOS_QUERY,
             {
                 'competencia': competencia.replace(day=1),
                 'empresa': empresa,
             },
-        ).mappings().all()
+        )
+        .mappings()
+        .all()
     ]
 
 
@@ -313,6 +314,172 @@ SELECT rc.cd_repasse_consolidado,
           rc.cd_repasse_consolidado
 """)
 
+PARTICULAR_LAUDO_QUERY = text("""
+WITH particulares AS (
+    SELECT 'AMB:' || ira.cd_reg_amb || ':' || ira.cd_pro_fat
+               AS chave_faturamento,
+           ira.cd_atendimento,
+           pac.nm_paciente,
+           MAX(ira.hr_lancamento) AS dt_lancamento,
+           ira.cd_pro_fat,
+           MAX(pf.ds_pro_fat) AS ds_procedimento,
+           SUM(NVL(ira.qt_lancamento, 1)) AS quantidade,
+           SUM(
+               NVL(ira.qt_lancamento, 1) * NVL(ira.vl_unitario, 0)
+           ) AS valor_bruto
+      FROM dbamv.itreg_amb ira
+      JOIN dbamv.reg_amb ra ON ra.cd_reg_amb = ira.cd_reg_amb
+      JOIN dbamv.atendime ate ON ate.cd_atendimento = ira.cd_atendimento
+      JOIN dbamv.paciente pac ON pac.cd_paciente = ate.cd_paciente
+      LEFT JOIN dbamv.pro_fat pf ON pf.cd_pro_fat = ira.cd_pro_fat
+     WHERE ra.cd_convenio = 3
+       AND ira.hr_lancamento >= :competencia
+       AND ira.hr_lancamento < ADD_MONTHS(:competencia, 1)
+       AND ira.cd_pro_fat IN ('41001230', '30911141', '40901645')
+     GROUP BY ira.cd_reg_amb, ira.cd_atendimento,
+              pac.nm_paciente, ira.cd_pro_fat
+    UNION ALL
+    SELECT 'INT:' || irf.cd_reg_fat || ':' || irf.cd_pro_fat
+               AS chave_faturamento,
+           rf.cd_atendimento,
+           pac.nm_paciente,
+           MAX(irf.dt_lancamento) AS dt_lancamento,
+           irf.cd_pro_fat,
+           MAX(pf.ds_pro_fat) AS ds_procedimento,
+           SUM(NVL(irf.qt_lancamento, 1)) AS quantidade,
+           SUM(
+               NVL(irf.qt_lancamento, 1) * NVL(irf.vl_unitario, 0)
+           ) AS valor_bruto
+      FROM dbamv.reg_fat rf
+      JOIN dbamv.itreg_fat irf ON irf.cd_reg_fat = rf.cd_reg_fat
+      JOIN dbamv.atendime ate ON ate.cd_atendimento = rf.cd_atendimento
+      JOIN dbamv.paciente pac ON pac.cd_paciente = ate.cd_paciente
+      LEFT JOIN dbamv.pro_fat pf ON pf.cd_pro_fat = irf.cd_pro_fat
+     WHERE rf.cd_convenio = 3
+       AND irf.dt_lancamento >= :competencia
+       AND irf.dt_lancamento < ADD_MONTHS(:competencia, 1)
+       AND irf.cd_pro_fat IN ('41001230', '30911141', '40901645')
+     GROUP BY irf.cd_reg_fat, rf.cd_atendimento,
+              pac.nm_paciente, irf.cd_pro_fat
+), candidatos AS (
+    SELECT DISTINCT ped.cd_atendimento,
+           er.exa_rx_cd_pro_fat AS cd_pro_fat_laudo,
+           lr.cd_laudo,
+           lr.dt_laudo,
+           lr.cd_prestador,
+           pr.nm_prestador
+      FROM dbamv.ped_rx ped
+      JOIN dbamv.itped_rx ir ON ir.cd_ped_rx = ped.cd_ped_rx
+      JOIN dbamv.exa_rx er ON er.cd_exa_rx = ir.cd_exa_rx
+      JOIN dbamv.laudo_rx lr ON lr.cd_laudo = ir.cd_laudo
+      JOIN dbamv.prestador pr ON pr.cd_prestador = lr.cd_prestador
+     WHERE ped.cd_atendimento IN (
+               SELECT DISTINCT cd_atendimento FROM particulares
+           )
+       AND er.exa_rx_cd_pro_fat IN (
+           '41001230', '30911141', '40901645', '40901360',
+           '30911079', '30912040', '30912105', '30912261'
+       )
+)
+SELECT p.chave_faturamento,
+       p.cd_atendimento,
+       p.nm_paciente,
+       p.dt_lancamento,
+       p.cd_pro_fat,
+       p.ds_procedimento,
+       p.quantidade,
+       p.valor_bruto,
+       c.cd_pro_fat_laudo,
+       c.cd_laudo,
+       c.dt_laudo,
+       c.cd_prestador,
+       c.nm_prestador
+  FROM particulares p
+  LEFT JOIN candidatos c ON c.cd_atendimento = p.cd_atendimento
+ ORDER BY p.chave_faturamento, c.dt_laudo, c.cd_laudo
+""")
+
+PROCEDIMENTOS_EQUIVALENTES_LAUDO = {
+    '41001230': {'41001230'},
+    '30911141': {'30911141'},
+    '40901645': {'40901645', '40901360'},
+}
+PROCEDIMENTOS_HEMODINAMICOS_RELACIONADOS = {
+    '30911079',
+    '30912040',
+    '30912105',
+    '30912261',
+}
+
+
+def resolver_particulares_por_laudo(
+    faturamentos: list[dict], laudos: list[dict]
+) -> list[dict]:
+    laudos_por_atendimento: dict[int, list[dict]] = {}
+    for laudo in laudos:
+        atendimento = int(laudo['cd_atendimento'])
+        laudos_por_atendimento.setdefault(atendimento, []).append(laudo)
+
+    resultado = []
+    for faturamento in faturamentos:
+        atendimento = int(faturamento['cd_atendimento'])
+        codigo = str(faturamento['cd_pro_fat'])
+        candidatos = laudos_por_atendimento.get(atendimento, [])
+        equivalentes = PROCEDIMENTOS_EQUIVALENTES_LAUDO.get(codigo, {codigo})
+        diretos = [
+            item
+            for item in candidatos
+            if str(item.get('cd_pro_fat')) in equivalentes
+        ]
+        origem = 'laudo_exato'
+        elegiveis = diretos
+        if not elegiveis and codigo == '30911141':
+            elegiveis = [
+                item
+                for item in candidatos
+                if str(item.get('cd_pro_fat'))
+                in PROCEDIMENTOS_HEMODINAMICOS_RELACIONADOS
+            ]
+            origem = 'laudo_hemodinamico_unico'
+
+        prestadores = {
+            int(item['cd_prestador']): str(item['nm_prestador'])
+            for item in elegiveis
+            if item.get('cd_prestador') is not None
+        }
+        if len(prestadores) == 1:
+            codigo_prestador, prestador = next(iter(prestadores.items()))
+            precisa_conferencia = False
+        else:
+            codigo_prestador = None
+            prestador = 'MÉDICO A CONFERIR'
+            precisa_conferencia = True
+            origem = 'ambiguo' if prestadores else 'sem_laudo_compativel'
+
+        resultado.append({
+            'chave_faturamento': faturamento['chave_faturamento'],
+            'codigo_atendimento': atendimento,
+            'paciente': faturamento['nm_paciente'],
+            'data_atendimento': faturamento['dt_lancamento'],
+            'codigo_procedimento': codigo,
+            'procedimento': faturamento['ds_procedimento'],
+            'codigo_prestador': codigo_prestador,
+            'prestador': prestador,
+            'origem_atribuicao': origem,
+            'precisa_conferencia': precisa_conferencia,
+            'codigos_laudo': [
+                int(item['cd_laudo'])
+                for item in elegiveis
+                if item.get('cd_laudo') is not None
+            ],
+            'quantidade': int(faturamento.get('quantidade') or 0),
+            'valor_bruto': _decimal(faturamento.get('valor_bruto')),
+            'codigo_convenio': 3,
+            'convenio': 'PARTICULAR',
+        })
+    return resultado
+
+
 PRESTADOR_POR_CPF_QUERY = text("""
 SELECT cd_prestador, nm_prestador
   FROM dbamv.prestador
@@ -376,11 +543,12 @@ def _token_snapshot(competencia: date, empresa: int, rows: list[dict]) -> str:
     return sha256(serializado.encode()).hexdigest()
 
 
-def montar_preview(
+def montar_preview(  # noqa: PLR0912
     session: Session,
     competencia: date,
     empresa: int,
     cpf_prestador: str | None = None,
+    incluir_particulares_laudo: bool = False,
 ) -> dict:
     competencia = competencia.replace(day=1)
     filtro_prestador = None
@@ -391,10 +559,13 @@ def montar_preview(
         )
         prestadores = [
             dict(row)
-            for row in session.execute(
+            for row in session
+            .execute(
                 PRESTADOR_POR_CPF_QUERY,
                 {'cpf_prestador': cpf_normalizado},
-            ).mappings().all()
+            )
+            .mappings()
+            .all()
         ]
         if not prestadores:
             raise HTTPException(
@@ -416,7 +587,8 @@ def montar_preview(
         }
     rows = [
         dict(row)
-        for row in session.execute(
+        for row in session
+        .execute(
             PREVIEW_QUERY,
             {
                 'competencia': competencia,
@@ -442,30 +614,30 @@ def montar_preview(
             excluidos_valor += liquido
             continue
         total += liquido
-        itens.append(
-            {
-                'codigo_repasse': row.get('cd_repasse'),
-                'codigo_prestador': row.get('cd_prestador_destino'),
-                'prestador': row.get('nm_prestador_destino'),
-                'codigo_procedimento': row.get('cd_pro_fat'),
-                'procedimento': row.get('ds_procedimento')
-                or 'Sem detalhamento',
-                'quantidade': int(row.get('quantidade') or 0),
-                'valor_bruto': bruto,
-                'valor_desconto': desconto,
-                'valor_liquido': liquido,
-            }
-        )
+        itens.append({
+            'codigo_repasse': row.get('cd_repasse'),
+            'codigo_prestador': row.get('cd_prestador_destino'),
+            'prestador': row.get('nm_prestador_destino'),
+            'codigo_procedimento': row.get('cd_pro_fat'),
+            'procedimento': row.get('ds_procedimento') or 'Sem detalhamento',
+            'quantidade': int(row.get('quantidade') or 0),
+            'valor_bruto': bruto,
+            'valor_desconto': desconto,
+            'valor_liquido': liquido,
+        })
     detail_rows = [
         dict(row)
-        for row in session.execute(
+        for row in session
+        .execute(
             DETAIL_QUERY,
             {
                 'competencia': competencia,
                 'empresa': empresa,
                 'cd_prestador': cd_prestador,
             },
-        ).mappings().all()
+        )
+        .mappings()
+        .all()
     ]
     atendimentos = []
     atendimentos_teste_ergometrico = []
@@ -473,9 +645,7 @@ def montar_preview(
         if _eh_angio_tc_dedicada(item, competencia):
             continue
         atendimento = {
-            'codigo_repasse_consolidado': item.get(
-                'cd_repasse_consolidado'
-            ),
+            'codigo_repasse_consolidado': item.get('cd_repasse_consolidado'),
             'codigo_repasse': item.get('cd_repasse'),
             'codigo_prestador': item.get('cd_prestador_destino'),
             'prestador': item.get('nm_prestador_destino'),
@@ -491,9 +661,7 @@ def montar_preview(
             'codigo_remessa': item.get('cd_remessa'),
             'numero_remessa': item.get('nr_remessa_convenio'),
             'situacao_remessa': (
-                'inside'
-                if item.get('cd_remessa') is not None
-                else 'outside'
+                'inside' if item.get('cd_remessa') is not None else 'outside'
             ),
             'quantidade': int(item.get('quantidade') or 0),
             'valor_bruto': _decimal(item.get('valor_bruto')),
@@ -505,12 +673,60 @@ def montar_preview(
             atendimentos_teste_ergometrico.append(atendimento)
         else:
             atendimentos.append(atendimento)
+    particulares_laudo = []
+    if incluir_particulares_laudo and cd_prestador is None:
+        linhas_particulares = [
+            dict(row)
+            for row in session
+            .execute(
+                PARTICULAR_LAUDO_QUERY,
+                {'competencia': competencia},
+            )
+            .mappings()
+            .all()
+        ]
+        faturamentos_por_chave = {}
+        laudos_por_chave = {}
+        for item in linhas_particulares:
+            chave = item['chave_faturamento']
+            faturamentos_por_chave[chave] = {
+                campo: item.get(campo)
+                for campo in (
+                    'chave_faturamento',
+                    'cd_atendimento',
+                    'nm_paciente',
+                    'dt_lancamento',
+                    'cd_pro_fat',
+                    'ds_procedimento',
+                    'quantidade',
+                    'valor_bruto',
+                )
+            }
+            if item.get('cd_laudo') is not None:
+                chave_laudo = (
+                    item['cd_atendimento'],
+                    item['cd_pro_fat_laudo'],
+                    item['cd_laudo'],
+                )
+                laudos_por_chave[chave_laudo] = {
+                    'cd_atendimento': item['cd_atendimento'],
+                    'cd_pro_fat': item['cd_pro_fat_laudo'],
+                    'cd_laudo': item['cd_laudo'],
+                    'dt_laudo': item['dt_laudo'],
+                    'cd_prestador': item['cd_prestador'],
+                    'nm_prestador': item['nm_prestador'],
+                }
+        particulares_laudo = resolver_particulares_por_laudo(
+            list(faturamentos_por_chave.values()),
+            list(laudos_por_chave.values()),
+        )
     return {
         'competencia': competencia,
         'empresa': empresa,
         'itens': itens,
         'atendimentos': atendimentos,
         'atendimentos_teste_ergometrico': atendimentos_teste_ergometrico,
+        'particulares_laudo': particulares_laudo,
         'total_liquido': total,
         'bloqueado': excluidos_quantidade > 0,
         'motivo_bloqueio': (
@@ -530,14 +746,21 @@ def montar_preview(
 
 
 @router.get('/preview')
-def consultar_preview(
+def consultar_preview(  # noqa: PLR0913, PLR0917
     usuario: UsuarioAtual,
     session: SessionOracle,
     competencia: date = Query(),
     empresa: int = Query(default=1, gt=0),
     cpf_prestador: str | None = Query(default=None, min_length=11),
+    incluir_particulares_laudo: bool = Query(default=False),
 ):
-    return montar_preview(session, competencia, empresa, cpf_prestador)
+    return montar_preview(
+        session,
+        competencia,
+        empresa,
+        cpf_prestador,
+        incluir_particulares_laudo,
+    )
 
 
 @router.post('/enviar')
@@ -728,21 +951,17 @@ def listar_titulos_financeiros(  # noqa: PLR0913, PLR0917
             .order_by(RepasseMvOperacao.criado_em.desc())
         ).all()
         for operacao in operacoes:
-            auditorias_por_titulo.setdefault(operacao.cd_con_pag, []).append(
-                {
-                    'acao': operacao.acao,
-                    'estado': operacao.estado,
-                    'usuario': operacao.usuario_nome,
-                    'usuario_email': operacao.usuario_email,
-                    'motivo': operacao.motivo,
-                    'criado_em': operacao.criado_em,
-                    'concluido_em': operacao.concluido_em,
-                }
-            )
+            auditorias_por_titulo.setdefault(operacao.cd_con_pag, []).append({
+                'acao': operacao.acao,
+                'estado': operacao.estado,
+                'usuario': operacao.usuario_nome,
+                'usuario_email': operacao.usuario_email,
+                'motivo': operacao.motivo,
+                'criado_em': operacao.criado_em,
+                'concluido_em': operacao.concluido_em,
+            })
     for item in resultado['itens']:
-        item['auditoria'] = auditorias_por_titulo.get(
-            item['cd_con_pag'], []
-        )
+        item['auditoria'] = auditorias_por_titulo.get(item['cd_con_pag'], [])
         item['origem_auditoria'] = (
             'prontoescala' if item['auditoria'] else 'mv_legado'
         )
@@ -783,9 +1002,7 @@ def prevalidar_cancelamento_financeiro(
         )
     try:
         titulo = carregar_titulo(oracle, cd_con_pag)
-        elegivel = validar_cancelamento(
-            titulo, codigo_repasse_esperado
-        )
+        elegivel = validar_cancelamento(titulo, codigo_repasse_esperado)
         return {
             'elegivel': elegivel,
             'idempotente': not elegivel,
