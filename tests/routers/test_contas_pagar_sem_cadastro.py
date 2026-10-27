@@ -5,7 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app_prontocardio.payables_priority import build_matrix
@@ -168,3 +168,137 @@ def test_synthetic_identity_cannot_be_written_as_mv_supplier(sample):
     )
     assert response.status_code == 422
     assert session.executions == []
+
+
+@pytest.mark.parametrize('level', [1, 2, 3, 4, 5])
+def test_classify_null_supplier_keeps_existing_supplier_separate(
+    sample, monkeypatch, level
+):
+    key = sample[1][1]
+    monkeypatch.setattr(cp, '_consultar_oracle', lambda s: sample[3])
+    session = FakeSession([])
+    response = cp.classificar_sem_cadastro(
+        key,
+        cp.CriticidadeFornecedorInput(
+            nivel_criticidade=level, justificativa=' Tributo '
+        ),
+        SimpleNamespace(id=7),
+        session,
+        None,
+    )
+    assert response['detail']
+    sql, params = session.executions[0]
+    assert (
+        'INSERT INTO api_prontocardio.contas_pagar_classificacoes_sem_cadastro'
+        in sql
+    )
+    assert 'UPDATE' not in sql
+    assert params == {
+        'identificador': key,
+        'nome': 'CSRF',
+        'nivel': level,
+        'justificativa': 'Tributo',
+        'usuario': 7,
+    }
+    assert session.commits == 1
+    groups = sample[3]
+    cp._enriquecer_fornecedores(
+        groups, {key: {'nivel_criticidade': level, 'critico': level > 1}}
+    )
+    assert groups[0]['nivel_criticidade'] == 1
+    assert groups[1]['nivel_criticidade'] == level
+    assert not groups[1]['criticidade_pendente']
+    assert groups[2]['criticidade_pendente']
+    matrix = build_matrix(groups, Decimal('0'))
+    assert matrix['pendentes'] == {'quantidade': 3, 'valor': Decimal('240')}
+    assert matrix['quantidade'] == 3
+
+
+@pytest.mark.parametrize(
+    'key',
+    [
+        '10',
+        'sem-cadastro-<x>',
+        'sem-cadastro-a',
+        'sem-cadastro-__8',
+        'sem-cadastro-eA',
+    ],
+)
+def test_invalid_null_identity_never_writes(key):
+    session = FakeSession([])
+    with pytest.raises(HTTPException) as error:
+        cp.classificar_sem_cadastro(
+            key,
+            cp.CriticidadeFornecedorInput(
+                nivel_criticidade=5, justificativa='Teste'
+            ),
+            SimpleNamespace(id=7),
+            session,
+            None,
+        )
+    assert error.value.status_code == 422
+    assert session.executions == []
+
+
+def test_stale_null_identity_and_legacy_boolean_never_write(
+    sample, monkeypatch
+):
+    key = sample[1][1]
+    session = FakeSession([])
+    monkeypatch.setattr(cp, '_consultar_oracle', lambda s: [])
+    with pytest.raises(HTTPException) as error:
+        cp.classificar_sem_cadastro(
+            key,
+            cp.CriticidadeFornecedorInput(
+                nivel_criticidade=5, justificativa='Teste'
+            ),
+            SimpleNamespace(id=7),
+            session,
+            None,
+        )
+    assert error.value.status_code == 404
+    with pytest.raises(HTTPException) as error:
+        cp.classificar_sem_cadastro(
+            key,
+            cp.CriticidadeFornecedorInput(critico=True),
+            SimpleNamespace(id=7),
+            session,
+            None,
+        )
+    assert error.value.status_code == 422
+    assert session.executions == []
+
+
+def test_latest_classification_loaded_without_overwriting_numeric_supplier():
+    key = cp._identidade_fornecedor({
+        'codigo_fornecedor': None,
+        'referencia_sem_cadastro': 'nome:CSRF',
+    })
+    session = FakeSession([
+        [{'codigo_fornecedor': 10, 'nivel_criticidade': 1}],
+        [
+            {
+                'identificador': key,
+                'nivel_criticidade': 5,
+                'critico': True,
+                'classificado_por': 'Financeiro',
+                'justificativa_criticidade': 'Tributo',
+            }
+        ],
+    ])
+    result = cp._tratamentos(session)
+    assert result[10]['nivel_criticidade'] == 1
+    assert result[key]['nivel_criticidade'] == 5
+    assert result[key]['classificado_por'] == 'Financeiro'
+    assert 'ORDER BY c.identificador, c.id DESC' in session.executions[1][0]
+
+
+def test_classified_null_supplier_in_noncritical_filter(sample):
+    groups = sample[3]
+    cp._enriquecer_fornecedores(
+        groups, {sample[1][1]: {'nivel_criticidade': 1, 'critico': False}}
+    )
+    result = cp._filtrar_fornecedores(
+        groups, None, 'nao_criticos', None, set(), True
+    )
+    assert [g['codigo_fornecedor'] for g in result] == [10, sample[1][1]]
