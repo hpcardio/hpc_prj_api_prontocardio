@@ -311,3 +311,29 @@ def test_matrix_filters_and_manual_payments_reconcile(monkeypatch):
     assert empty['quantidade'] == 0
     assert empty['valor'] == '0.00'
     assert empty['orcamento'] == '350000.01'
+
+
+@pytest.mark.parametrize('invoice_value', [Decimal('300.25'), None])
+def test_export_serializes_invoice_value_separately_from_installment(
+    monkeypatch, invoice_value
+):
+    setup_titles(monkeypatch)
+    original = api._consultar_titulos_oracle
+
+    def details(*args, **kwargs):
+        return [
+            {**row, 'valor_nota_fiscal': invoice_value}
+            for row in original(*args, **kwargs)
+        ]
+
+    monkeypatch.setattr(api, '_consultar_titulos_oracle', details)
+    result = api.listar_contas_pagar(
+        None, Mock(), Mock(), page=1, page_size=20, exportar=True
+    )
+    titles = result['fornecedores'][0]['titulos']
+    assert len(titles) == 3
+    for row in titles:
+        assert row['valor_nota_fiscal'] == (
+            '300.25' if invoice_value is not None else None
+        )
+        assert row['valor_total'] == '100.00'
