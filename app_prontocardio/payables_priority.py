@@ -37,11 +37,15 @@ def age_level(days):
 
 def classification(treatment):
     level = treatment.get('nivel_criticidade')
-    if level is None and not treatment.get('critico', False):
+    if treatment.get('sem_cadastro'):
+        level = None
+    elif level is None and not treatment.get('critico', False):
         level = 1
     return {
         'nivel_criticidade': level,
-        'criticidade_label': LEVELS.get(level, 'Crítico · revisar nível'),
+        'criticidade_label': 'Sem classificação'
+        if treatment.get('sem_cadastro')
+        else LEVELS.get(level, 'Crítico · revisar nível'),
         'criticidade_pendente': level is None,
         'justificativa_criticidade': treatment.get('justificativa_criticidade')
         or '',
