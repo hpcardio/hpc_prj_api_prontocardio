@@ -15,8 +15,8 @@ AGE_WEIGHTS = {5: 30, 4: 25, 3: 20, 2: 15, 1: 10}
 # Cores por coordenada da especificação 1.3; não são produto dos níveis.
 COLORS = (
     ('red', 'red', 'red', 'red', 'red'),
-    ('red', 'yellow', 'yellow', 'yellow', 'neutral'),
-    ('yellow', 'blue', 'blue', 'green', 'neutral'),
+    ('red', 'yellow', 'yellow', 'yellow', 'green'),
+    ('yellow', 'blue', 'blue', 'blue', 'neutral'),
     ('green', 'green', 'green', 'green', 'neutral'),
     ('neutral', 'neutral', 'neutral', 'neutral', 'neutral'),
 )
