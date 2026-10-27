@@ -1,5 +1,6 @@
 # ruff: noqa: E501, PLR0913
 
+import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -33,6 +34,7 @@ UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 CENTAVOS = Decimal('0.01')
 STATUS_VALIDOS = {'PENDENTE', 'CONTATO', 'NEGOCIACAO', 'ACORDADO'}
 FUSO_HOSPITAL = ZoneInfo('America/Sao_Paulo')
+TOTAL_QUADRANTES = 25
 
 
 def _hoje_hospital() -> date:
@@ -675,6 +677,70 @@ def _enriquecer_fornecedores(itens, tratamentos):
         item['valor_vencido'] = item['valor_total_vencido']
 
 
+def _selecionar_codigos(valor):
+    codigos = {
+        parte.strip() for parte in (valor or '').split(',') if parte.strip()
+    }
+    if any(
+        not re.fullmatch(r'(?:[0-9]+|sem-cadastro-[A-Za-z0-9_-]+)', codigo)
+        for codigo in codigos
+    ):
+        raise HTTPException(422, 'Selecao de fornecedores invalida.')
+    return codigos
+
+
+def _resolver_quadrante(nivel, faixa, quadrante):
+    if quadrante is None:
+        return nivel, faixa, True
+    if not 1 <= quadrante <= TOTAL_QUADRANTES:
+        raise HTTPException(422, 'Quadrante deve estar entre 1 e 25.')
+    nivel_quadrante = str(5 - (quadrante - 1) // 5)
+    faixa_quadrante = str(5 - (quadrante - 1) % 5)
+    compativel = nivel in ('todos', nivel_quadrante) and faixa in (
+        'todos',
+        faixa_quadrante,
+    )
+    return nivel_quadrante, faixa_quadrante, compativel
+
+
+def _filtrar_fornecedores(
+    vencidos,
+    q,
+    criticidade,
+    status,
+    codigos_selecionados,
+    quadrante_compativel,
+):
+    termo = (q or '').strip().casefold()
+    filtrados = vencidos if quadrante_compativel else []
+    if codigos_selecionados:
+        filtrados = [
+            item
+            for item in filtrados
+            if str(item['codigo_fornecedor']) in codigos_selecionados
+        ]
+    if termo:
+        filtrados = [
+            item
+            for item in filtrados
+            if termo in item['nome_fornecedor'].casefold()
+            or termo in str(item['codigo_fornecedor'])
+        ]
+    if criticidade == 'criticos':
+        filtrados = [item for item in filtrados if item['critico']]
+    elif criticidade == 'nao_criticos':
+        filtrados = [
+            item
+            for item in filtrados
+            if not item['critico'] and not item.get('sem_cadastro')
+        ]
+    if status and status.upper() in STATUS_VALIDOS:
+        filtrados = [
+            item for item in filtrados if item['status'] == status.upper()
+        ]
+    return filtrados
+
+
 @router.get('')
 def listar_contas_pagar(
     _: UsuarioAtual,
@@ -693,16 +759,42 @@ def listar_contas_pagar(
     ] = 'todos',
     faixa_atraso: Literal['todos', '1', '2', '3', '4', '5'] = 'todos',
     somente_vencidos: bool = False,
+    fornecedores_ids: Annotated[str | None, Query(max_length=50000)] = None,
+    quadrante: Annotated[int | None, Query(ge=1, le=25)] = None,
+    ordenar: Literal['prioridade', 'maior_valor_vencido'] = 'prioridade',
+    incluir_opcoes: bool = False,
 ):
     if data_inicio and data_fim and data_inicio > data_fim:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail='A data inicial não pode ser posterior à data final.',
         )
+    codigos_selecionados = _selecionar_codigos(fornecedores_ids)
+    nivel_criticidade, faixa_atraso, quadrante_compativel = (
+        _resolver_quadrante(nivel_criticidade, faixa_atraso, quadrante)
+    )
     pagamentos_por_titulo = _pagamentos_manuais(session)
     fornecedores = _consultar_oracle(
         oracle, data_inicio=data_inicio, data_fim=data_fim
     )
+    opcoes = []
+    if incluir_opcoes:
+        base_opcoes = (
+            _consultar_oracle(oracle)
+            if data_inicio or data_fim
+            else fornecedores
+        )
+        opcoes = sorted(
+            [
+                {
+                    'codigo': str(item['codigo_fornecedor']),
+                    'nome': item['nome_fornecedor'],
+                    'sem_cadastro': item.get('sem_cadastro', False),
+                }
+                for item in base_opcoes
+            ],
+            key=lambda item: (item['nome'].casefold(), item['codigo']),
+        )
     codigos_com_pagamento_manual = sorted({
         int(pagamento['codigo_fornecedor'])
         for pagamentos in pagamentos_por_titulo.values()
@@ -789,27 +881,14 @@ def listar_contas_pagar(
         resumo['valor_vencido_atual'] - resumo['valor_vencido_inicial']
     )
 
-    termo = (q or '').strip().casefold()
-    filtrados = vencidos
-    if termo:
-        filtrados = [
-            item
-            for item in filtrados
-            if termo in item['nome_fornecedor'].casefold()
-            or termo in str(item['codigo_fornecedor'])
-        ]
-    if criticidade == 'criticos':
-        filtrados = [item for item in filtrados if item['critico']]
-    elif criticidade == 'nao_criticos':
-        filtrados = [
-            item
-            for item in filtrados
-            if not item['critico'] and not item.get('sem_cadastro')
-        ]
-    if status and status.upper() in STATUS_VALIDOS:
-        filtrados = [
-            item for item in filtrados if item['status'] == status.upper()
-        ]
+    filtrados = _filtrar_fornecedores(
+        vencidos,
+        q,
+        criticidade,
+        status,
+        codigos_selecionados,
+        quadrante_compativel,
+    )
     filtrados, detalhes_filtrados = _filtrar_prioridade(
         filtrados,
         somente_vencidos,
@@ -820,6 +899,14 @@ def listar_contas_pagar(
         data_inicio,
         data_fim,
     )
+    if ordenar == 'maior_valor_vencido':
+        filtrados.sort(
+            key=lambda item: (
+                -item['valor_total_vencido'],
+                _chave_prioridade_fornecedor(item),
+                str(item['codigo_fornecedor']),
+            )
+        )
     total = len(filtrados)
     inicio = (page - 1) * page_size
     pagina = filtrados if exportar else filtrados[inicio : inicio + page_size]
@@ -910,6 +997,7 @@ def listar_contas_pagar(
 
     return {
         'fornecedores': [serializar(item) for item in pagina],
+        **({'opcoes_fornecedores': opcoes} if incluir_opcoes else {}),
         'total': total,
         'page': 1 if exportar else page,
         'total_pages': 1 if exportar else max(ceil(total / page_size), 1),
@@ -1225,12 +1313,18 @@ def consultar_matriz(
         'todos', 'pendente', '1', '2', '3', '4', '5'
     ] = 'todos',
     faixa_atraso: Literal['todos', '1', '2', '3', '4', '5'] = 'todos',
+    fornecedores_ids: Annotated[str | None, Query(max_length=50000)] = None,
+    quadrante: Annotated[int | None, Query(ge=1, le=25)] = None,
 ):
     competencia = (competencia or _hoje_hospital()).replace(day=1)
     if data_inicio and data_fim and data_inicio > data_fim:
         raise HTTPException(
             422, 'A data inicial não pode ser posterior à data final.'
         )
+    codigos_selecionados = _selecionar_codigos(fornecedores_ids)
+    nivel_criticidade, faixa_atraso, quadrante_compativel = (
+        _resolver_quadrante(nivel_criticidade, faixa_atraso, quadrante)
+    )
     tratamentos = _tratamentos(session)
     fornecedores = _consultar_oracle(
         oracle, data_inicio=data_inicio, data_fim=data_fim
@@ -1238,6 +1332,13 @@ def consultar_matriz(
     termo = (q or '').strip().casefold()
     selecionados = []
     for item in fornecedores:
+        if not quadrante_compativel:
+            continue
+        if (
+            codigos_selecionados
+            and str(item['codigo_fornecedor']) not in codigos_selecionados
+        ):
+            continue
         tratamento = tratamentos.get(item['codigo_fornecedor'], {})
         if (
             termo
