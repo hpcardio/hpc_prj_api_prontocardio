@@ -99,21 +99,6 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
     assert resultado[0]['total_dias_vencidos'] == 100
 
 
-def test_consulta_oracle_ignora_fornecedor_sem_codigo():
-    oracle = FakeSession([
-        [
-            {
-                'codigo_fornecedor': None,
-                'nome_fornecedor': 'Fornecedor sem código',
-                'codigo_parcela_pk': 1,
-            }
-        ]
-    ])
-
-    assert contas_pagar._consultar_titulos_oracle(oracle, [10]) == []
-    assert 'codigo_do_fornecedor IS NOT NULL' in oracle.executions[0][0]
-
-
 def test_titulos_do_fornecedor_sao_ordenados_por_maior_atraso(monkeypatch):
     monkeypatch.setattr(
         contas_pagar, '_hoje_hospital', lambda: date(2026, 9, 17)

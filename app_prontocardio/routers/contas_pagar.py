@@ -1,5 +1,6 @@
 # ruff: noqa: E501, PLR0913
 
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
@@ -107,7 +108,29 @@ class CriticidadeFornecedorInput(BaseModel):
         return self
 
 
-ORACLE_FORNECEDORES_QUERY = text("""
+# NULL supplier codes are grouped by the MV payee name. Unnamed records
+# remain separate by account (or parcel), never in one shared NULL bucket.
+REFERENCIA_SEM_CADASTRO_SQL = """CASE WHEN v.codigo_do_fornecedor IS NULL THEN
+    CASE WHEN TRIM(v.nome_fornecedor) IS NOT NULL
+         THEN 'nome:' || v.nome_fornecedor
+         WHEN v.codigo_do_contas_a_pagar IS NOT NULL
+         THEN 'conta:' || TO_CHAR(v.codigo_do_contas_a_pagar)
+         ELSE 'parcela:' || TO_CHAR(v.codigo_parcela_pk)
+    END
+END"""
+SEM_CADASTRO_PREFIX = 'sem-cadastro-'
+
+
+def _identidade_fornecedor(row):
+    if row['codigo_fornecedor'] is not None:
+        return int(row['codigo_fornecedor'])
+    referencia = row['referencia_sem_cadastro']
+    return SEM_CADASTRO_PREFIX + urlsafe_b64encode(
+        referencia.encode('utf-8')
+    ).decode('ascii').rstrip('=')
+
+
+ORACLE_FORNECEDORES_QUERY = text(f"""
 WITH pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
@@ -124,17 +147,19 @@ pagamentos AS (
 ),
 parcelas AS (
     SELECT v.codigo_do_fornecedor AS codigo_fornecedor,
+           {REFERENCIA_SEM_CADASTRO_SQL} AS referencia_sem_cadastro,
            MAX(v.nome_fornecedor) AS nome_fornecedor,
            v.codigo_parcela_pk,
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao
       FROM dbamv.HPC_V_CONTAS_A_PAGAR v
-     WHERE v.codigo_do_fornecedor IS NOT NULL
-     GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk
+     GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,
+              {REFERENCIA_SEM_CADASTRO_SQL}
 ),
 saldos AS (
     SELECT p.codigo_fornecedor,
+           p.referencia_sem_cadastro,
            p.nome_fornecedor,
            p.data_vencimento,
            p.valor_duplicata,
@@ -149,6 +174,7 @@ saldos AS (
        AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
 )
 SELECT codigo_fornecedor,
+       referencia_sem_cadastro,
        MAX(nome_fornecedor) AS nome_fornecedor,
        SUM(valor_duplicata) AS valor_total,
        SUM(valor_honrado) AS valor_total_honrado,
@@ -161,12 +187,12 @@ SELECT codigo_fornecedor,
        COUNT(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_vencidos,
        COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_correntes
   FROM saldos
- GROUP BY codigo_fornecedor
+ GROUP BY codigo_fornecedor, referencia_sem_cadastro
 HAVING SUM(saldo) > 0
 """)
 
 
-ORACLE_TITULOS_QUERY = text("""
+ORACLE_TITULOS_QUERY = text(f"""
 WITH pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
@@ -183,6 +209,7 @@ pagamentos AS (
 ),
 parcelas AS (
     SELECT v.codigo_do_fornecedor AS codigo_fornecedor,
+           {REFERENCIA_SEM_CADASTRO_SQL} AS referencia_sem_cadastro,
            MAX(v.nome_fornecedor) AS nome_fornecedor,
            v.codigo_parcela_pk,
            MAX(v.codigo_do_contas_a_pagar) AS codigo_contas_pagar,
@@ -196,11 +223,13 @@ parcelas AS (
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao
      FROM dbamv.HPC_V_CONTAS_A_PAGAR v
-     WHERE v.codigo_do_fornecedor IS NOT NULL
-       AND v.codigo_do_fornecedor IN :codigos_fornecedor
-     GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk
+     WHERE v.codigo_do_fornecedor IN :codigos_fornecedor
+        OR ({REFERENCIA_SEM_CADASTRO_SQL}) IN :referencias_sem_cadastro
+     GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,
+              {REFERENCIA_SEM_CADASTRO_SQL}
 )
 SELECT p.codigo_fornecedor,
+       p.referencia_sem_cadastro,
        p.nome_fornecedor,
        p.codigo_parcela_pk,
        p.codigo_contas_pagar,
@@ -222,7 +251,10 @@ SELECT p.codigo_fornecedor,
    AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
    AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
  ORDER BY p.codigo_fornecedor, p.data_vencimento, p.codigo_parcela_pk
-""").bindparams(bindparam('codigos_fornecedor', expanding=True))
+""").bindparams(
+    bindparam('codigos_fornecedor', expanding=True),
+    bindparam('referencias_sem_cadastro', expanding=True),
+)
 
 
 def _decimal(value) -> Decimal:
@@ -267,12 +299,11 @@ def _consultar_oracle(
     hoje = _hoje_hospital()
     resultado = []
     for row in rows:
-        if row['codigo_fornecedor'] is None:
-            continue
         vencimento = _normalizar_data(row['vencimento_mais_antigo'])
         dias_atraso = max((hoje - vencimento).days, 0) if vencimento else 0
         resultado.append({
-            'codigo_fornecedor': int(row['codigo_fornecedor']),
+            'codigo_fornecedor': _identidade_fornecedor(row),
+            'sem_cadastro': row['codigo_fornecedor'] is None,
             'nome_fornecedor': row['nome_fornecedor'] or 'Fornecedor sem nome',
             'valor_total': _decimal(row['valor_total']),
             'valor_total_vencido': _decimal(row['valor_total_vencido']),
@@ -295,7 +326,7 @@ def _consultar_oracle(
 
 def _consultar_titulos_oracle(
     session: Session,
-    codigos_fornecedor: list[int],
+    codigos_fornecedor: list[int | str],
     data_inicio: date | None = None,
     data_fim: date | None = None,
 ) -> list[dict]:
@@ -305,14 +336,23 @@ def _consultar_titulos_oracle(
         rows = []
         # Oracle supports at most 1000 expressions per IN list.
         for inicio in range(0, len(codigos_fornecedor), 1000):
+            lote = codigos_fornecedor[inicio : inicio + 1000]
+            codigos = [codigo for codigo in lote if isinstance(codigo, int)]
+            referencias = [
+                urlsafe_b64decode(
+                    codigo.removeprefix(SEM_CADASTRO_PREFIX) + '==='
+                ).decode('utf-8')
+                for codigo in lote
+                if isinstance(codigo, str)
+                and codigo.startswith(SEM_CADASTRO_PREFIX)
+            ]
             rows.extend(
                 session
                 .execute(
                     ORACLE_TITULOS_QUERY,
                     {
-                        'codigos_fornecedor': codigos_fornecedor[
-                            inicio : inicio + 1000
-                        ],
+                        'codigos_fornecedor': codigos,
+                        'referencias_sem_cadastro': referencias,
                         'data_inicio': data_inicio,
                         'data_fim': data_fim,
                     },
@@ -327,13 +367,11 @@ def _consultar_titulos_oracle(
         ) from exc
     resultado = []
     for row in rows:
-        if (
-            row['codigo_fornecedor'] is None
-            or row['codigo_parcela_pk'] is None
-        ):
+        if row['codigo_parcela_pk'] is None:
             continue
         resultado.append({
-            'codigo_fornecedor': int(row['codigo_fornecedor']),
+            'codigo_fornecedor': _identidade_fornecedor(row),
+            'sem_cadastro': row['codigo_fornecedor'] is None,
             'nome_fornecedor': row['nome_fornecedor'] or 'Fornecedor sem nome',
             'codigo_parcela': int(row['codigo_parcela_pk']),
             'codigo_contas_pagar': int(row['codigo_contas_pagar'])
@@ -402,6 +440,7 @@ def _agrupar_fornecedores(
             codigo,
             {
                 'codigo_fornecedor': codigo,
+                'sem_cadastro': titulo.get('sem_cadastro', False),
                 'nome_fornecedor': titulo['nome_fornecedor'],
                 'valor_total': Decimal('0'),
                 'valor_total_vencido': Decimal('0'),
@@ -622,7 +661,12 @@ def _enriquecer_fornecedores(itens, tratamentos):
             'usuario_atualizacao': tratamento.get('usuario_nome'),
             'data_atualizacao': tratamento.get('data_atualizacao'),
         })
-        item.update(classification(tratamento))
+        item.update(
+            classification({
+                **tratamento,
+                'sem_cadastro': item.get('sem_cadastro', False),
+            })
+        )
         item['faixa_atraso'] = age_level(item['dias_atraso'])
         item['saldo_negociar'] = max(
             item['valor_total_vencido'] - item['pagamento_imediato'],
@@ -757,7 +801,11 @@ def listar_contas_pagar(
     if criticidade == 'criticos':
         filtrados = [item for item in filtrados if item['critico']]
     elif criticidade == 'nao_criticos':
-        filtrados = [item for item in filtrados if not item['critico']]
+        filtrados = [
+            item
+            for item in filtrados
+            if not item['critico'] and not item.get('sem_cadastro')
+        ]
     if status and status.upper() in STATUS_VALIDOS:
         filtrados = [
             item for item in filtrados if item['status'] == status.upper()
@@ -1201,7 +1249,9 @@ def consultar_matriz(
             continue
         if criticidade == 'criticos' and not tratamento.get('critico', False):
             continue
-        if criticidade == 'nao_criticos' and tratamento.get('critico', False):
+        if criticidade == 'nao_criticos' and (
+            tratamento.get('critico', False) or item.get('sem_cadastro')
+        ):
             continue
         selecionados.append(item['codigo_fornecedor'])
     titulos = _consultar_titulos_oracle(
@@ -1210,7 +1260,10 @@ def consultar_matriz(
     grupos = _agrupar_fornecedores(titulos, _pagamentos_manuais(session))
     for item in grupos:
         item.update(
-            classification(tratamentos.get(item['codigo_fornecedor'], {}))
+            classification({
+                **tratamentos.get(item['codigo_fornecedor'], {}),
+                'sem_cadastro': item.get('sem_cadastro', False),
+            })
         )
     if nivel_criticidade != 'todos':
         grupos = [
