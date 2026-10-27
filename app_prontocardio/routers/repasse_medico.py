@@ -450,10 +450,17 @@ def resolver_particulares_por_laudo(
         if len(prestadores) == 1:
             codigo_prestador, prestador = next(iter(prestadores.items()))
             precisa_conferencia = False
+            datas_laudo = [
+                item['dt_laudo']
+                for item in elegiveis
+                if item.get('dt_laudo') is not None
+            ]
+            data_laudo = max(datas_laudo) if datas_laudo else None
         else:
             codigo_prestador = None
             prestador = 'MÉDICO A CONFERIR'
             precisa_conferencia = True
+            data_laudo = None
             origem = 'ambiguo' if prestadores else 'sem_laudo_compativel'
 
         resultado.append({
@@ -461,6 +468,7 @@ def resolver_particulares_por_laudo(
             'codigo_atendimento': atendimento,
             'paciente': faturamento['nm_paciente'],
             'data_atendimento': faturamento['dt_lancamento'],
+            'data_laudo': data_laudo,
             'codigo_procedimento': codigo,
             'procedimento': faturamento['ds_procedimento'],
             'codigo_prestador': codigo_prestador,
