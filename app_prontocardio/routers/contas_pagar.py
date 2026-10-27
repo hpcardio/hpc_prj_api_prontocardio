@@ -2,6 +2,7 @@
 
 import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as Base64Error
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
@@ -35,6 +36,7 @@ CENTAVOS = Decimal('0.01')
 STATUS_VALIDOS = {'PENDENTE', 'CONTATO', 'NEGOCIACAO', 'ACORDADO'}
 FUSO_HOSPITAL = ZoneInfo('America/Sao_Paulo')
 TOTAL_QUADRANTES = 25
+MAX_IDENTIFICADOR_SEM_CADASTRO = 2000
 
 
 def _hoje_hospital() -> date:
@@ -501,7 +503,7 @@ def _chave_prioridade_fornecedor(item: dict):
     )
 
 
-def _tratamentos(session: Session) -> dict[int, dict]:
+def _tratamentos(session: Session) -> dict[int | str, dict]:
     rows = session.execute(
         text("""
         SELECT t.*, u.nome AS usuario_nome, uc.nome AS classificado_por
@@ -510,7 +512,24 @@ def _tratamentos(session: Session) -> dict[int, dict]:
           LEFT JOIN api_prontocardio.usuarios_api uc ON uc.id = t.usuario_criticidade_id
     """)
     ).mappings()
-    return {int(row['codigo_fornecedor']): dict(row) for row in rows}
+    tratamentos = {int(row['codigo_fornecedor']): dict(row) for row in rows}
+    classificacoes = session.execute(
+        text("""
+        SELECT DISTINCT ON (c.identificador)
+               c.identificador, c.nivel_criticidade,
+               c.nivel_criticidade > 1 AS critico,
+               c.justificativa AS justificativa_criticidade,
+               c.data_classificacao, u.nome AS classificado_por,
+               u.nome AS usuario_nome
+          FROM api_prontocardio.contas_pagar_classificacoes_sem_cadastro c
+          JOIN api_prontocardio.usuarios_api u ON u.id = c.usuario_id
+         ORDER BY c.identificador, c.id DESC
+    """)
+    ).mappings()
+    tratamentos.update({
+        row['identificador']: dict(row) for row in classificacoes
+    })
+    return tratamentos
 
 
 def _registrar_snapshot(session: Session, fornecedores: list[dict]) -> None:
@@ -732,7 +751,7 @@ def _filtrar_fornecedores(
         filtrados = [
             item
             for item in filtrados
-            if not item['critico'] and not item.get('sem_cadastro')
+            if not item['critico'] and not item['criticidade_pendente']
         ]
     if status and status.upper() in STATUS_VALIDOS:
         filtrados = [
@@ -1075,6 +1094,75 @@ def excluir_tratamento(
     return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
+def _validar_identificador_sem_cadastro(identificador):
+    if len(identificador) > MAX_IDENTIFICADOR_SEM_CADASTRO or not re.fullmatch(
+        r'sem-cadastro-[A-Za-z0-9_-]+', identificador
+    ):
+        raise HTTPException(422, 'Identificador sem cadastro inválido.')
+    try:
+        referencia = urlsafe_b64decode(
+            identificador.removeprefix(SEM_CADASTRO_PREFIX) + '==='
+        ).decode('utf-8')
+    except (Base64Error, UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(
+            422, 'Identificador sem cadastro inválido.'
+        ) from exc
+    if not referencia.startswith(('nome:', 'conta:', 'parcela:')) or (
+        _identidade_fornecedor({
+            'codigo_fornecedor': None,
+            'referencia_sem_cadastro': referencia,
+        })
+        != identificador
+    ):
+        raise HTTPException(422, 'Identificador sem cadastro inválido.')
+
+
+@router.patch('/sem-cadastro/{identificador}/criticidade')
+def classificar_sem_cadastro(
+    identificador: str,
+    payload: CriticidadeFornecedorInput,
+    usuario: UsuarioAtual,
+    session: SessionPostgres,
+    oracle: SessionOracle,
+):
+    _validar_identificador_sem_cadastro(identificador)
+    if payload.nivel_criticidade is None:
+        raise HTTPException(
+            422, 'Informe o nível de criticidade e a justificativa.'
+        )
+    fornecedor = next(
+        (
+            item
+            for item in _consultar_oracle(oracle)
+            if item['codigo_fornecedor'] == identificador
+            and item.get('sem_cadastro')
+        ),
+        None,
+    )
+    if fornecedor is None:
+        raise HTTPException(
+            404,
+            'Registro sem cadastro não encontrado na consulta atual do MV.',
+        )
+    # Each change appends an audit event; the latest id is the active classification.
+    session.execute(
+        text("""
+        INSERT INTO api_prontocardio.contas_pagar_classificacoes_sem_cadastro
+            (identificador, nome_fornecedor, nivel_criticidade, justificativa, usuario_id)
+        VALUES (:identificador, :nome, :nivel, :justificativa, :usuario)
+    """),
+        {
+            'identificador': identificador,
+            'nome': fornecedor['nome_fornecedor'],
+            'nivel': payload.nivel_criticidade,
+            'justificativa': payload.justificativa,
+            'usuario': usuario.id,
+        },
+    )
+    session.commit()
+    return {'detail': 'Classificação atualizada com sucesso.'}
+
+
 @router.patch('/fornecedores/{codigo_fornecedor}/criticidade')
 def atualizar_criticidade_fornecedor(
     codigo_fornecedor: int,
@@ -1351,7 +1439,11 @@ def consultar_matriz(
         if criticidade == 'criticos' and not tratamento.get('critico', False):
             continue
         if criticidade == 'nao_criticos' and (
-            tratamento.get('critico', False) or item.get('sem_cadastro')
+            tratamento.get('critico', False)
+            or (
+                item.get('sem_cadastro')
+                and tratamento.get('nivel_criticidade') is None
+            )
         ):
             continue
         selecionados.append(item['codigo_fornecedor'])

@@ -9,19 +9,53 @@ Nao ha associacao automatica a um fornecedor cadastrado com o mesmo nome.
 
 Para fornecedores cadastrados, `codigo_fornecedor` continua inteiro.
 Para grupos sem cadastro, o campo carrega `sem-cadastro-<base64url>` da
-referencia de origem e `sem_cadastro=true`. Essa chave serve apenas para
-consulta e associacao dos detalhes, nunca como codigo MV nem chave de
-escrita no PostgreSQL. O frontend mostra "Sem cadastro no MV".
+referencia de origem e `sem_cadastro=true`. O frontend mostra "Sem cadastro
+no MV". A chave identifica o grupo no Receita Certa; nunca e um codigo MV.
 
-Nao se presume nivel de criticidade: os grupos ficam com classificacao
-pendente, aparecem no aviso de pendencias da matriz, e nao entram nos 25
-quadrantes. O filtro de nao criticos nao inclui esses grupos. Pagamentos
-complementares e classificacao continuam disponiveis somente para codigos
-MV inteiros; o cadastro no MV precisa ser regularizado para essas acoes.
-Se o nome de origem mudar, a chave de consulta muda; nao ha estado manual
-persistido nessa chave. Nenhuma migracao PostgreSQL e necessaria.
+## Classificacao sem cadastro
 
-## Publicacao coordenada
+O formulario aceita nivel de 1 a 5 e justificativa. A API verifica se a chave
+canonica corresponde a um grupo presente na consulta atual do MV antes de
+salvar. Cada alteracao acrescenta um evento na tabela
+`contas_pagar_classificacoes_sem_cadastro`, com nome de origem, nivel,
+justificativa, usuario autenticado e data. O maior ID por chave representa
+a classificacao atual; revisoes anteriores permanecem preservadas.
+
+Sem classificacao, o grupo fica pendente e fora dos 25 quadrantes. Depois
+de classificado, participa dos filtros, prioridade, matriz e exportacao
+com o nivel informado, inclusive nivel 1 (nao critico). Nao ha associacao
+a fornecedor cadastrado com o mesmo nome. Pagamentos complementares
+continuam exigindo codigo MV inteiro.
+
+Se o nome de origem mudar ou o MV fornecer um codigo posteriormente, a
+identidade muda. Nao copiar automaticamente a classificacao: revisar a
+nova identidade; o historico anterior permanece registrado.
+
+### Publicacao desta funcionalidade
+
+1. Fazer backup do PostgreSQL oficial `187.127.6.75/prontocardio_db`.
+2. Conferir a revisao Alembic vigente e aplicar a migracao aditiva
+   `20261027_062` (depende de `20261026_061`) antes de publicar a API.
+3. Publicar a API e depois o frontend dos respectivos commits aprovados.
+4. Conferir listagem, classificacao e reclassificacao com justificativa,
+   filtros de pendencias e quadrantes. Nao alterar classificacoes reais
+   apenas para testar sem escolher um registro apropriado com o usuario.
+
+A mudanca nao altera a view Oracle nem o tratamento de fornecedores
+numericos. Em rollback, restaurar as imagens anteriores e preservar a
+nova tabela de auditoria. Nao executar downgrade depois de haver registros,
+pois ele remove a tabela e seu historico.
+
+### Validacao da classificacao sem cadastro
+
+- 104 testes de Contas a Pagar/criticidade/filtros da API e 248 do frontend.
+- Lint dos arquivos Python alterados.
+- Migracao real em PostgreSQL 16 descartavel: duas revisoes preservadas,
+  leitura da ultima revisao, bloqueio de nivel invalido e justificativa
+  vazia, e protecao do usuario de auditoria por chave estrangeira.
+- Nenhuma classificacao de producao foi alterada na validacao.
+
+## Publicacao original dos grupos sem cadastro
 
 Publicar o frontend compativel antes de habilitar os grupos na API/view.
 O script `oracle/contas_pagar_incluir_sem_cadastro.sql` preserva a definicao
@@ -38,7 +72,7 @@ DDL Oracle implica commit; nao tratar a execucao como transacao reversivel.
 Executar o script somente na publicacao aprovada, junto da API e frontend.
 Se precisar reverter, restaurar a definicao salva e as imagens anteriores.
 
-## Validacao em 27/10/2026
+## Validacao original dos grupos em 27/10/2026
 
 - 56 testes da API e 242 testes do frontend, mais lint dos arquivos Python.
 - Consulta real em transacoes `READ ONLY` no Oracle e PostgreSQL oficial.
