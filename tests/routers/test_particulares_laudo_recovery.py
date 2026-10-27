@@ -70,3 +70,58 @@ def test_preview_forwards_optional_flag_without_changing_default(monkeypatch):
         'session', date(2026, 10, 1), 1, None, True
     )
     assert module.montar_preview is preview
+
+
+@pytest.mark.parametrize(
+    ('code', 'reports', 'expected'),
+    [
+        (
+            '40901645',
+            [{**report(), 'dt_laudo': date(2026, 10, 2)}],
+            date(2026, 10, 2),
+        ),
+        (
+            '40901645',
+            [
+                {**report(), 'dt_laudo': date(2026, 10, 4)},
+                {**report(), 'dt_laudo': None},
+                {**report(), 'dt_laudo': date(2026, 10, 2)},
+                {**report('99999999'), 'dt_laudo': date(2026, 10, 9)},
+                {
+                    **report(),
+                    'cd_atendimento': 2,
+                    'dt_laudo': date(2026, 10, 10),
+                },
+            ],
+            date(2026, 10, 4),
+        ),
+        (
+            '30911141',
+            [{**report('30911079'), 'dt_laudo': date(2026, 10, 3)}],
+            date(2026, 10, 3),
+        ),
+        ('40901645', [report()], None),
+        ('40901645', [{**report(), 'dt_laudo': None}], None),
+        (
+            '40901645',
+            [
+                {**report(doctor=7), 'dt_laudo': date(2026, 10, 2)},
+                {**report(doctor=8), 'dt_laudo': date(2026, 10, 3)},
+            ],
+            None,
+        ),
+        (
+            '41001230',
+            [{**report(), 'dt_laudo': date(2026, 10, 2)}],
+            None,
+        ),
+    ],
+)
+def test_report_date_preserves_existing_production_behavior(
+    code, reports, expected
+):
+    result = module.resolver_particulares_por_laudo([billing(code)], reports)[
+        0
+    ]
+    assert result['data_laudo'] == expected
+    assert result['data_atendimento'] == date(2026, 10, 1)
