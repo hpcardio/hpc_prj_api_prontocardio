@@ -79,6 +79,21 @@ def title(days, balance):
     return {'dias_vencidos': days, 'saldo_a_pagar': Decimal(balance)}
 
 
+def test_matrix_quadrant_colors_match_institutional_reference():
+    result = build_matrix([], Decimal('0'))
+    actual = {}
+    for row in result['linhas']:
+        for cell in row['celulas']:
+            actual.setdefault(cell['cor'], []).append(cell['quadrante'])
+    assert actual == {
+        'red': [1, 2, 3, 4, 5, 6],
+        'yellow': [7, 8, 9, 11],
+        'blue': [12, 13, 14],
+        'green': [10, 16, 17, 18, 19],
+        'neutral': [15, 20, 21, 22, 23, 24, 25],
+    }
+
+
 def test_matrix_counts_titles_by_own_age_and_excludes_settled_today_future():
     result = build_matrix(
         [
