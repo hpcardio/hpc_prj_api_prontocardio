@@ -191,6 +191,7 @@ parcelas AS (
            MAX(v.numero_da_parcela) AS numero_parcela,
            MAX(v.data_de_lancamento) AS data_lancamento,
            MAX(v.data_de_emissao) AS data_emissao,
+           MAX(v.valor_bruto) AS valor_nota_fiscal,
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao
@@ -209,6 +210,7 @@ SELECT p.codigo_fornecedor,
        p.data_lancamento,
        p.data_emissao,
        p.valor_duplicata,
+       p.valor_nota_fiscal,
        p.data_vencimento,
        p.tipo_quitacao,
        NVL(pg.valor_pago, 0) AS valor_honrado_oracle
@@ -343,6 +345,9 @@ def _consultar_titulos_oracle(
             'data_lancamento': _normalizar_data(row['data_lancamento']),
             'data_emissao': _normalizar_data(row['data_emissao']),
             'valor_total': _decimal(row['valor_duplicata']),
+            'valor_nota_fiscal': _decimal(row['valor_nota_fiscal'])
+            if row.get('valor_nota_fiscal') is not None
+            else None,
             'data_vencimento': _normalizar_data(row['data_vencimento']),
             'tipo_quitacao': row['tipo_quitacao'],
             'valor_honrado_oracle': _decimal(row['valor_honrado_oracle']),
@@ -816,6 +821,11 @@ def listar_contas_pagar(
                 if titulo['data_emissao']
                 else None,
                 'valor_total': _serializar_decimal(titulo['valor_total']),
+                'valor_nota_fiscal': _serializar_decimal(
+                    titulo['valor_nota_fiscal']
+                )
+                if titulo.get('valor_nota_fiscal') is not None
+                else None,
                 'valor_honrado_oracle': _serializar_decimal(
                     titulo['valor_honrado_oracle']
                 ),
