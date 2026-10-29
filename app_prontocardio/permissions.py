@@ -1,6 +1,7 @@
 import json
 
 TELAS_SISTEMA = (
+    'spu_automacao',
     'indicadores',
     'follow_up_glosas',
     'recursos_processos',
@@ -30,6 +31,7 @@ TELAS_SISTEMA = (
 )
 # Telas concedidas só por atribuição explícita (fora do padrão).
 TELAS_RESTRITAS = {
+    'spu_automacao',
     'ecg_worklist',
     'financeiro_mv',
     'agenda_medica_medico',

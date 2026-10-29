@@ -421,7 +421,11 @@ def _agrupar_fornecedores(
     fornecedores = {}
     for titulo_oracle in titulos:
         titulo = dict(titulo_oracle)
-        pagamentos = pagamentos_por_titulo.get(titulo['codigo_parcela'], [])
+        pagamentos = [
+            item
+            for item in pagamentos_por_titulo.get(titulo['codigo_parcela'], [])
+            if item.get('codigo_fornecedor') == titulo['codigo_fornecedor']
+        ]
         valor_manual = sum(
             (item['valor_pago'] for item in pagamentos), Decimal('0')
         )
@@ -1229,6 +1233,27 @@ def atualizar_criticidade_fornecedor(
     return {'detail': 'Classificação atualizada com sucesso.'}
 
 
+def _validar_fornecedor_titulo(
+    oracle_session: Session, fornecedor: int, parcela: int
+):
+    # Historical payment edits must remain valid, regardless of settlement.
+    try:
+        existe = oracle_session.execute(
+            text("""
+            SELECT 1 FROM dbamv.HPC_V_CONTAS_A_PAGAR
+             WHERE codigo_do_fornecedor = :fornecedor
+               AND codigo_parcela_pk = :parcela AND ROWNUM = 1
+        """),
+            {'fornecedor': fornecedor, 'parcela': parcela},
+        ).scalar_one_or_none()
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            503, 'Não foi possível validar o título no MV. Tente novamente.'
+        ) from exc
+    if existe is None:
+        raise HTTPException(404, 'Título não encontrado para este fornecedor.')
+
+
 @router.post(
     '/fornecedores/{codigo_fornecedor}/titulos/{codigo_parcela}/pagamentos',
     status_code=HTTPStatus.CREATED,
@@ -1239,7 +1264,11 @@ def registrar_pagamento_titulo(
     payload: PagamentoTituloInput,
     usuario: UsuarioAtual,
     session: SessionPostgres,
+    oracle_session: SessionOracle,
 ):
+    _validar_fornecedor_titulo(
+        oracle_session, codigo_fornecedor, codigo_parcela
+    )
     pagamento_id = session.execute(
         text("""
         INSERT INTO api_prontocardio.contas_pagar_pagamentos
@@ -1279,7 +1308,11 @@ def atualizar_pagamento_titulo(
     payload: PagamentoTituloInput,
     usuario: UsuarioAtual,
     session: SessionPostgres,
+    oracle_session: SessionOracle,
 ):
+    _validar_fornecedor_titulo(
+        oracle_session, codigo_fornecedor, codigo_parcela
+    )
     atualizado = session.execute(
         text("""
         UPDATE api_prontocardio.contas_pagar_pagamentos

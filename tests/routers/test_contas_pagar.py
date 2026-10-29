@@ -80,6 +80,7 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
             99: [
                 {
                     'valor_pago': Decimal('50000'),
+                    'codigo_fornecedor': 10,
                 }
             ]
         },
@@ -214,7 +215,7 @@ def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
     inclusao = FakeSession([[31]])
 
     resposta = contas_pagar.registrar_pagamento_titulo(
-        10, 99, payload, usuario, inclusao
+        10, 99, payload, usuario, inclusao, FakeSession([[1]])
     )
 
     assert resposta['id'] == 31
@@ -226,7 +227,7 @@ def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
 
     atualizacao = FakeSession([[31]])
     resposta = contas_pagar.atualizar_pagamento_titulo(
-        10, 99, 31, payload, usuario, atualizacao
+        10, 99, 31, payload, usuario, atualizacao, FakeSession([[1]])
     )
     assert resposta['detail'] == 'Pagamento atualizado com sucesso.'
     assert atualizacao.commits == 1
@@ -427,7 +428,7 @@ def test_total_ate_hoje_inclui_hoje_exclui_futuro_e_desconta_pagamentos(
         )
     ]
     result = contas_pagar._agrupar_fornecedores(
-        titulos, {2: [{'valor_pago': Decimal('30')}]}
+        titulos, {2: [{'valor_pago': Decimal('30'), 'codigo_fornecedor': 1}]}
     )[0]
     assert result['valor_a_pagar_ate_hoje'] == Decimal('130')
     assert result['valor_total_vencido'] == Decimal('80')

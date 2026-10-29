@@ -1,9 +1,13 @@
+import hashlib
+import hmac
+import json
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from jwt import DecodeError, InvalidTokenError, decode, encode
+from jwt import InvalidTokenError, decode, encode
 from pwdlib import PasswordHash
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,64 +34,79 @@ def valida_senha_cru_x_senha_hash_db(senha_cru: str, senha_hash_db: str):
     return pwd_context.verify(senha_cru, senha_hash_db)
 
 
-def usuario_token_somente_leitura(token: str) -> bool:
-    try:
-        payload = decode(
-            token, settings.SECRET_KEY, algorithms=settings.ALGORITHM
-        )
-    except InvalidTokenError:
-        return False
-
-    subject_email = payload.get('sub')
-    if not subject_email or postgres_engine is None:
-        return False
-
-    with Session(postgres_engine) as session:
-        usuario = session.scalar(
-            select(Usuario).where(Usuario.email == subject_email)
-        )
-
-    return bool(
-        usuario
-        and usuario.ativo
-        and usuario.perfil.casefold() == 'leitura'
-    )
-
-
 def criar_token(claim: dict):
+    # Also used by the separate, audience-scoped clinical panel contract.
+    return encode(claim, settings.SECRET_KEY, settings.ALGORITHM)
 
-    encoded_jwt = encode(claim, settings.SECRET_KEY, settings.ALGORITHM)
 
-    return encoded_jwt
+def _versao_credencial(usuario: Usuario) -> str:
+    message = json.dumps(
+        [usuario.id, usuario.email, usuario.senha], separators=(',', ':')
+    )
+    return hmac.new(
+        settings.SECRET_KEY.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def criar_token_usuario(usuario: Usuario) -> str:
+    agora = datetime.now(timezone.utc)
+    return criar_token({
+        'sub': usuario.email,
+        'iat': agora,
+        'exp': agora + timedelta(hours=8),
+        'sv': _versao_credencial(usuario),
+    })
 
 
 def valida_token_usuario_atual(
     session: SessionPostgres, token: str = Depends(oauth2_scheme)
 ):
-    excessao_autenticacao = HTTPException(
+    erro = HTTPException(
         status_code=HTTPStatus.UNAUTHORIZED,
         detail='Could not validate credentials',
         headers={'WWW-Authenticate': 'Bearer'},
     )
-
     try:
         payload = decode(
-            token, settings.SECRET_KEY, algorithms=settings.ALGORITHM
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            options={'require': ['sub', 'iat', 'exp', 'sv']},
         )
-        subject_email = payload.get('sub')
-        if not subject_email:
-            raise excessao_autenticacao
-    except DecodeError:
-        raise excessao_autenticacao
-
-    usuario_banco = session.scalar(
-        select(Usuario).where(Usuario.email == subject_email)
+        if (
+            not isinstance(payload['sub'], str)
+            or not payload['sub']
+            or not isinstance(payload['sv'], str)
+            or not isinstance(payload['iat'], (int, float))
+            or not isinstance(payload['exp'], (int, float))
+            or not 0 < payload['exp'] - payload['iat'] <= 8 * 3600
+        ):
+            raise erro
+    except InvalidTokenError:
+        raise erro
+    usuario = session.scalar(
+        select(Usuario).where(Usuario.email == payload['sub'])
     )
+    if (
+        not usuario
+        or not usuario.ativo
+        or not hmac.compare_digest(
+            payload['sv'].encode(), _versao_credencial(usuario).encode()
+        )
+    ):
+        raise erro
+    return usuario
 
-    if not usuario_banco or not usuario_banco.ativo:
-        raise excessao_autenticacao
 
-    return usuario_banco
+def usuario_token_somente_leitura(token: str) -> bool:
+    if postgres_engine is None:
+        return False
+    try:
+        with Session(postgres_engine) as session:
+            usuario = valida_token_usuario_atual(session, token)
+            return usuario.perfil.casefold() == 'leitura'
+    except HTTPException:
+        return False
 
 
 def valida_usuario_ti(usuario: Usuario = Depends(valida_token_usuario_atual)):
@@ -130,7 +149,9 @@ def valida_acesso_painel_leitos_medicos(
     if usuario.perfil not in {'leitura', 'ti'}:
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
-            detail='Acesso restrito aos usuários autorizados do painel médico.',
+            detail=(
+                'Acesso restrito aos usuários autorizados do painel médico.'
+            ),
         )
     return usuario
 

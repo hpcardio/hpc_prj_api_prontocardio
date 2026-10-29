@@ -15,7 +15,7 @@ from app_prontocardio.database import (
 )
 from app_prontocardio.models import Usuario
 from app_prontocardio.security import (
-    criar_token,
+    criar_token_usuario,
     valida_senha_cru_x_senha_hash_db,
     valida_token_usuario_atual,
 )
@@ -135,7 +135,7 @@ def autenticar_usuario_rede(
     if not valida_senha_cru_x_senha_hash_db(payload.password, usuario.senha):
         raise excessao_autenticacao
 
-    return {'access': criar_token({'sub': usuario.email}), 'refresh': None}
+    return {'access': criar_token_usuario(usuario), 'refresh': None}
 
 
 def _montar_where(

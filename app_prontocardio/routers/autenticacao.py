@@ -22,6 +22,7 @@ from app_prontocardio.schema import (
 )
 from app_prontocardio.security import (
     criar_token,
+    criar_token_usuario,
     gera_hash_senha,
     valida_senha_cru_x_senha_hash_db,
 )
@@ -56,7 +57,7 @@ def autenticar_usuario_para_acesso(
     ):
         raise excessao_autenticacao
 
-    token = criar_token(claim={'sub': usuario_banco.email})
+    token = criar_token_usuario(usuario_banco)
 
     return {'access_token': token, 'token_type': 'Bearer'}
 

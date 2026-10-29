@@ -2,7 +2,7 @@ from http import HTTPStatus
 
 from app_prontocardio.permissions import telas_padrao
 from app_prontocardio.schema import UserPublic
-from app_prontocardio.security import criar_token
+from app_prontocardio.security import criar_token_usuario
 
 
 def test_consultar_usuario_atual(cliente, usuario_teste, token_teste):
@@ -254,7 +254,7 @@ def test_usuario_comum_nao_altera_permissoes(
 ):
     outro_usuario_teste.perfil = 'usuario'
     session.commit()
-    token_usuario = criar_token({'sub': outro_usuario_teste.email})
+    token_usuario = criar_token_usuario(outro_usuario_teste)
 
     response = cliente.patch(
         f'/usuarios/{outro_usuario_teste.id}/permissoes',
@@ -273,7 +273,7 @@ def test_usuario_comum_nao_cadastra_novo_usuario(
 ):
     outro_usuario_teste.perfil = 'usuario'
     session.commit()
-    token_usuario = criar_token({'sub': outro_usuario_teste.email})
+    token_usuario = criar_token_usuario(outro_usuario_teste)
 
     response = cliente.post(
         '/usuarios/',
