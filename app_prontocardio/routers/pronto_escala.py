@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app_prontocardio.agenda_medica_models import AgendaMedicaVinculo
-from app_prontocardio.database import get_session_postgres
+from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import Usuario
 from app_prontocardio.pronto_escala_models import (
     ProntoEscalaEvento,
@@ -22,6 +22,7 @@ from app_prontocardio.pronto_escala_models import (
     ProntoEscalaRegistro,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.agenda_medica_soulmv import AgendaMedicaSoulMV
 
 router = APIRouter(prefix='/pronto-escala', tags=['pronto-escala'])
 TELA_MEDICO = 'pronto_escala_medico'
@@ -30,6 +31,7 @@ FUSO = ZoneInfo('America/Sao_Paulo')
 ULTIMO_MES = 12
 
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
+SessionOracle = Annotated[Session, Depends(get_session_oracle)]
 UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 
 
@@ -91,6 +93,10 @@ class PlantaoInput(BaseModel):
         if self.fim <= self.inicio:
             raise ValueError('O fim do plantão deve ser posterior ao início.')
         return self
+
+
+class SincronizacaoInput(BaseModel):
+    dias: int = Field(default=30, ge=0, le=180)
 
 
 class JustificativaInput(BaseModel):
@@ -281,6 +287,111 @@ def criar_plantao(
     return _plantao_json(session, item)
 
 
+def _data_hora_soulmv(valor: object) -> datetime:
+    if isinstance(valor, datetime):
+        return valor.replace(tzinfo=None)
+    return datetime.fromisoformat(str(valor)).replace(tzinfo=None)
+
+
+@router.post('/plantoes/sincronizar-soulmv')
+def sincronizar_plantoes_soulmv(
+    dados: SincronizacaoInput,
+    usuario: Validador,
+    postgres: SessionPostgres,
+    oracle: SessionOracle,
+):
+    """Importa agendas reais do SoulMV sem escrever no Oracle.
+
+    A chave da agenda central torna a operação idempotente. Alterações de
+    prestador, setor ou período feitas no MV são refletidas no registro local,
+    preservando os apontamentos e a trilha de auditoria já existentes.
+    """
+    agendas = AgendaMedicaSoulMV(oracle).agendas_atuais(dados.dias)
+    criados = atualizados = ignorados = 0
+    ids: list[int] = []
+    for agenda in agendas:
+        cd_agenda = agenda.get('cd_agenda_central')
+        cd_prestador = agenda.get('cd_prestador')
+        inicio = agenda.get('hr_inicio')
+        fim = agenda.get('hr_fim')
+        if not all((cd_agenda, cd_prestador, inicio, fim)):
+            ignorados += 1
+            continue
+        valores = {
+            'cd_prestador': int(cd_prestador),
+            'nm_prestador': str(
+                agenda.get('nm_prestador') or f'Prestador {cd_prestador}'
+            ),
+            'setor': str(
+                agenda.get('nm_setor')
+                or agenda.get('ds_unidade_atendimento')
+                or f'Setor {agenda.get("cd_setor") or "não informado"}'
+            ),
+            'inicio': _data_hora_soulmv(inicio),
+            'fim': _data_hora_soulmv(fim),
+            'origem': 'SOULMV',
+            'status': 'PROGRAMADO',
+        }
+        item = postgres.scalar(
+            select(ProntoEscalaPlantao).where(
+                ProntoEscalaPlantao.cd_agenda_central == int(cd_agenda)
+            )
+        )
+        if item is None:
+            item = ProntoEscalaPlantao(
+                **valores,
+                cd_agenda_central=int(cd_agenda),
+                criado_por_id=usuario.id,
+                criado_por_nome=usuario.nome,
+            )
+            postgres.add(item)
+            postgres.flush()
+            _evento(
+                postgres,
+                usuario,
+                'PLANTAO_IMPORTADO_SOULMV',
+                plantao_id=item.id,
+                detalhe=f'Agenda central {cd_agenda}',
+            )
+            criados += 1
+        else:
+            mudou = any(
+                getattr(item, campo) != valor
+                for campo, valor in valores.items()
+            )
+            if mudou:
+                for campo, valor in valores.items():
+                    setattr(item, campo, valor)
+                _evento(
+                    postgres,
+                    usuario,
+                    'PLANTAO_ATUALIZADO_SOULMV',
+                    plantao_id=item.id,
+                    detalhe=f'Agenda central {cd_agenda}',
+                )
+                atualizados += 1
+        ids.append(item.id)
+    _evento(
+        postgres,
+        usuario,
+        'SINCRONIZACAO_SOULMV',
+        detalhe=(
+            f'dias={dados.dias}; lidas={len(agendas)}; criadas={criados}; '
+            f'atualizadas={atualizados}; ignoradas={ignorados}'
+        ),
+    )
+    postgres.commit()
+    return {
+        'fonte': 'SoulMV/AGENDA_CENTRAL',
+        'somente_leitura_oracle': True,
+        'lidas': len(agendas),
+        'criadas': criados,
+        'atualizadas': atualizados,
+        'ignoradas': ignorados,
+        'plantao_ids': ids,
+    }
+
+
 @router.get('/plantoes')
 def listar_plantoes(
     session: SessionPostgres,
@@ -397,6 +508,13 @@ def justificar(
     if plantao is None or plantao.cd_prestador != cd_prestador:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND, detail='Plantão não encontrado.'
+        )
+    if _registro(session, plantao.id, dados.tipo):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'O apontamento já foi registrado e não exige justificativa.'
+            ),
         )
     if _agora().date() > _limite_justificativa(plantao):
         raise HTTPException(

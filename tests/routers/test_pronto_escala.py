@@ -4,6 +4,8 @@ from http import HTTPStatus
 import pytest
 
 from app_prontocardio.agenda_medica_models import AgendaMedicaVinculo
+from app_prontocardio.app import app
+from app_prontocardio.database import get_session_oracle
 from app_prontocardio.models import Usuario
 from app_prontocardio.routers import pronto_escala
 from app_prontocardio.security import gera_hash_senha
@@ -12,6 +14,8 @@ AGORA = datetime(2026, 10, 27, 8, 0)
 CD_PRESTADOR = 245
 ANTECEDENCIA_CHECKIN = 60
 ATRASO_CHECKOUT = 120
+DIAS_SINCRONIZACAO = 7
+CD_AGENDA_SOULMV = 9876
 
 
 def _usuario(session, nome, telas):
@@ -194,3 +198,71 @@ def test_justificativa_pode_ser_salva_e_enviada_depois(cliente, acessos):
     assert envio.status_code == HTTPStatus.OK
     assert envio.json()['status'] == 'PENDENTE'
     assert envio.json()['justificativas_no_mes'] == 1
+
+
+def test_sincroniza_agendas_reais_do_soulmv_sem_duplicar(
+    cliente, acessos, monkeypatch
+):
+    class SoulMVTeste:
+        def __init__(self, _session):
+            pass
+
+        def agendas_atuais(self, dias):
+            assert dias == DIAS_SINCRONIZACAO
+            return [
+                {
+                    'cd_agenda_central': CD_AGENDA_SOULMV,
+                    'cd_prestador': CD_PRESTADOR,
+                    'nm_prestador': 'DRA TESTE',
+                    'cd_setor': 12,
+                    'nm_setor': 'UTI 1',
+                    'hr_inicio': '2026-10-27T08:00:00',
+                    'hr_fim': '2026-10-27T14:00:00',
+                }
+            ]
+
+    app.dependency_overrides[get_session_oracle] = object
+    monkeypatch.setattr(pronto_escala, 'AgendaMedicaSoulMV', SoulMVTeste)
+    try:
+        primeira = cliente.post(
+            '/pronto-escala/plantoes/sincronizar-soulmv',
+            headers=acessos['validador'],
+            json={'dias': DIAS_SINCRONIZACAO},
+        )
+        segunda = cliente.post(
+            '/pronto-escala/plantoes/sincronizar-soulmv',
+            headers=acessos['validador'],
+            json={'dias': DIAS_SINCRONIZACAO},
+        )
+    finally:
+        app.dependency_overrides.pop(get_session_oracle, None)
+
+    assert primeira.status_code == HTTPStatus.OK
+    assert primeira.json()['criadas'] == 1
+    assert primeira.json()['somente_leitura_oracle'] is True
+    assert segunda.status_code == HTTPStatus.OK
+    assert segunda.json()['criadas'] == 0
+    lista = cliente.get(
+        '/pronto-escala/plantoes', headers=acessos['validador']
+    ).json()['plantoes']
+    assert len(lista) == 1
+    assert lista[0]['cd_agenda_central'] == CD_AGENDA_SOULMV
+    assert lista[0]['origem'] == 'SOULMV'
+
+
+def test_nao_aceita_justificativa_para_apontamento_existente(cliente, acessos):
+    plantao_id = _plantao(cliente, acessos)
+    cliente.post(
+        f'/pronto-escala/plantoes/{plantao_id}/check-in',
+        headers=acessos['medico'],
+    )
+    resposta = cliente.post(
+        '/pronto-escala/justificativas',
+        headers=acessos['medico'],
+        json={
+            'plantao_id': plantao_id,
+            'tipo': 'CHECKIN',
+            'texto': 'Não deveria ser aceita porque o registro existe.',
+        },
+    )
+    assert resposta.status_code == HTTPStatus.CONFLICT
