@@ -25,10 +25,12 @@ from sqlalchemy.pool import StaticPool
 from app_prontocardio.models import table_registry
 from app_prontocardio.petrobras_models import (
     PetrobrasEvento,
+    PetrobrasExecucao,
     PetrobrasGlosa,
     PetrobrasProtocolo,
 )
 from app_prontocardio.routers import petrobras
+from app_prontocardio.services import petrobras_tiss as tiss
 from app_prontocardio.services.petrobras_appeals import (
     response_data,
     send_appeal,
@@ -50,6 +52,8 @@ from app_prontocardio.services.petrobras_tiss import (
     payment_protocols,
     text_hash,
     validate,
+    validate_response_identity,
+    value,
 )
 
 
@@ -571,13 +575,19 @@ def test_competence_discovery_uses_only_payer(db, config):
     assert payment_protocols(root, config) == ['123', '456']
     client = Mock()
     client.pagamentos.return_value = root
+    client.response_warnings = ['Aviso sintético de compatibilidade']
     assert (
         discover_competencia(db, config, '202610', client=client)[
             'protocolos_localizados'
         ]
         == 2
     )
-    discover_competencia(db, config, '202610', client=client)
+    result = discover_competencia(db, config, '202610', client=client)
+    assert result['avisos'] == client.response_warnings
+    assert (
+        db.scalar(select(PetrobrasExecucao)).erro
+        == client.response_warnings[0]
+    )
     assert len(list(db.scalars(select(PetrobrasProtocolo)))) == 2
     validate(PetrobrasClient(config, dry_run=True).pagamentos('202610'))
     with pytest.raises(TissError):
@@ -649,3 +659,89 @@ def test_partial_appeal_response_preserves_repeated_items():
         {'sequencialItem': ['1'], 'valorAcatadado': ['10.00']},
         {'sequencialItem': ['2'], 'valorAcatadado': ['0.00']},
     ]
+
+
+def test_provider_code_is_used_in_both_request_locations(config):
+    config.codigo_prestador = 'PRESTADOR001'
+    root = PetrobrasClient(config, dry_run=True).pagamentos('202609')
+    assert (
+        value(
+            root,
+            'cabecalho/origem/identificacaoPrestador/codigoPrestadorNaOperadora',
+        )
+        == 'PRESTADOR001'
+    )
+    assert (
+        value(
+            root,
+            'solicitacaoDemonstrativoRetorno/demonstrativoPagamento/dadosPrestador/codigoPrestadorNaOperadora',
+        )
+        == 'PRESTADOR001'
+    )
+
+
+def test_echoed_header_requires_exact_provider_and_operator(config):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    head = element(root, 'cabecalho')
+    provider = element(element(head, 'origem'), 'identificacaoPrestador')
+    code = element(
+        provider, 'codigoPrestadorNaOperadora', config.identificador_prestador
+    )
+    ans = element(element(head, 'destino'), 'registroANS', config.registro_ans)
+    validate_response_identity(root, config)
+    code.text = 'different-provider'
+    with pytest.raises(TissError, match='prestador'):
+        validate_response_identity(root, config)
+    code.text = config.identificador_prestador
+    ans.text = '000000'
+    with pytest.raises(TissError, match='operadora'):
+        validate_response_identity(root, config)
+
+
+def test_payment_protocols_ignore_zero_and_reject_other_provider(config):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    demo = element(root, 'demonstrativoPagamento')
+    element(
+        element(demo, 'cabecalhoDemonstrativo'),
+        'registroANS',
+        config.registro_ans,
+    )
+    code = element(
+        element(element(demo, 'dadosContratado'), 'dadosPrestador'),
+        'codigoPrestadorNaOperadora',
+        config.identificador_prestador,
+    )
+    for number in ['0', '000', '123', '123']:
+        element(element(demo, 'relacaoProtocolos'), 'numeroProtocolo', number)
+    assert payment_protocols(root, config) == ['123']
+    code.text = 'another-provider'
+    with pytest.raises(TissError, match='prestador'):
+        payment_protocols(root, config)
+
+
+def test_header_compatibility_changes_only_validation_copy(
+    config, monkeypatch
+):
+    config.prestador_cnpj = '01234567000189'
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    demo = element(root, 'demonstrativoPagamento')
+    cnpj = element(
+        element(demo, 'cabecalhoDemonstrativo'), 'numeroCNPJ', '1234567000189'
+    )
+    element(
+        element(element(demo, 'dadosContratado'), 'dadosPrestador'),
+        'codigoPrestadorNaOperadora',
+        config.identificador_prestador,
+    )
+    validation = Mock()
+    monkeypatch.setattr(tiss, 'validate', validation)
+    assert len(tiss.validate_response_schema(root, config)) == 1
+    assert cnpj.text == '1234567000189'
+    checked = validation.call_args.args[0]
+    assert checked.find('.//{%s}numeroCNPJ' % NS).text == config.prestador_cnpj
+    cnpj.text = 'invalid'
+    assert not tiss.validate_response_schema(root, config)
+    assert (
+        validation.call_args.args[0].find('.//{%s}numeroCNPJ' % NS).text
+        == 'invalid'
+    )

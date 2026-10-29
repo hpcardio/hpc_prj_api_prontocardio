@@ -12,6 +12,7 @@ class PetrobrasConfig(BaseSettings):
     login: SecretStr = SecretStr('')
     password: SecretStr = SecretStr('')
     prestador_cnpj: str = ''
+    codigo_prestador: str = ''
     registro_ans: str = '422631'
     convenio_id: int = 37
     interval_minutes: int = Field(default=360, ge=15, le=10080)
@@ -21,6 +22,10 @@ class PetrobrasConfig(BaseSettings):
     # aliases.
     discovery_months: int = Field(default=3, ge=1, le=12)
     oracle_guia: str = 'pendente'
+
+    @property
+    def identificador_prestador(self):
+        return self.codigo_prestador or self.prestador_cnpj
 
     def require_connection(self):
         if not self.enabled:

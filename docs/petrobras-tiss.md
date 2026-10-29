@@ -2,11 +2,16 @@
 
 ## Estado da entrega
 
-Implementação isolada para o convênio 37 (Saúde Petrobras), desabilitada por padrão.
-Não houve migração de produção, importação real validada ou envio de recurso.
-As consultas de pagamento de todas as dez competências de 202601 a 202610
-retornaram ausência de informações. Uma resposta de negócio não comprova, sozinha, que todas as
-permissões do prestador estão habilitadas.
+Consulta real de demonstrativos de pagamento validada para janeiro a outubro de
+2026 após corrigir a identificação do prestador: o serviço requer a tag
+`codigoPrestadorNaOperadora`, mesmo quando seu valor é o próprio CNPJ.
+Os resultados vazios registrados nas primeiras validações foram superados por
+esta correção. São evidências históricas, não o estado atual da consulta.
+
+A consulta detalhada de análise dos três protocolos válidos de setembro ainda
+retorna ausência de informações. Não houve cruzamento real guia/TUSS/carteira,
+migração de produção, carga de dados ou envio de recurso. A integração permanece
+em rascunho, com transmissão desabilitada.
 
 ## Origem e cruzamento
 
@@ -167,3 +172,53 @@ A próxima validação precisa desse XML real ou de acesso funcional ao portal. 
 retorno do webservice deve ser confrontado com esse extrato, sem interpretar
 HTTP 500/ausência de informação como zero glosas. Nenhuma alteração especulativa
 foi feita no mapeamento Oracle ou nos parâmetros publicados da integração.
+
+## Correção validada a partir do XML do portal
+
+O XML fornecido usa `codigoPrestadorNaOperadora` no cabeçalho e nos dados do
+prestador. A implementação anterior usava `CNPJ`/`cnpjContratado`. A mudança das
+tags fez a consulta por competência retornar os dados. `PETROBRAS_CODIGO_PRESTADOR`
+pode configurar o código; quando vazio, o valor do CNPJ é enviado como código.
+
+O XML do portal declara 4.03.00; o serviço 4.01.00 retorna 4.01.00 e os mesmos
+10 grupos/64 guias de setembro. Não foi necessária migração de versão TISS para
+recuperar os demonstrativos. Sete grupos de setembro têm protocolo zero e não
+possuem glosa; os três restantes abrangem 57 guias, 24 com glosa por guia. O XML
+é um resumo de pagamento: não fornece TUSS/carteira por procedimento.
+
+Compatibilidade restrita do retorno CRC:
+- Conferir hash sobre o documento original, antes de qualquer ajuste.
+- Aceitar direção de cabeçalho espelhada somente conferindo ANS e identificação
+  exata do prestador; rejeitar identificação ausente ou diferente.
+- O serviço devolve, em `cabecalhoDemonstrativo/numeroCNPJ`, o CNPJ do prestador
+  sem zero inicial, apesar de esse campo representar a operadora. Validar XSD
+  sobre uma cópia apenas para esse defeito exato; preservar o documento original,
+  não usar esse campo para identificar a operadora e registrar aviso na execução.
+- Demais erros de XSD e hash continuam bloqueando a importação.
+- Ignorar números de protocolo compostos somente de zeros.
+
+Reconsulta autenticada, somente leitura e em memória:
+
+| Competência | Protocolos válidos | Guias |
+|---|---:|---:|
+| 202601 | 4 | 55 |
+| 202602 | 3 | 27 |
+| 202603 | 3 | 93 |
+| 202604 | 8 | 103 |
+| 202605 | 3 | 73 |
+| 202606 | 6 | 75 |
+| 202607 | 3 | 66 |
+| 202608 | 6 | 64 |
+| 202609 | 3 | 64 |
+| 202610 | 5 | 46 |
+
+Não somar guias dessas competências como pacientes/itens distintos. Testados os
+três protocolos válidos do XML de setembro na operação de análise; todos retornam
+sem informações. Também verificadas as alternativas CNPJ/código previstas no
+contrato para um protocolo real, sem mudança no resultado. Não substituir número
+de protocolo por número de lote nem fabricar o vínculo com procedimentos Oracle.
+O próximo passo depende do demonstrativo de análise com detalhes por procedimento
+ou de esclarecimento da operadora sobre essa operação específica.
+
+Após a correção: 96 testes da API/regressões aprovados; Ruff aprovado nos módulos
+alterados. Dados reais e credenciais não foram incluídos no repositório.

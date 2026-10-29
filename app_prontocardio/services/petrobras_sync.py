@@ -214,8 +214,12 @@ def discover_competencia(
     session.add(run)
     session.commit()
     try:
-        response = (client or PetrobrasClient(config)).pagamentos(competencia)
+        transport = client or PetrobrasClient(config)
+        response = transport.pagamentos(competencia)
         numbers = payment_protocols(response, config)
+        warnings = getattr(transport, 'response_warnings', [])
+        if not isinstance(warnings, list):
+            warnings = []
         existing = set(
             session.scalars(
                 select(PetrobrasProtocolo.numero).where(
@@ -230,6 +234,7 @@ def discover_competencia(
                         prestador=config.prestador_cnpj, numero=number
                     )
                 )
+        run.erro = '; '.join(warnings)[:200] or None
         run.situacao, run.quantidade, run.fim = (
             'concluida',
             len(numbers),
@@ -238,6 +243,7 @@ def discover_competencia(
         session.commit()
         return {
             'protocolos_localizados': len(numbers),
+            'avisos': warnings,
             'competencia': competencia,
             'orientacao': (
                 'Protocolos disponíveis para sincronização dos itens.'

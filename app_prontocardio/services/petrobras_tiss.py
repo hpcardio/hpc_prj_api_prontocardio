@@ -141,8 +141,8 @@ def message(config, operation):
     element(trans, 'horaRegistroTransacao', now.strftime('%H:%M:%S'))
     element(
         element(element(head, 'origem'), 'identificacaoPrestador'),
-        'CNPJ',
-        config.prestador_cnpj,
+        'codigoPrestadorNaOperadora',
+        config.identificador_prestador,
     )
     element(element(head, 'destino'), 'registroANS', config.registro_ans)
     element(head, 'Padrao', '4.01.00')
@@ -160,12 +160,15 @@ def message(config, operation):
 
 
 def contracted(parent, config):
-    element(parent, 'cnpjContratado', config.prestador_cnpj)
+    element(
+        parent, 'codigoPrestadorNaOperadora', config.identificador_prestador
+    )
 
 
 class PetrobrasClient:
     def __init__(self, config, opener=None, dry_run=False):
         self.config = config
+        self.response_warnings = []
         self.dry_run = dry_run
         self.opener = opener or build_opener(NoRedirect())
 
@@ -249,7 +252,6 @@ class PetrobrasClient:
                 'Resposta SOAP inesperada ou falha informada pela operadora.'
             )
         result = body[0]
-        validate(result)
         error = result.find('.//{%s}mensagemErro' % NS)
         if (
             error is not None
@@ -269,16 +271,6 @@ class PetrobrasClient:
                     'verificar cadastro, credenciais e protocolo.'
                 )
             )
-        source_ans = value(result, 'cabecalho/origem/registroANS')
-        if source_ans != self.config.registro_ans:
-            raise TissError(
-                'Resposta recebida de operadora diferente da configurada.'
-            )
-        destination = value(
-            result, 'cabecalho/destino/identificacaoPrestador/CNPJ'
-        )
-        if destination and destination != self.config.prestador_cnpj:
-            raise TissError('Resposta destinada a outro prestador recusada.')
         received_hash = value(result, 'hash')
 
         checked = deepcopy(result)
@@ -295,6 +287,8 @@ class PetrobrasClient:
                     'confirmada; dados anteriores preservados.'
                 )
             )
+        validate_response_identity(result, self.config)
+        self.response_warnings = validate_response_schema(result, self.config)
         return result
 
     def demonstrativos(self, protocols):
@@ -574,9 +568,7 @@ def payment_protocols(root, config):
         != config.registro_ans
     ):
         raise TissError('Demonstrativo de outra operadora recusado.')
-    cnpj = value(demo, 'dadosContratado/dadosPrestador/cnpjContratado')
-    if cnpj and cnpj != config.prestador_cnpj:
-        raise TissError('Demonstrativo de outro prestador recusado.')
+    validate_provider(demo, 'dadosContratado/dadosPrestador', config)
     numbers = {
         value(node, 'numeroProtocolo')
         for node in demo.findall('.//{%s}relacaoProtocolos' % NS)
@@ -585,4 +577,61 @@ def payment_protocols(root, config):
         raise TissError(
             'Demonstrativo sem protocolos; dados anteriores preservados.'
         )
-    return sorted(numbers)
+    return sorted(n for n in numbers if set(n) != {'0'})
+
+
+def validate_provider(root, path, config):
+    code = value(root, path + '/codigoPrestadorNaOperadora')
+    cnpj = value(root, path + '/cnpjContratado')
+    if code:
+        valid = code == config.identificador_prestador
+    else:
+        valid = cnpj == config.prestador_cnpj
+    if not valid:
+        raise TissError(
+            'Demonstrativo de outro prestador ou sem identificação.'
+        )
+
+
+def validate_response_identity(root, config):
+    """Verify both identities, including an echoed request header."""
+    ans = value(root, 'cabecalho/origem/registroANS')
+    destination = 'cabecalho/destino/identificacaoPrestador'
+    if ans is None:
+        ans = value(root, 'cabecalho/destino/registroANS')
+        destination = 'cabecalho/origem/identificacaoPrestador'
+    if ans != config.registro_ans:
+        raise TissError('Resposta recebida de outra operadora recusada.')
+    code = value(root, destination + '/codigoPrestadorNaOperadora')
+    cnpj = value(root, destination + '/CNPJ')
+    if not (
+        (code and code == config.identificador_prestador)
+        or (cnpj and cnpj == config.prestador_cnpj)
+    ):
+        raise TissError('Resposta de outro prestador ou sem identificação.')
+
+
+def validate_response_schema(root, config):
+    """Validate a copy for the observed CRC header defect."""
+    checked = deepcopy(root)
+    warnings = []
+    for demo in checked.findall('.//{%s}demonstrativoPagamento' % NS):
+        validate_provider(demo, 'dadosContratado/dadosPrestador', config)
+        node = demo.find(
+            '{%s}cabecalhoDemonstrativo/{%s}numeroCNPJ' % (NS, NS)
+        )
+        if (
+            node is not None
+            and config.prestador_cnpj.startswith('0')
+            and node.text == str(int(config.prestador_cnpj))
+        ):
+            # CRC returns the provider CNPJ without leading zero in this
+            # operator metadata field. Never use it to identify the operator.
+            node.text = config.prestador_cnpj
+            warnings.append(
+                'CNPJ do cabeçalho devolvido incorretamente pelo serviço; '
+                'operadora conferida pelo registro ANS. '
+                'XML original preservado.'
+            )
+    validate(checked)
+    return warnings
