@@ -25,14 +25,16 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
             'divergencias': ['Mapeamento da guia Oracle pendente.'],
         }
     guia, tuss = norm(source.get(guia_field)), norm(source.get('tuss'))
-    if not guia or not tuss or source.get('escopo') != 'item':
+    wallet = norm(source.get('carteira'))
+    if not guia or not tuss or not wallet or source.get('escopo') != 'item':
         return {
             'status': 'dados_insuficientes',
             'oracle': None,
             'count': 0,
-            'divergencias': [],
+            'divergencias': [
+                'Vínculo exige carteira, guia e procedimento informados.'
+            ],
         }
-    wallet = norm(source.get('carteira'))
     notes = []
     rows = [
         r
@@ -55,17 +57,6 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
                 'Guia do prestador conferida sem zeros à esquerda, '
                 'com procedimento e carteira exatos.'
             )
-    # An unspecified/internal procedure table cannot be called TUSS merely
-    # because its digits happen to coincide with a code in the Oracle view.
-    if source.get('tabela') not in {'18', '19', '20', '22'}:
-        return {
-            'status': 'dados_insuficientes',
-            'oracle': None,
-            'count': 0,
-            'divergencias': [
-                'Tabela do procedimento exige mapeamento confirmado para TUSS.'
-            ],
-        }
     # Identical join duplicates are not multiple items; different mappings
     # remain ambiguous.
     unique = {
@@ -75,12 +66,7 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
     wallet = norm(source.get('carteira'))
     wallet_notes = notes
     if wallet and rows:
-        compatible = [
-            r
-            for r in rows
-            if not norm(r.get('nr_carteira'))
-            or norm(r.get('nr_carteira')) == wallet
-        ]
+        compatible = [r for r in rows if norm(r.get('nr_carteira')) == wallet]
         if not compatible:
             return {
                 'status': 'ambiguo',
@@ -89,18 +75,11 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
                 'divergencias': [
                     (
                         'Guia e TUSS encontrados, mas a carteira '
-                        'é divergente. Vínculo não confirmado.'
+                        'está ausente ou é divergente. Vínculo não confirmado.'
                     )
                 ],
             }
         rows = compatible
-    elif not wallet:
-        wallet_notes.append(
-            (
-                'Carteira não informada pela Petrobras; '
-                'conferência adicional indisponível.'
-            )
-        )
     if len(rows) > 1:
         # TISS sequencialItem != MV cd_lancamento. Never equate them without a
         # map.
@@ -132,12 +111,10 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
         }
     row = rows[0]
     diffs = wallet_notes
-    if wallet and not norm(row.get('nr_carteira')):
+    if source.get('tabela') not in {'18', '19', '20', '22'}:
         diffs.append(
-            (
-                'Carteira não informada no Oracle; '
-                'conferência adicional indisponível.'
-            )
+            'Vínculo pela chave carteira + guia + procedimento em CD_TUSS; '
+            'tabela original preservada sem conversão de código.'
         )
     for sf, of in [('valor_informado', 'valor'), ('quantidade', 'quantidade')]:
         if (

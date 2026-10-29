@@ -31,8 +31,10 @@ meses, mas seus resumos não substituem detalhes de procedimentos.
 
 Foram recebidos 1.528 itens detalhados e 242 registros com motivos/valores de
 glosa nas seis competências. As somas não representam itens únicos entre meses
-nem cobertura completa. O cruzamento retornou 240 não localizados e dois com
-dados insuficientes; nenhum vínculo automático foi confirmado.
+nem cobertura completa. Na validação anterior à exigência da chave composta, o cruzamento retornou
+240 não localizados e dois com dados insuficientes; nenhum vínculo automático
+foi confirmado. Esses números são evidência daquela execução, não uma nova
+consulta do período depois da revisão da regra.
 
 Diagnóstico complementar de outubro: as carteiras dos 12 itens glosados existem
 na view Oracle; nenhuma guia do prestador ou da operadora corresponde, mesmo
@@ -69,21 +71,31 @@ A escolha confirmada pelo usuário é `numeroGuiaPrestador` → `NR_GUIA` da
 `DBAMV.HPC_V_CONTA_ATENDIMENTO`, padrão `PETROBRAS_ORACLE_GUIA=guia_prestador`.
 Não existe fallback silencioso para guia da operadora.
 
-A igualdade exata de guia + procedimento é preferida. Apenas para guia do
+A chave obrigatória é `numeroCarteira + numeroGuiaPrestador +
+codigoProcedimento`, comparada a `NR_CARTEIRA + NR_GUIA + CD_TUSS` do mesmo item
+Oracle. Carteira ausente em qualquer origem impede o vínculo. A igualdade exata
+da guia é preferida. Apenas para guia do
 prestador numérica, zeros iniciais podem ser removidos da chave de pesquisa;
 essa alternativa exige carteira exata em ambas as origens e registra a regra no
 resultado. Identificadores originais continuam preservados. Carteira e código
 TUSS nunca perdem zeros iniciais. Carteira divergente impede vínculo.
 
-A tabela do código também é considerada: 18, 19, 20 e 22 são pesquisadas em
-CD_TUSS; tabela 00/98 ou desconhecida exige mapeamento confirmado e não é assumida
-como TUSS. Duplicatas idênticas da view são deduplicadas; procedimentos repetidos
+O código é comparado diretamente a CD_TUSS, sem conversão ou fallback para
+CD_PRO_FAT. A tabela original é preservada e a tabela 00/98 não bloqueia, por si
+só, a correspondência dos três campos. Nesses casos, a regra aplicada fica
+registrada nas observações do vínculo. Duplicatas idênticas da view são deduplicadas; procedimentos repetidos
 são desambiguados por data/quantidade quando possível. Demais casos ficam ambíguos.
 Sequencial TISS não é presumido igual ao lançamento MV.
 
-O segundo XML de análise fornecido pelo usuário confirmou uma coincidência por
-guia normalizada + carteira + CD_TUSS, mas declara tabela 00. Esse caso não foi
-usado como autorização para mapear automaticamente todos os códigos internos.
+Na revalidação da regra composta em 29/10/2026, o XML fornecido com três itens
+(dois glosados) foi cruzado com o Oracle atual em transação somente leitura.
+A consulta pela guia do prestador, incluindo normalização dos zeros iniciais,
+retornou zero candidatos na view para o convênio configurado. A correspondência
+relatada na investigação anterior não foi reproduzida; nenhum vínculo real foi
+persistido. A causa da diferença e o mapeamento da guia na origem MV permanecem
+pendentes. Esse teste utilizou explicitamente o XML fornecido, não uma nova
+resposta do webservice. As consultas de janeiro a outubro descritas acima foram
+feitas diretamente no webservice.
 
 ## Contratos e compatibilidade de recepção
 
@@ -160,13 +172,14 @@ Nenhuma migração, carga real no PostgreSQL ou envio foi feito nesta validaçã
 
 ## Testes e reversão
 
-API: 109 testes sintéticos/regressões; frontend: sete testes Django e ensaio local
+API: 117 testes sintéticos/regressões; frontend: sete testes Django e ensaio local
 Playwright desktop 1440 px/celular 390 px, com carteira, rascunho e ausência de
 envio involuntário. Ruff nos arquivos alterados. Os XMLs reais não são fixtures.
 
 Casos novos: lotes parciais, idempotência, rascunhos preservados, protocolo estranho
 recusado, totais divergentes, normalização restrita de guia, carteira/código com
-zeros preservados, tabela desconhecida e contrato de envio não relaxado.
+zeros preservados, tabela 00 com chave completa, componentes ausentes/divergentes e contrato de
+envio não relaxado.
 Migração previamente exercitada em SQLite e PostgreSQL 12.6 descartável. Há três
 testes PostgreSQL opt-in em `tests/services/test_petrobras_postgres.py`, restritos
 à instância local de testes; a migração não foi alterada nesta revisão.

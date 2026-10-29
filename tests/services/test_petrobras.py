@@ -629,12 +629,13 @@ def test_wallet_disambiguates_beneficiaries(source, candidate):
     )
 
 
-def test_missing_wallet_is_visible(source, candidate):
+def test_missing_oracle_wallet_prevents_match(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = None
     result = reconcile(source, [candidate], 37, 'guia_operadora')
-    assert result['status'] == 'conciliado'
-    assert any('Carteira não informada' in d for d in result['divergencias'])
+    assert result['status'] == 'ambiguo'
+    assert result['oracle'] is None
+    assert any('carteira' in d for d in result['divergencias'])
 
 
 def test_analysis_rejects_other_provider(config):
@@ -804,12 +805,16 @@ def test_provider_guide_normalization_requires_exact_wallet(source, candidate):
     )
 
 
-def test_unspecified_procedure_table_does_not_assume_tuss(source, candidate):
-    source['tabela'] = '00'
-    assert (
-        reconcile(source, [candidate], 37, 'guia_operadora')['status']
-        == 'dados_insuficientes'
-    )
+@pytest.mark.parametrize('table', ['00', '98', None])
+def test_table_does_not_block_confirmed_composite_key(
+    source, candidate, table
+):
+    source['tabela'] = table
+    source['guia_prestador'] = candidate['nr_guia']
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    assert result['status'] == 'conciliado'
+    assert result['oracle'] == candidate
+    assert any('tabela original' in d for d in result['divergencias'])
 
 
 def test_partial_totals_are_retained_and_block_transmission(config):
@@ -948,3 +953,23 @@ def test_analysis_identity_cannot_rely_only_on_echoed_header(
         tiss.validate_response_schema(root, config)
     code.text = config.identificador_prestador
     assert tiss.validate_response_schema(root, config) == []
+
+
+@pytest.mark.parametrize('field', ['carteira', 'guia_prestador', 'tuss'])
+def test_every_source_key_component_is_required(source, candidate, field):
+    source['guia_prestador'] = candidate['nr_guia']
+    source[field] = None
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    assert result['status'] == 'dados_insuficientes'
+    assert result['oracle'] is None
+
+
+@pytest.mark.parametrize('field', ['nr_carteira', 'nr_guia', 'cd_tuss'])
+def test_each_component_must_belong_to_the_same_oracle_item(
+    source, candidate, field
+):
+    source['guia_prestador'] = candidate['nr_guia']
+    other = {**candidate, field: 'different', 'cd_lancamento': 2}
+    assert reconcile(source, [other], 37, 'guia_prestador')['oracle'] is None
+    result = reconcile(source, [other, candidate], 37, 'guia_prestador')
+    assert result['oracle'] == candidate
