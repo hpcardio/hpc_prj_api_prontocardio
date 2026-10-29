@@ -5,6 +5,7 @@ from sqlalchemy import pool
 
 from alembic import context
 from app_prontocardio.models import table_registry
+from app_prontocardio import petrobras_models  # noqa: F401
 from app_prontocardio.settings import Settings
 
 # this is the Alembic Config object, which provides

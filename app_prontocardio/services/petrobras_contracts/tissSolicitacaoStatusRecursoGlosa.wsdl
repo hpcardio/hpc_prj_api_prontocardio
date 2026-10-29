@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:ans="http://www.ans.gov.br/padroes/tiss/schemas" xmlns:ns="http://www.ans.gov.br/tiss/ws/tipos/tisssolicitacaostatusprotocolorecurso/v40100" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:tns="http://www.ans.gov.br/tiss/ws/tipos/tisssolicitacaostatusprotocolorecurso/v40100" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" name="tissSolicitacaoStatusProtocoloRecurso" targetNamespace="http://www.ans.gov.br/tiss/ws/tipos/tisssolicitacaostatusprotocolorecurso/v40100">
+	<types>
+		<schema xmlns="http://www.w3.org/2001/XMLSchema" xmlns:soap11-enc="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+			<import namespace="http://www.ans.gov.br/padroes/tiss/schemas" schemaLocation="tissWebServicesV4_01_00.xsd"/>
+		</schema>
+	</types>
+	<message name="tissSolicitacaoStatusProtocoloRecurso_Request">
+		<part element="ans:solicitacaoStatusRecursoGlosaWS" name="solicitacaoStatusProtocoloRecurso"/>
+	</message>
+	<message name="tissSolicitacaoStatusProtocoloRecurso_Response">
+		<part element="ans:situacaoProtocoloRecursoWS" name="situacaoProtocoloRecurso"/>
+	</message>
+	<message name="tissFault">
+		<part element="ans:tissFaultWS" name="tissFault"/>
+	</message>
+	<portType name="tissSolicitacaoStatusProtocoloRecurso_PortType">
+		<operation name="tissSolicitacaoStatusProtocoloRecurso_Operation">
+			<input message="tns:tissSolicitacaoStatusProtocoloRecurso_Request"/>
+			<output message="tns:tissSolicitacaoStatusProtocoloRecurso_Response"/>
+			<fault message="tns:tissFault" name="TissFault"/>
+		</operation>
+	</portType>
+	<binding name="tissSolicitacaoStatusProtocoloRecurso_Binding" type="tns:tissSolicitacaoStatusProtocoloRecurso_PortType">
+		<soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+		<operation name="tissSolicitacaoStatusProtocoloRecurso_Operation">
+			<soap:operation soapAction=""/>
+			<input>
+				<soap:body use="literal"/>
+			</input>
+			<output>
+				<soap:body use="literal"/>
+			</output>
+			<fault name="TissFault">
+				<soap:fault name="TissFault" use="literal"/>
+			</fault>
+		</operation>
+	</binding>
+	<service name="tissSolicitacaoStatusProtocoloRecurso">
+		<port binding="tns:tissSolicitacaoStatusProtocoloRecurso_Binding" name="tissSolicitacaoStatusProtocoloRecurso_Port">
+			<soap:address location="http://webservices.crc.com.br:80/tiss/ws/40100/tissSolicitacaoStatusRecursoGlosa"/>
+		</port>
+	</service>
+</definitions>

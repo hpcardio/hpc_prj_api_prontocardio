@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:ans="http://www.ans.gov.br/padroes/tiss/schemas" xmlns:ns="http://www.w3.org/2000/09/xmldsig#" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:tns="http://www.ans.gov.br/tiss/ws/tipos/tissenviodocumentos/v40100" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" name="tissEnvioDocumentos" targetNamespace="http://www.ans.gov.br/tiss/ws/tipos/tissenviodocumentos/v40100">
+	<types>
+		<schema xmlns="http://www.w3.org/2001/XMLSchema" xmlns:soap11-enc="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+			<import namespace="http://www.ans.gov.br/padroes/tiss/schemas" schemaLocation="tissWebServicesV4_01_00.xsd"/>
+		</schema>
+	</types>
+	<message name="tissEnvioDocumentos_Request">
+		<part element="ans:envioDocumentoWS" name="envioDocumentos"/>
+	</message>
+	<message name="tissEnvioDocumentos_Response">
+		<part element="ans:reciboDocumentosWS" name="reciboDocumentos"/>
+	</message>
+	<message name="tissFault">
+		<part element="ans:tissFaultWS" name="tissFault"/>
+	</message>
+	<portType name="tissEnvioDocumentos_PortType">
+		<operation name="tissEnvioDocumentos_Operation">
+			<input message="tns:tissEnvioDocumentos_Request"/>
+			<output message="tns:tissEnvioDocumentos_Response"/>
+			<fault message="tns:tissFault" name="TissFault"/>
+		</operation>
+	</portType>
+	<binding name="tissEnvioDocumentos_Binding" type="tns:tissEnvioDocumentos_PortType">
+		<soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+		<operation name="tissEnvioDocumentos_Operation">
+			<soap:operation soapAction=""/>
+			<input>
+				<soap:body use="literal"/>
+			</input>
+			<output>
+				<soap:body use="literal"/>
+			</output>
+			<fault name="TissFault">
+				<soap:fault name="TissFault" use="literal"/>
+			</fault>
+		</operation>
+	</binding>
+	<service name="tissEnvioDocumentos">
+		<port binding="tns:tissEnvioDocumentos_Binding" name="tissEnvioDocumentos_Port">
+			<soap:address location="http://webservices.crc.com.br:80/tiss/ws/40100/tissEnvioDocumentos"/>
+		</port>
+	</service>
+</definitions>

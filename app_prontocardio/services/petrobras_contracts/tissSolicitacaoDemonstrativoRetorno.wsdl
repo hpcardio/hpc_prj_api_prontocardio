@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:ans="http://www.ans.gov.br/padroes/tiss/schemas" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:tns="http://www.ans.gov.br/tiss/ws/tipos/tisssolicitacaodemonstrativoretorno/v40100" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" name="tissSolicitacaoDemonstrativoRetorno" targetNamespace="http://www.ans.gov.br/tiss/ws/tipos/tisssolicitacaodemonstrativoretorno/v40100">
+	<types>
+		<schema xmlns="http://www.w3.org/2001/XMLSchema" xmlns:soap11-enc="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+			<import namespace="http://www.ans.gov.br/padroes/tiss/schemas" schemaLocation="tissWebServicesV4_01_00.xsd"/>
+		</schema>
+	</types>
+	<message name="tissSolicitacaoDemonstrativoRetorno_Request">
+		<part element="ans:solicitacaoDemonstrativoRetornoWS" name="solicitacaoDemonstrativoRetorno"/>
+	</message>
+	<message name="tissSolicitacaoDemonstrativoRetorno_Response">
+		<part element="ans:demonstrativoRetornoWS" name="demonstrativoRetorno"/>
+	</message>
+	<message name="tissFault">
+		<part element="ans:tissFaultWS" name="tissFault"/>
+	</message>
+	<portType name="tissSolicitacaoDemonstrativoRetorno_PortType">
+		<operation name="tissSolicitacaoDemonstrativoRetorno_Operation">
+			<input message="tns:tissSolicitacaoDemonstrativoRetorno_Request"/>
+			<output message="tns:tissSolicitacaoDemonstrativoRetorno_Response"/>
+			<fault message="tns:tissFault" name="TissFault"/>
+		</operation>
+	</portType>
+	<binding name="tissSolicitacaoDemonstrativoRetorno_Binding" type="tns:tissSolicitacaoDemonstrativoRetorno_PortType">
+		<soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+		<operation name="tissSolicitacaoDemonstrativoRetorno_Operation">
+			<soap:operation soapAction=""/>
+			<input>
+				<soap:body use="literal"/>
+			</input>
+			<output>
+				<soap:body use="literal"/>
+			</output>
+			<fault name="TissFault">
+				<soap:fault name="TissFault" use="literal"/>
+			</fault>
+		</operation>
+	</binding>
+	<service name="tissSolicitacaoDemonstrativoRetorno">
+		<port binding="tns:tissSolicitacaoDemonstrativoRetorno_Binding" name="tissSolicitacaoDemonstrativoRetorno_Port">
+			<soap:address location="http://webservices.crc.com.br:80/tiss/ws/40100/tissSolicitacaoDemonstrativoRetorno"/>
+		</port>
+	</service>
+</definitions>
