@@ -5,7 +5,6 @@ import pytest
 
 from app_prontocardio.agenda_medica_models import AgendaMedicaVinculo
 from app_prontocardio.app import app
-from app_prontocardio.database import get_session_oracle
 from app_prontocardio.models import Usuario
 from app_prontocardio.routers import pronto_escala
 from app_prontocardio.security import gera_hash_senha
@@ -221,8 +220,9 @@ def test_sincroniza_agendas_reais_do_soulmv_sem_duplicar(
                 }
             ]
 
-    app.dependency_overrides[get_session_oracle] = object
-    monkeypatch.setattr(pronto_escala, 'AgendaMedicaSoulMV', SoulMVTeste)
+    app.dependency_overrides[pronto_escala.get_soulmv_pronto_escala] = (
+        lambda: SoulMVTeste(None)
+    )
     try:
         primeira = cliente.post(
             '/pronto-escala/plantoes/sincronizar-soulmv',
@@ -235,7 +235,9 @@ def test_sincroniza_agendas_reais_do_soulmv_sem_duplicar(
             json={'dias': DIAS_SINCRONIZACAO},
         )
     finally:
-        app.dependency_overrides.pop(get_session_oracle, None)
+        app.dependency_overrides.pop(
+            pronto_escala.get_soulmv_pronto_escala, None
+        )
 
     assert primeira.status_code == HTTPStatus.OK
     assert primeira.json()['criadas'] == 1

@@ -35,6 +35,17 @@ SessionOracle = Annotated[Session, Depends(get_session_oracle)]
 UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 
 
+def get_soulmv_pronto_escala(
+    session: SessionOracle,
+) -> AgendaMedicaSoulMV:
+    return AgendaMedicaSoulMV(session)
+
+
+SoulMVProntoEscala = Annotated[
+    AgendaMedicaSoulMV, Depends(get_soulmv_pronto_escala)
+]
+
+
 def _agora() -> datetime:
     return datetime.now(FUSO).replace(tzinfo=None)
 
@@ -298,7 +309,7 @@ def sincronizar_plantoes_soulmv(
     dados: SincronizacaoInput,
     usuario: Validador,
     postgres: SessionPostgres,
-    oracle: SessionOracle,
+    soulmv: SoulMVProntoEscala,
 ):
     """Importa agendas reais do SoulMV sem escrever no Oracle.
 
@@ -306,7 +317,7 @@ def sincronizar_plantoes_soulmv(
     prestador, setor ou período feitas no MV são refletidas no registro local,
     preservando os apontamentos e a trilha de auditoria já existentes.
     """
-    agendas = AgendaMedicaSoulMV(oracle).agendas_atuais(dados.dias)
+    agendas = soulmv.agendas_atuais(dados.dias)
     criados = atualizados = ignorados = 0
     ids: list[int] = []
     for agenda in agendas:
