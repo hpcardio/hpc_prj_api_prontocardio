@@ -256,6 +256,79 @@ order by caso.dt_inicio desc nulls last, caso.cd_caso_protocolo desc
 fetch first 50 rows only
 """
 
+# Pendências NPR da prescrição médica. Itens configurados com frequência
+# LIVRE não exigem geração/aprazamento e, portanto, não constituem pendência.
+SQL_PENDENCIAS_NPR = """
+with avaliacao as (
+    select
+        pm.cd_pre_med,
+        pm.dt_pre_med,
+        ip.cd_itpre_med,
+        tp.ds_tip_presc as descricao_item,
+        tf.ds_tip_fre as frequencia,
+        case
+            when ip.sn_horario_gerado = 'N'
+             and exists (
+                select 1
+                from dbamv.tip_fre tf_regra
+                where tf_regra.cd_tip_fre = ip.cd_tip_fre
+                  and not (
+                    (nvl(tf_regra.tp_controle, 'X') = 'SN'
+                     or nvl(ip.tp_situacao, 'N') = 'S')
+                    and tf_regra.qt_aplic_solicitadas = 0
+                  )
+                  and not (
+                    (nvl(tf_regra.tp_controle, 'X') = 'ACM'
+                     or nvl(ip.tp_situacao, 'N') = 'A')
+                    and tf_regra.qt_aplic_solicitadas_acm = 0
+                  )
+             ) then 'S'
+            else 'N'
+        end as pendencia_geracao,
+        (
+            select count(*)
+            from dbamv.hritpre_med hr
+            where hr.cd_itpre_med = ip.cd_itpre_med
+              and hr.cd_fechamento is null
+        ) as horarios_sem_fechamento,
+        (
+            select min(hr.dh_medicacao)
+            from dbamv.hritpre_med hr
+            where hr.cd_itpre_med = ip.cd_itpre_med
+              and hr.cd_fechamento is null
+        ) as primeiro_hr_sem_fechamento
+    from dbamv.pre_med pm
+    join dbamv.pagu_objeto po on po.cd_objeto = pm.cd_objeto
+    join dbamv.itpre_med ip on ip.cd_pre_med = pm.cd_pre_med
+    join dbamv.tip_presc tp on tp.cd_tip_presc = ip.cd_tip_presc
+    left join dbamv.tip_fre tf on tf.cd_tip_fre = ip.cd_tip_fre
+    where pm.cd_atendimento = :admission_id
+      and pm.tp_pre_med = 'M'
+      and pm.fl_impresso = 'S'
+      and po.tp_objeto = 'PRESCR'
+      and nvl(ip.sn_cancelado, 'N') <> 'S'
+      and upper(trim(nvl(tf.ds_tip_fre, ''))) <> 'LIVRE'
+      and tp.cd_tip_esq in (
+          'MAV', 'DET', 'DEP', 'MDA', 'MDN', 'MDU', 'MDO', 'MNP', 'SOR', 'HEM'
+      )
+      and dbamv.fnc_verifica_tipo_checagem(ip.cd_itpre_med) = 'CC'
+)
+select
+    a.*,
+    case
+        when a.pendencia_geracao = 'S' and a.horarios_sem_fechamento > 0
+            then 'SEM GERACAO E COM HORARIO SEM FECHAMENTO'
+        when a.pendencia_geracao = 'S'
+            then 'PENDENCIA DE GERACAO DE HORARIOS'
+        else 'HORARIO SEM FECHAMENTO DE APRAZAMENTO'
+    end as motivo_npr
+from avaliacao a
+where a.pendencia_geracao = 'S'
+   or a.horarios_sem_fechamento > 0
+order by a.dt_pre_med, a.cd_pre_med, a.cd_itpre_med
+fetch first 200 rows only
+"""
+
 SQL_SINAIS_VITAIS = """
 select
     c.cd_coleta_sinal_vital,
@@ -1051,6 +1124,49 @@ def protocolos_assistenciais(admission_id: int):
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha ao consultar protocolos assistenciais no Soul MV: {exc}") from exc
+
+
+@router.get('/paciente/{admission_id}/npr')
+def pendencias_npr(admission_id: int):
+    try:
+        rows = _cached_clinical_rows(
+            'pendencias-npr',
+            admission_id,
+            SQL_PENDENCIAS_NPR,
+        )
+        pendencies = [
+            {
+                'prescriptionId': _plain(row.get('CD_PRE_MED')),
+                'prescriptionItemId': _plain(row.get('CD_ITPRE_MED')),
+                'prescriptionDate': _iso(row.get('DT_PRE_MED')),
+                'description': str(
+                    row.get('DESCRICAO_ITEM') or 'Item da prescrição'
+                ).strip(),
+                'frequency': str(row.get('FREQUENCIA') or '').strip() or None,
+                'reason': str(
+                    row.get('MOTIVO_NPR') or 'Pendência NPR'
+                ).strip(),
+                'openScheduleCount': int(
+                    row.get('HORARIOS_SEM_FECHAMENTO') or 0
+                ),
+                'firstOpenSchedule': _iso(
+                    row.get('PRIMEIRO_HR_SEM_FECHAMENTO')
+                ),
+            }
+            for row in rows
+        ]
+        return {
+            'source': 'soulmv',
+            'updatedAt': datetime.now().isoformat(),
+            'hasPending': bool(pendencies),
+            'count': len(pendencies),
+            'pendencies': pendencies,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail='Falha ao consultar pendências NPR no Soul MV.',
+        ) from exc
 
 
 @router.get("/paciente/{admission_id}/sinais-vitais")

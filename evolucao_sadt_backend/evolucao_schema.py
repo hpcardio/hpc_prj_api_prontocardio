@@ -24,6 +24,8 @@ class ContextoEvolucaoMv(BaseModel):
     cd_paciente: int
     cd_prestador: int
     usuario_mv: str
+    nome_prestador: str
+    crm: str
     cd_id_usuario: int
     cd_tipo_documento: int
     cd_objeto: int

@@ -9,6 +9,7 @@ def request_args(token):
     return {
         'files': {'arquivo': ('comprovante.png', PNG, 'image/png')},
         'data': {
+            **{f'parametro_{i}': f'valor {i}' for i in range(1, 8)},
             'telefone': '5585994367185',
             'nome_template': 'confirmacao_agendamento_rede',
             'idioma': 'pt_BR',

@@ -26,6 +26,7 @@ def test_envia_template_com_cabecalho_de_imagem(monkeypatch):
         nome_template='confirmacao_agendamento_rede',
         idioma='pt_BR',
         png=PNG,
+        parametros=[f'valor {i}' for i in range(7)],
     )
 
     assert result['id_externo'] == 'msg-1'
@@ -43,5 +44,6 @@ def test_rejeita_arquivo_sem_assinatura_png():
             nome_template='confirmacao_agendamento_rede',
             idioma='pt_BR',
             png=b'not-png',
+            parametros=['valor'] * 7,
         )
     assert error.value.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY

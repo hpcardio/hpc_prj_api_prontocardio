@@ -23,6 +23,8 @@ from app_prontocardio.models import WhatsappEnvioIdempotente
 from app_prontocardio.routers.agendamentos import ValidaUsuarioAtual
 from app_prontocardio.settings import Settings
 from app_prontocardio.whatsapp_service import (
+    COMPROVANTE_PARAMETRO_MAX_LENGTH,
+    COMPROVANTE_PARAMETROS,
     TELEFONE_E164_MAX_LENGTH,
     TELEFONE_E164_MIN_LENGTH,
     validar_imagem_template,
@@ -104,10 +106,72 @@ def comprovante_form(
         ) from exc
 
 
+class WhatsAppReceiptInput(WhatsAppComprovanteInput):
+    parametros: list[str] = Field(min_length=7, max_length=7)
+
+
+def receipt_form(  # noqa: PLR0913, PLR0917
+    telefone: Annotated[str, Form()],
+    nome_template: Annotated[str, Form()],
+    idioma: Annotated[str, Form()] = 'pt_BR',
+    chave_idempotencia: Annotated[str, Form()] = '',
+    parametros: Annotated[str | None, Form()] = None,
+    parametro_1: Annotated[str | None, Form()] = None,
+    parametro_2: Annotated[str | None, Form()] = None,
+    parametro_3: Annotated[str | None, Form()] = None,
+    parametro_4: Annotated[str | None, Form()] = None,
+    parametro_5: Annotated[str | None, Form()] = None,
+    parametro_6: Annotated[str | None, Form()] = None,
+    parametro_7: Annotated[str | None, Form()] = None,
+) -> WhatsAppReceiptInput:
+    individual = [
+        parametro_1,
+        parametro_2,
+        parametro_3,
+        parametro_4,
+        parametro_5,
+        parametro_6,
+        parametro_7,
+    ]
+    try:
+        if parametros is not None and any(v is not None for v in individual):
+            raise ValueError('Formatos de parametros conflitantes.')
+        values = (
+            json.loads(parametros) if parametros is not None else individual
+        )
+        if (
+            not isinstance(values, list)
+            or len(values) != COMPROVANTE_PARAMETROS
+        ):
+            raise ValueError('O comprovante exige sete parametros.')
+        normalized = []
+        for value in values:
+            if not isinstance(value, str):
+                raise ValueError('Parametro invalido.')
+            clean_value = ' '.join(value.split())
+            if (
+                not clean_value
+                or len(clean_value) > COMPROVANTE_PARAMETRO_MAX_LENGTH
+            ):
+                raise ValueError('Parametro ausente ou invalido.')
+            normalized.append(clean_value)
+        return WhatsAppReceiptInput(
+            telefone=telefone,
+            nome_template=nome_template,
+            idioma=idioma,
+            chave_idempotencia=chave_idempotencia,
+            parametros=normalized,
+        )
+    except (ValueError, TypeError, ValidationError) as exc:
+        raise HTTPException(
+            status_code=422, detail='Dados do comprovante invalidos.'
+        ) from exc
+
+
 @router.post('/enviar-comprovante')
 async def enviar_comprovante_whatsapp(
     usuario_atual: ValidaUsuarioAtual,
-    payload: Annotated[WhatsAppComprovanteInput, Depends(comprovante_form)],
+    payload: Annotated[WhatsAppReceiptInput, Depends(receipt_form)],
     arquivo: UploadFile = File(),
     session: Session = Depends(get_session_postgres),
 ) -> dict[str, Any]:
@@ -166,6 +230,7 @@ async def enviar_comprovante_whatsapp(
             nome_template=payload.nome_template,
             idioma=payload.idioma,
             png=content,
+            parametros=payload.parametros,
         )
         record.status = 'ENVIADO'
         record.id_externo = result['id_externo']
@@ -178,7 +243,7 @@ async def enviar_comprovante_whatsapp(
             if exc.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR
             else 'FALHOU'
         )
-        record.erro_sanitizado = str(exc.detail)[:240]
+        record.erro_sanitizado = f'WhatsApp HTTP {exc.status_code}.'
         session.commit()
         raise
 

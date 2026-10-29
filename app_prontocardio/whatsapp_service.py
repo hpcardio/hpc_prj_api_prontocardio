@@ -13,6 +13,8 @@ settings = Settings()
 TELEFONE_E164_MIN_LENGTH = 10
 TELEFONE_E164_MAX_LENGTH = 15
 PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+COMPROVANTE_PARAMETROS = 7
+COMPROVANTE_PARAMETRO_MAX_LENGTH = 1024
 
 
 def whatsapp_config() -> tuple[str, str, str]:
@@ -121,12 +123,27 @@ def upload_whatsapp_media(*, content: bytes, mime_type: str) -> str:
 
 
 def enviar_comprovante_whatsapp(
-    *, telefone: str, nome_template: str, idioma: str, png: bytes
+    *,
+    telefone: str,
+    nome_template: str,
+    idioma: str,
+    png: bytes,
+    parametros: list[str],
 ) -> dict[str, Any]:
     if not png.startswith(PNG_SIGNATURE) or len(png) > 5 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail='Comprovante PNG inválido.',
+        )
+    if len(parametros) != COMPROVANTE_PARAMETROS or any(
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > COMPROVANTE_PARAMETRO_MAX_LENGTH
+        for value in parametros
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail='O comprovante exige sete parametros validos.',
         )
     telefone_normalizado = normalizar_telefone_whatsapp(telefone)
     media_id = upload_whatsapp_media(content=png, mime_type='image/png')
@@ -143,7 +160,13 @@ def enviar_comprovante_whatsapp(
                     'parameters': [
                         {'type': 'image', 'image': {'id': media_id}}
                     ],
-                }
+                },
+                {
+                    'type': 'body',
+                    'parameters': [
+                        {'type': 'text', 'text': value} for value in parametros
+                    ],
+                },
             ],
         },
     })
