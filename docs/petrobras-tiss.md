@@ -140,3 +140,30 @@ Pendência externa: confirmar a disponibilidade de demonstrativos deste prestado
 no webservice Petrobras e obter uma resposta real com itens. Só então será possível
 validar guia/TUSS/carteira com dados reais. Nenhuma migração de produção, carga real,
 recurso ou comprovante foi enviado durante estas validações.
+
+## Divergência comprovada entre portal e SOAP (29/10/2026)
+
+A imagem fornecida pelo usuário mostra demonstrativos no portal para 31/08/2026,
+30/09/2026 e 30/10/2026, todos com itens glosados. Portanto, o retorno vazio por
+competência não comprova inexistência de demonstrativos nem falta de cadastro.
+
+Foi executada consulta SOAP de leitura para cada uma dessas datas usando a
+alternativa `periodo/dataPagamento` prevista no XSD, em vez de `periodo/competencia`.
+Todas retornaram HTTP 500. O diagnóstico de 30/09 identificou SOAP-ENV:Client e
+ORA-01403 (no data found) na rotina de solicitação de demonstrativo da operadora.
+Payload bruto, credenciais e detalhes de infraestrutura não foram persistidos.
+
+Causa exata ainda não determinada: falta comparar identificadores do prestador,
+competência/data de pagamento, número do demonstrativo e protocolos com o XML de
+um extrato efetivamente disponibilizado no portal. A data exibida na lista não foi
+presumida definitivamente igual à data de pagamento. Não trocar parâmetros ou
+habilitar importação/transmissão com base apenas nessa hipótese.
+
+O manual oficial do portal documenta a emissão do XML em Extrato > Demonstrativo
+TISS, após selecionar o demonstrativo e o lote:
+https://saudepetrobras.com.br/data/files/1E/74/13/4E/A0A719109531B619A9B8F9C2/Manual_Portal_TISS_Ago_2024.pdf
+
+A próxima validação precisa desse XML real ou de acesso funcional ao portal. O
+retorno do webservice deve ser confrontado com esse extrato, sem interpretar
+HTTP 500/ausência de informação como zero glosas. Nenhuma alteração especulativa
+foi feita no mapeamento Oracle ou nos parâmetros publicados da integração.
