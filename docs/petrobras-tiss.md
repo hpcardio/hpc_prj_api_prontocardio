@@ -4,8 +4,8 @@
 
 Implementação isolada para o convênio 37 (Saúde Petrobras), desabilitada por padrão.
 Não houve migração de produção, importação real validada ou envio de recurso.
-As consultas de pagamento das competências 202609 e 202610 retornaram ausência
-de informações. Uma resposta de negócio não comprova, sozinha, que todas as
+As consultas de pagamento de todas as dez competências de 202601 a 202610
+retornaram ausência de informações. Uma resposta de negócio não comprova, sozinha, que todas as
 permissões do prestador estão habilitadas.
 
 ## Origem e cruzamento
@@ -94,8 +94,9 @@ Respostas parciais preservam os itens e valores acatados individualmente.
 
 Testes sintéticos cobrem contratos XSD, carteira/guia/TUSS, duplicidades,
 permissões, concorrência de rascunho, anexos, idempotência, migração e falhas de
-envio. A migração foi exercitada em SQLite com schema; validar também em
-PostgreSQL de homologação antes de produção.
+envio. A migração foi exercitada em SQLite com schema e PostgreSQL 12.6 descartável
+local. A versão/configuração do PostgreSQL oficial ainda deve ser considerada
+no procedimento de implantação.
 
 Para desativar: `PETROBRAS_ENABLED=false` em ambos os serviços e suspender o
 agendamento. Preservar tabelas/auditoria. O downgrade exclui dados Petrobras e
@@ -110,3 +111,32 @@ não deve ser usado como reversão operacional após importação real.
 - Nenhuma chamada de envio ocorreu no ensaio visual; chamadas API foram simuladas.
 - Ruff passou nos módulos novos e testes da API.
 - Contratos WSDL/XSD preservados como obtidos, inclusive espaços de comentários.
+
+## Validação adicional solicitada (29/10/2026)
+
+- Consultadas individualmente via HTTPS as competências 202601, 202602, 202603,
+  202604, 202605, 202606, 202607, 202608, 202609 e 202610, usando as credenciais
+  fornecidas e transmissão desabilitada. Todas retornaram a mensagem de negócio
+  “Nenhuma informação de pagamento encontrada para os parâmetros consultados”.
+  Não se conclui ausência de glosas a partir dessa resposta, nem habilitação
+  completa do prestador no serviço. Nenhum protocolo/item foi retornado.
+- PostgreSQL 12.6 local descartável: 3 novos testes aprovados, junto aos 26 testes
+  Petrobras já existentes (29 aprovados nessa execução). Verificadas criação das
+  cinco tabelas, colunas e índices, downgrade/reupgrade, importação idempotente,
+  preservação de justificativa, JSON, binário, timezone, unicidade, chave estrangeira,
+  bloqueio de linha NOWAIT e trava de worker entre duas conexões.
+- Testes reproduzíveis em `tests/services/test_petrobras_postgres.py`: exigem
+  `PETROBRAS_TEST_POSTGRES_URL`, aceitando somente host `127.0.0.1`, usuário
+  `petrobras_test` e banco `petrobras_validation`. Usar banco descartável vazio;
+  os testes criam e removem exclusivamente o schema dessa instância de teste.
+  Sem essa variável, os três testes são ignorados.
+- Consultados os comentários do dicionário Oracle para `DBAMV.GUIA` em transação
+  somente leitura. `NR_GUIA` não possui comentário que confirme sua correspondência
+  à guia do prestador ou operadora. O mapeamento permanece pendente.
+- A conferência do portal pelo navegador não foi possível: host de acesso ao
+  navegador indisponível e estado de acessibilidade da janela indisponível.
+
+Pendência externa: confirmar a disponibilidade de demonstrativos deste prestador
+no webservice Petrobras e obter uma resposta real com itens. Só então será possível
+validar guia/TUSS/carteira com dados reais. Nenhuma migração de produção, carga real,
+recurso ou comprovante foi enviado durante estas validações.
