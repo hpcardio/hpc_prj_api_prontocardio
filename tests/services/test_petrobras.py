@@ -745,3 +745,32 @@ def test_header_compatibility_changes_only_validation_copy(
         validation.call_args.args[0].find('.//{%s}numeroCNPJ' % NS).text
         == 'invalid'
     )
+
+
+@pytest.mark.parametrize('number', [None, '0', '000'])
+def test_analysis_missing_protocol_is_explicitly_rejected(number, config):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    demo = element(root, 'demonstrativoAnaliseConta')
+    header = element(demo, 'cabecalhoDemonstrativo')
+    element(header, 'registroANS', config.registro_ans)
+    element(header, 'numeroDemonstrativo', 'SYNTHETIC')
+    protocol = element(element(demo, 'dadosConta'), 'dadosProtocolo')
+    if number is not None:
+        element(protocol, 'numeroProtocolo', number)
+    element(protocol, 'numeroLotePrestador', '123')
+    with pytest.raises(TissError, match='sem protocolo válido'):
+        parse_demonstrativos(root, config.prestador_cnpj, config.registro_ans)
+
+
+def test_analysis_general_total_cannot_disappear(config):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    demo = element(root, 'demonstrativoAnaliseConta')
+    header = element(demo, 'cabecalhoDemonstrativo')
+    element(header, 'registroANS', config.registro_ans)
+    element(header, 'numeroDemonstrativo', 'SYNTHETIC')
+    protocol = element(element(demo, 'dadosConta'), 'dadosProtocolo')
+    element(protocol, 'numeroProtocolo', '123')
+    element(protocol, 'valorGlosaProtocolo', '0.00')
+    element(demo, 'valorGlosaGeral', '10.00')
+    with pytest.raises(TissError, match='Total geral'):
+        parse_demonstrativos(root, config.prestador_cnpj, config.registro_ans)

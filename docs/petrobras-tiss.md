@@ -222,3 +222,30 @@ ou de esclarecimento da operadora sobre essa operação específica.
 
 Após a correção: 96 testes da API/regressões aprovados; Ruff aprovado nos módulos
 alterados. Dados reais e credenciais não foram incluídos no repositório.
+
+## Análise do XML detalhado exportado do portal
+
+O anexo de análise do mesmo demonstrativo/lote foi lido somente em memória:
+169 itens, 169 sequenciais distintos, 60 códigos distintos, carteira presente e
+nenhum `numeroProtocolo`. Há 27 motivos de glosa distribuídos por 21 itens. Todos
+os valores de motivo são zero; os totais de guia/protocolo também são zero, mas
+`valorGlosaGeral` é positivo. Não distribuir esse total por suposição.
+
+Todos os procedimentos declaram `codigoTabela=00`. Esses códigos não podem ser
+assumidos como TUSS apenas por terem formato numérico. A consulta Oracle de leitura
+não encontrou nenhuma das duas guias por igualdade exata. Consulta complementar
+pela carteira encontrou 300 linhas e 12 códigos em comum, porém nenhuma das guias
+coincidiu mesmo em comparação diagnóstica sem zeros iniciais. Isso não autoriza
+vincular por carteira+código: podem existir outros atendimentos do beneficiário.
+Não houve alteração da normalização ou associação automática.
+
+O parser de análise agora rejeita explicitamente protocolo ausente/zero e total
+geral incompatível com o detalhamento, preservando os dados já existentes. Testes
+sintéticos cobrem esses casos; o XML real não foi incluído no Git. Os 100 testes
+API/regressões passaram após a alteração.
+
+Para completar esse fluxo será necessária uma entrada de demonstrativo por
+arquivo/lote independente do protocolo e revisão das inconsistências financeiras,
+além de validar o mapeamento de guia e tabela de procedimentos. Não reutilizar
+número de lote como protocolo nem fabricar valores de glosa por item. O envio de
+recursos para esses registros segue indisponível até existir referência válida.

@@ -411,7 +411,7 @@ class PetrobrasClient:
         return self.call('documento', root)
 
 
-def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912 - preserve item, guide and protocol balances
+def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR0915 - preserve all source balance levels
     """Keep item reasons together and preserve unallocated balances."""
     rows, scopes = [], set()
     for demo in root.findall('.//{%s}demonstrativoAnaliseConta' % NS):
@@ -422,8 +422,15 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912 - pres
             raise TissError('Demonstrativo de outro prestador recusado.')
         demo_id = value(demo, 'cabecalhoDemonstrativo/numeroDemonstrativo')
         issued = value(demo, 'cabecalhoDemonstrativo/dataEmissao')
+        demo_start = len(rows)
         for protocol in demo.findall('.//{%s}dadosProtocolo' % NS):
             number = value(protocol, 'numeroProtocolo')
+            if not number or set(number) == {'0'}:
+                raise TissError(
+                    'Análise sem protocolo válido; preservar o lote para '
+                    'revisão. Não é possível vincular '
+                    'pela consulta de protocolo.'
+                )
             scopes.add((number, demo_id))
             common = {
                 'prestador': prestador,
@@ -533,6 +540,19 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912 - pres
                         for m in children(protocol, 'GlosaProtocolo')
                     ],
                 })
+        declared_total = value(demo, 'valorGlosaGeral')
+        calculated = sum(
+            (Decimal(row['valor_glosa']) for row in rows[demo_start:]),
+            Decimal(0),
+        )
+        if (
+            declared_total is not None
+            and Decimal(declared_total) != calculated
+        ):
+            raise TissError(
+                'Total geral da glosa diverge dos valores detalhados; '
+                'importação interrompida para revisão.'
+            )
     if not scopes:
         raise TissError(
             'Demonstrativo ainda não disponível; dados anteriores preservados.'
