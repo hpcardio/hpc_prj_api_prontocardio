@@ -12,6 +12,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StrictInt, constr
 
 from evolucao_sadt_backend.evolution_app import app as evolution_app
+from evolucao_sadt_backend.mv_context_token import (
+    DEFAULT_TTL_SECONDS,
+    MvContextTokenError,
+    issue_mv_context_token,
+)
 from evolucao_sadt_backend.prontorede_context import (
     MvContextVerificationError,
     ProntoRedeContextInvalidResponseError,
@@ -24,14 +29,16 @@ from evolucao_sadt_backend.prontorede_device import (
     ChallengeRequest,
     EnrollmentChallengeRequest,
     EnrollmentProofRequest,
-    ProntoRedeDeviceConflictError,
     ProntoRedeDeviceConfigurationError,
+    ProntoRedeDeviceConflictError,
     ProntoRedeDeviceResolutionError,
     ProntoRedeDeviceService,
     ProntoRedeDeviceVerificationError,
     ProofRequest,
 )
-from evolucao_sadt_backend.prontorede_device_registry import SqliteDeviceRegistry
+from evolucao_sadt_backend.prontorede_device_registry import (
+    SqliteDeviceRegistry,
+)
 from evolucao_sadt_backend.sadt_app import app as sadt_app
 
 app = FastAPI(
@@ -103,7 +110,9 @@ def _configure_prontorede_device_service() -> None:
         mv_context_resolver=_resolve_authorized_mv_context,
         device_registry=SqliteDeviceRegistry(database_path),
         autoenroll_enabled=(
-            os.getenv('PRONTOREDE_MV_DEVICE_AUTOENROLL_ENABLED', 'true').lower()
+            os.getenv(
+                'PRONTOREDE_MV_DEVICE_AUTOENROLL_ENABLED', 'false'
+            ).lower()
             == 'true'
         ),
     )
@@ -121,6 +130,7 @@ def _is_prontorede_sensitive_request(request: Request) -> bool:
             '/api/prontorede/device/prove',
             '/api/prontorede/device/enrollment/challenge',
             '/api/prontorede/device/enrollment/prove',
+            '/api/evolucao/context',
         )
     )
 
@@ -386,6 +396,49 @@ def create_prontorede_context(
             'formulario_token': exchange.formulario_token,
             'expira_em': exchange.expira_em,
             'url': exchange.url,
+        },
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+@app.post('/api/evolucao/context')
+def create_evolucao_context(
+    payload: ProntoRedeContextRequest,
+    request: Request,
+):
+    session_evidence = request.headers.get(
+        'x-prontorede-mv-session-evidence',
+        '',
+    )
+    session_verifier = getattr(
+        request.app.state,
+        'prontorede_session_verifier',
+        None,
+    )
+    try:
+        context = resolve_verified_mv_context(
+            cd_atendimento=payload.cd_atendimento,
+            session_evidence=session_evidence,
+            session_verifier=session_verifier,
+        )
+        token = issue_mv_context_token(
+            context,
+            os.getenv('EVOLUCAO_SADT_CONTEXT_SECRET', ''),
+        )
+    except MvContextVerificationError:
+        return _device_error('Contexto MV não verificável.', 401)
+    except MvContextTokenError:
+        return _device_error('Assinatura do contexto MV indisponível.', 503)
+
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=DEFAULT_TTL_SECONDS
+    )
+    return JSONResponse(
+        content={
+            'context_token': token,
+            'cd_atendimento': context.cd_atendimento,
+            'cd_usuario': context.cd_usuario,
+            'expira_em': expires_at.isoformat().replace('+00:00', 'Z'),
         },
         headers={'Cache-Control': 'no-store'},
     )

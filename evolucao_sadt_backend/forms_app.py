@@ -7,8 +7,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from evolucao_sadt_backend.mv_context_token import (
+    MvContextClaims,
+    MvContextTokenError,
+    require_mv_context,
+)
+from evolucao_sadt_backend.mv_identity import (
+    EvolutionOwnershipError,
+    assert_evolution_ownership,
+)
 
 LIMITE_TEXTO_MV = 4000
 FORM_VERSION = '3.1'
@@ -47,6 +57,25 @@ def _connect() -> sqlite3.Connection:
     connection.execute('PRAGMA journal_mode=WAL')
     connection.execute('PRAGMA foreign_keys=ON')
     return connection
+
+
+def _oracle_session():
+    # Keep standalone form rendering independent of Oracle initialization.
+    from app_prontocardio.database import get_session_oracle  # noqa: PLC0415
+
+    yield from get_session_oracle()
+
+
+def _load_evolution(session, cd_pre_med: int):
+    from app_prontocardio.evolucao_service import (  # noqa: PLC0415
+        EvolucaoMvNaoEncontrada,
+        obter_evolucao,
+    )
+
+    try:
+        return obter_evolucao(session, cd_pre_med)
+    except EvolucaoMvNaoEncontrada as exc:
+        raise EvolutionOwnershipError(str(exc)) from exc
 
 
 def _initialize_database() -> None:
@@ -1881,8 +1910,28 @@ def render(payload: FormInput):
     }
 
 
+def require_form_read_context(
+    cd_pre_med: int,
+    claims: MvContextClaims = Depends(require_mv_context),
+    session=Depends(_oracle_session),
+) -> MvContextClaims:
+    try:
+        evolution = _load_evolution(session, cd_pre_med)
+        claims.require_attendance(evolution.cd_atendimento)
+    except (EvolutionOwnershipError, MvContextTokenError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return claims
+
+
 @app.get('/lista')
-def list_forms(cd_atendimento: int = Query(gt=0)):
+def list_forms(
+    cd_atendimento: int = Query(gt=0),
+    claims: MvContextClaims = Depends(require_mv_context),
+):
+    try:
+        claims.require_attendance(cd_atendimento)
+    except MvContextTokenError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     with _connect() as connection:
         rows = connection.execute(
             """
@@ -1896,7 +1945,10 @@ def list_forms(cd_atendimento: int = Query(gt=0)):
 
 
 @app.get('/{cd_pre_med}', response_model=FormRecord)
-def get_form(cd_pre_med: int):
+def get_form(
+    cd_pre_med: int,
+    _claims: MvContextClaims = Depends(require_form_read_context),
+):
     with _connect() as connection:
         row = connection.execute(
             'SELECT * FROM formularios_evolucao WHERE cd_pre_med = ?',
@@ -1909,8 +1961,39 @@ def get_form(cd_pre_med: int):
     return _record(row)
 
 
+def require_form_write_owner(
+    cd_pre_med: int,
+    claims: MvContextClaims = Depends(require_mv_context),
+    session=Depends(_oracle_session),
+) -> MvContextClaims:
+    try:
+        evolution = _load_evolution(session, cd_pre_med)
+        claims.require_attendance(evolution.cd_atendimento)
+        assert_evolution_ownership(
+            evolution_user=evolution.usuario_mv,
+            evolution_provider=evolution.cd_prestador,
+            logged_user=claims.cd_usuario,
+            logged_provider=claims.cd_prestador,
+        )
+    except (
+        EvolutionOwnershipError,
+        MvContextTokenError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return claims
+
+
 @app.put('/{cd_pre_med}', response_model=FormRecord)
-def save_form(cd_pre_med: int, payload: FormInput):
+def save_form(
+    cd_pre_med: int,
+    payload: FormInput,
+    claims: MvContextClaims = Depends(require_form_write_owner),
+):
+    try:
+        claims.require_attendance(payload.cd_atendimento)
+    except (EvolutionOwnershipError, MvContextTokenError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     text = render_form(payload)
     now = datetime.now(timezone.utc).isoformat()
     data_json = json.dumps(

@@ -11,15 +11,6 @@ from app_prontocardio.database import (
     get_session_oracle,
     get_session_postgres,
 )
-from evolucao_sadt_backend.evolucao_schema import (
-    ContextoEvolucaoMv,
-    EvolucaoMv,
-    EvolucaoRascunhoInput,
-    EvolucaoTextoInput,
-    EvolucoesMv,
-    LinhasCuidadoEvolucao,
-)
-from evolucao_sadt_backend.care_support import load_care_support
 from app_prontocardio.evolucao_service import (
     ConfiguracaoEvolucaoMv,
     EvolucaoMvConfiguracaoInvalida,
@@ -35,6 +26,25 @@ from app_prontocardio.evolucao_service import (
 from app_prontocardio.models import AuditoriaEvolucaoMv, Usuario
 from app_prontocardio.security import valida_usuario_ti
 from app_prontocardio.settings import Settings
+from evolucao_sadt_backend.care_support import load_care_support
+from evolucao_sadt_backend.evolucao_schema import (
+    ContextoEvolucaoMv,
+    EvolucaoMv,
+    EvolucaoRascunhoInput,
+    EvolucaoTextoInput,
+    EvolucoesMv,
+    LinhasCuidadoEvolucao,
+)
+from evolucao_sadt_backend.mv_context_token import (
+    MvContextClaims,
+    MvContextTokenError,
+    require_mv_context,
+)
+from evolucao_sadt_backend.mv_identity import (
+    EvolutionOwnershipError,
+    assert_evolution_ownership,
+    normalize_mv_user,
+)
 
 router = APIRouter(prefix='/mv/evolucoes', tags=['evolucoes-mv'])
 settings = Settings()
@@ -546,15 +556,90 @@ ChaveIdempotencia = Annotated[
         pattern=r'^[A-Za-z0-9._:-]+$',
     ),
 ]
+ContextoMv = Annotated[MvContextClaims, Depends(require_mv_context)]
 
 
-def _configuracao() -> ConfiguracaoEvolucaoMv:
+def _configuracao(usuario_mv: str | None = None) -> ConfiguracaoEvolucaoMv:
     return ConfiguracaoEvolucaoMv(
-        usuario_mv=settings.EVOLUCAO_MV_USUARIO.upper(),
+        usuario_mv=normalize_mv_user(
+            usuario_mv or settings.EVOLUCAO_MV_USUARIO
+        ),
         cd_tipo_documento=settings.EVOLUCAO_MV_CD_TIPO_DOCUMENTO,
         cd_objeto=settings.EVOLUCAO_MV_CD_OBJETO,
         hora_validade=settings.EVOLUCAO_MV_HORA_VALIDADE,
     )
+
+
+def _contexto_do_medico(
+    session: Session,
+    cd_atendimento: int,
+    identidade: MvContextClaims,
+    escrita_habilitada: bool,
+):
+    try:
+        identidade.require_attendance(cd_atendimento)
+    except MvContextTokenError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN, detail=str(exc)
+        ) from exc
+    contexto_integracao = buscar_contexto(
+        session,
+        cd_atendimento,
+        _configuracao(),
+        escrita_habilitada,
+    )
+    return contexto_integracao.model_copy(
+        update={
+            'cd_prestador': identidade.cd_prestador,
+            'usuario_mv': identidade.cd_usuario,
+        }
+    )
+
+
+def _identificacao_do_medico(
+    session: Session, cd_prestador: int
+) -> dict[str, str]:
+    row = session.execute(
+        text(
+            """
+            SELECT P.NM_PRESTADOR AS nome_prestador,
+                   CO.DS_CONSELHO AS conselho,
+                   P.DS_CODIGO_CONSELHO AS numero_conselho,
+                   P.CD_UF_ORGAO_EMISSOR AS uf
+              FROM DBAMV.PRESTADOR P
+              LEFT JOIN DBAMV.CONSELHO CO
+                ON CO.CD_CONSELHO = P.CD_CONSELHO
+             WHERE P.CD_PRESTADOR = :cd_prestador
+            """
+        ),
+        {'cd_prestador': cd_prestador},
+    ).mappings().one_or_none()
+    if row is None or not str(row['nome_prestador'] or '').strip():
+        raise EvolucaoMvConfiguracaoInvalida(
+            'O usuário MV não possui médico/prestador identificável.'
+        )
+    conselho = str(row['conselho'] or 'CRM').strip().upper()
+    numero = str(row['numero_conselho'] or '').strip()
+    uf = str(row['uf'] or '').strip().upper()
+    crm = ' '.join(value for value in (conselho, uf, numero) if value)
+    return {
+        'nome_prestador': str(row['nome_prestador']).strip(),
+        'crm': crm,
+    }
+
+
+def _validar_autoria(atual: EvolucaoMv, contexto) -> None:
+    try:
+        assert_evolution_ownership(
+            evolution_user=atual.usuario_mv,
+            evolution_provider=atual.cd_prestador,
+            logged_user=contexto.usuario_mv,
+            logged_provider=contexto.cd_prestador,
+        )
+    except (EvolutionOwnershipError, ValueError) as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT, detail=str(exc)
+        ) from exc
 
 
 def _validar_escrita_habilitada() -> None:
@@ -703,14 +788,19 @@ def consultar_contexto(
     cd_atendimento: int,
     session: SessionOracle,
     _: UsuarioTi,
+    identidade: ContextoMv,
 ):
     try:
-        return buscar_contexto(
+        contexto = _contexto_do_medico(
             session,
             cd_atendimento,
-            _configuracao(),
+            identidade,
             settings.EVOLUCAO_MV_WRITE_ENABLED,
         )
+        return {
+            **contexto.model_dump(),
+            **_identificacao_do_medico(session, contexto.cd_prestador),
+        }
     except (
         EvolucaoMvNaoEncontrada,
         EvolucaoMvConfiguracaoInvalida,
@@ -727,7 +817,14 @@ def consultar_evolucoes(
     cd_atendimento: int,
     session: SessionOracle,
     _: UsuarioTi,
+    identidade: ContextoMv,
 ):
+    try:
+        identidade.require_attendance(cd_atendimento)
+    except MvContextTokenError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN, detail=str(exc)
+        ) from exc
     try:
         return {
             'evolucoes': listar_evolucoes(session, cd_atendimento),
@@ -741,8 +838,15 @@ def consultar_apoio_clinico(
     cd_atendimento: int,
     session: SessionOracle,
     _: UsuarioTi,
+    identidade: ContextoMv,
     linha_cuidado: str = 'LC-DAC',
 ):
+    try:
+        identidade.require_attendance(cd_atendimento)
+    except MvContextTokenError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN, detail=str(exc)
+        ) from exc
     if cd_atendimento <= 0:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -791,8 +895,12 @@ def criar_evolucao_rascunho(
     session_oracle: SessionOracle,
     session_postgres: SessionPostgres,
     usuario: UsuarioTi,
+    identidade: ContextoMv,
 ):
     _validar_escrita_habilitada()
+    contexto = _contexto_do_medico(
+        session_oracle, payload.cd_atendimento, identidade, True
+    )
     auditoria, repetida = _reservar_auditoria(
         session_postgres,
         chave,
@@ -801,19 +909,19 @@ def criar_evolucao_rascunho(
         usuario,
     )
     if repetida:
-        return _obter_evolucao_ou_erro(session_oracle, auditoria.cd_pre_med)
+        atual = _obter_evolucao_ou_erro(session_oracle, auditoria.cd_pre_med)
+        if atual.cd_atendimento != payload.cd_atendimento:
+            raise HTTPException(
+                status_code=409, detail='Atendimento divergente.'
+            )
+        _validar_autoria(atual, contexto)
+        return atual
 
     def operacao() -> EvolucaoMv:
-        contexto = buscar_contexto(
-            session_oracle,
-            payload.cd_atendimento,
-            _configuracao(),
-            True,
-        )
         return criar_rascunho(
             session_oracle,
             contexto,
-            _configuracao(),
+            _configuracao(identidade.cd_usuario),
         )
 
     return _executar_com_auditoria(session_postgres, auditoria, operacao)
@@ -827,9 +935,14 @@ def salvar_evolucao(  # noqa: PLR0913
     session_oracle: SessionOracle,
     session_postgres: SessionPostgres,
     usuario: UsuarioTi,
+    identidade: ContextoMv,
 ):
     _validar_escrita_habilitada()
     atual = _obter_evolucao_ou_erro(session_oracle, cd_pre_med)
+    contexto = _contexto_do_medico(
+        session_oracle, atual.cd_atendimento, identidade, True
+    )
+    _validar_autoria(atual, contexto)
     auditoria, repetida = _reservar_auditoria(
         session_postgres,
         chave,
@@ -860,8 +973,8 @@ def _cancelar_rascunho(
     session: Session,
     cd_pre_med: int,
     atendimentos_permitidos: set[int],
+    configuracao: ConfiguracaoEvolucaoMv,
 ) -> EvolucaoMv:
-    configuracao = _configuracao()
     row = session.execute(
         text(
             """
@@ -957,9 +1070,14 @@ def cancelar_evolucao_mv(
     session_oracle: SessionOracle,
     session_postgres: SessionPostgres,
     usuario: UsuarioTi,
+    identidade: ContextoMv,
 ):
     _validar_escrita_habilitada()
     atual = _obter_evolucao_ou_erro(session_oracle, cd_pre_med)
+    contexto = _contexto_do_medico(
+        session_oracle, atual.cd_atendimento, identidade, True
+    )
+    _validar_autoria(atual, contexto)
     auditoria, repetida = _reservar_auditoria(
         session_postgres,
         chave,
@@ -977,6 +1095,7 @@ def cancelar_evolucao_mv(
             session_oracle,
             cd_pre_med,
             {atual.cd_atendimento},
+            _configuracao(identidade.cd_usuario),
         ),
     )
 
@@ -988,9 +1107,14 @@ def assinar_evolucao_mv(
     session_oracle: SessionOracle,
     session_postgres: SessionPostgres,
     usuario: UsuarioTi,
+    identidade: ContextoMv,
 ):
     _validar_escrita_habilitada()
     atual = _obter_evolucao_ou_erro(session_oracle, cd_pre_med)
+    contexto = _contexto_do_medico(
+        session_oracle, atual.cd_atendimento, identidade, True
+    )
+    _validar_autoria(atual, contexto)
     auditoria, repetida = _reservar_auditoria(
         session_postgres,
         chave,
@@ -1007,7 +1131,7 @@ def assinar_evolucao_mv(
         lambda: assinar_evolucao(
             session_oracle,
             cd_pre_med,
-            _configuracao().usuario_mv,
+            _configuracao(identidade.cd_usuario).usuario_mv,
             {atual.cd_atendimento},
         ),
     )
