@@ -30,6 +30,7 @@ from app_prontocardio.petrobras_models import (
     PetrobrasProtocolo,
 )
 from app_prontocardio.routers import petrobras
+from app_prontocardio.services import petrobras_sync
 from app_prontocardio.services import petrobras_tiss as tiss
 from app_prontocardio.services.petrobras_appeals import (
     response_data,
@@ -41,6 +42,8 @@ from app_prontocardio.services.petrobras_sync import (
     discover_competencia,
     import_rows,
     synchronize,
+    synchronize_competencia,
+    synchronize_many,
 )
 from app_prontocardio.services.petrobras_tiss import (
     NS,
@@ -55,6 +58,7 @@ from app_prontocardio.services.petrobras_tiss import (
     validate_response_identity,
     value,
 )
+from scripts.sync_petrobras import competencias
 
 
 @pytest.fixture
@@ -289,10 +293,12 @@ def demo_xml():
 def test_parser_retains_unallocated_denials_without_double_counting():
     root = demo_xml()
     rows, scopes = parse_demonstrativos(root, '00000000000000', '422631')
-    assert [r['escopo'] for r in rows] == ['item', 'guia', 'protocolo']
-    assert sum(Decimal(r['valor_glosa']) for r in rows) == Decimal('23')
+    assert [r['escopo'] for r in rows] == ['item', 'guia']
+    assert sum(Decimal(r['valor_glosa']) for r in rows) == Decimal('20')
+    assert rows[0]['total_glosa_protocolo'] == '23.00'
+    assert rows[0]['cobertura'] == 'parcial_nao_confirmada'
     assert len(rows[0]['motivos']) == 2
-    assert len({r['chave'] for r in rows}) == 3
+    assert len({r['chave'] for r in rows}) == 2
     assert scopes == {('123', 'D1')}
 
 
@@ -762,7 +768,7 @@ def test_analysis_missing_protocol_is_explicitly_rejected(number, config):
         parse_demonstrativos(root, config.prestador_cnpj, config.registro_ans)
 
 
-def test_analysis_general_total_cannot_disappear(config):
+def test_partial_header_total_is_not_fabricated_as_item(config):
     root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
     demo = element(root, 'demonstrativoAnaliseConta')
     header = element(demo, 'cabecalhoDemonstrativo')
@@ -772,5 +778,173 @@ def test_analysis_general_total_cannot_disappear(config):
     element(protocol, 'numeroProtocolo', '123')
     element(protocol, 'valorGlosaProtocolo', '0.00')
     element(demo, 'valorGlosaGeral', '10.00')
-    with pytest.raises(TissError, match='Total geral'):
-        parse_demonstrativos(root, config.prestador_cnpj, config.registro_ans)
+    rows, scopes = parse_demonstrativos(
+        root, config.prestador_cnpj, config.registro_ans
+    )
+    assert rows == []
+    assert scopes == {('123', 'SYNTHETIC')}
+
+
+def test_provider_guide_normalization_requires_exact_wallet(source, candidate):
+    source['guia_prestador'] = '000123'
+    candidate['nr_guia'] = '123'
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    assert result['status'] == 'conciliado'
+    assert 'zeros' in result['divergencias'][0]
+    for wallet in ['', '1', 'different']:
+        source['carteira'] = wallet
+        assert (
+            reconcile(source, [candidate], 37, 'guia_prestador')['oracle']
+            is None
+        )
+    source['carteira'] = '00000001'
+    candidate['cd_tuss'] = '123456'
+    assert (
+        reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
+    )
+
+
+def test_unspecified_procedure_table_does_not_assume_tuss(source, candidate):
+    source['tabela'] = '00'
+    assert (
+        reconcile(source, [candidate], 37, 'guia_operadora')['status']
+        == 'dados_insuficientes'
+    )
+
+
+def test_partial_totals_are_retained_and_block_transmission(config):
+    root = demo_xml()
+    root.find('.//{%s}valorGlosaGuia' % NS).text = '1.00'
+    root.find('.//{%s}valorGlosaProtocolo' % NS).text = '50.00'
+    demo = root.find('.//{%s}demonstrativoAnaliseConta' % NS)
+    element(demo, 'valorGlosaGeral', '100.00')
+    rows, _ = parse_demonstrativos(
+        root, config.prestador_cnpj, config.registro_ans
+    )
+    assert len(rows) == 1
+    assert rows[0]['valor_glosa'] == '15.00'
+    assert rows[0]['total_glosa_guia'] == '1.00'
+    assert rows[0]['total_glosa_protocolo'] == '50.00'
+    assert rows[0]['total_glosa_demonstrativo'] == '100.00'
+    assert rows[0]['divergencia_totais']
+    with pytest.raises(TissError, match='Totais divergentes'):
+        PetrobrasClient(config, dry_run=True).appeal(rows[0], 'test', '1')
+
+
+def test_batch_partial_response_preserves_unreturned_items(
+    db, config, protocol, source, candidate
+):
+    import_rows(db, protocol, [source], set(), [candidate], config)
+    previous = db.scalar(select(PetrobrasGlosa))
+    previous.justificativa = 'Manual intacta'
+    another = PetrobrasProtocolo(prestador=config.prestador_cnpj, numero='456')
+    db.add(another)
+    db.commit()
+    client = Mock()
+    client.demonstrativos.return_value = demo_xml()
+    client.response_warnings = ['Aviso sintético']
+    result = synchronize_many(
+        db, config, [protocol.id, another.id], lambda *_: [], client=client
+    )
+    assert result['situacao'] == 'parcial'
+    assert result['quantidade'] == 2
+    assert result['protocolos_pendentes'] == 1
+    assert previous.presente_na_fonte
+    assert previous.justificativa == 'Manual intacta'
+    assert another.ultima_sincronizacao is None
+    client.demonstrativos.assert_called_once_with(['123', '456'])
+    synchronize_many(
+        db, config, [protocol.id, another.id], lambda *_: [], client=client
+    )
+    assert len(list(db.scalars(select(PetrobrasGlosa)))) == 3
+
+
+def test_batch_rejects_foreign_protocol(db, config, protocol):
+    root = demo_xml()
+    root.find('.//{%s}numeroProtocolo' % NS).text = '999'
+    client = Mock()
+    client.demonstrativos.return_value = root
+    with pytest.raises(TissError, match='diferente'):
+        synchronize(db, config, protocol.id, lambda *_: [], client=client)
+    assert not list(db.scalars(select(PetrobrasGlosa)))
+
+
+def test_unknown_denial_received_does_not_weaken_send_contract(config, source):
+    source['motivos'][0]['codigo'] = '3292'
+    assert '3292' not in tiss.known_denial_codes()
+    with pytest.raises(TissError, match='contrato'):
+        PetrobrasClient(config, dry_run=True).appeal(source, 'Test', '1')
+    # Build a valid outgoing structure with a known reason, then modify only
+    # its denial code to exercise the independently compiled receive schema.
+    source['motivos'][0]['codigo'] = '1701'
+    root = PetrobrasClient(config, dry_run=True).appeal(source, 'Test', '1')
+    node = root.find('.//{%s}codGlosaItem' % NS)
+    node.text = '3292'
+    assert tiss.receipt_schema().validate(root)
+    assert not tiss.schema().validate(root)
+    node.text = 'abcd'
+    assert not tiss.receipt_schema().validate(root)
+    node.text = '3292'
+    root.find('.//{%s}valorRecursado' % NS).text = 'invalid'
+    assert not tiss.receipt_schema().validate(root)
+
+
+def test_competence_import_requests_discovered_protocols_only(
+    db, config, monkeypatch
+):
+    protocol = PetrobrasProtocolo(
+        prestador=config.prestador_cnpj, numero='123'
+    )
+    unrelated = PetrobrasProtocolo(
+        prestador=config.prestador_cnpj, numero='999'
+    )
+    db.add_all([protocol, unrelated])
+    db.commit()
+
+    monkeypatch.setattr(
+        petrobras_sync,
+        'discover_competencia',
+        lambda *a: {
+            'numeros_protocolos': ['123'],
+            'protocolos_localizados': 1,
+            'avisos': [],
+            'competencia': '202601',
+        },
+    )
+    client = Mock()
+    client.demonstrativos.return_value = demo_xml()
+    result = synchronize_competencia(
+        db, config, '202601', lambda *_: [], client=client
+    )
+    client.demonstrativos.assert_called_once_with(['123'])
+    assert result['quantidade'] == 2
+    assert result['competencia'] == '202601'
+    assert 'numeros_protocolos' not in result
+
+
+def test_historical_competences_january_through_october():
+    assert competencias(date(2026, 10, 29), 3, '202601', '202610') == [
+        f'2026{month:02}' for month in range(1, 11)
+    ]
+    for start, end in [
+        ('202610', '202601'),
+        ('202613', '202610'),
+        ('202501', '202610'),
+        ('202601', None),
+    ]:
+        with pytest.raises(ValueError, match='Informe|inválida'):
+            competencias(date(2026, 10, 29), 3, start, end)
+
+
+def test_analysis_identity_cannot_rely_only_on_echoed_header(
+    config, monkeypatch
+):
+    root = demo_xml()
+    demo = root.find('.//{%s}demonstrativoAnaliseConta' % NS)
+    provider = element(element(demo, 'dadosPrestador'), 'dadosContratado')
+    code = element(provider, 'codigoPrestadorNaOperadora', 'different')
+    monkeypatch.setattr(tiss, 'validate', Mock())
+    with pytest.raises(TissError, match='outro prestador'):
+        tiss.validate_response_schema(root, config)
+    code.text = config.identificador_prestador
+    assert tiss.validate_response_schema(root, config) == []

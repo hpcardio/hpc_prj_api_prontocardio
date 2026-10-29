@@ -1,279 +1,176 @@
 # Petrobras TISS no Follow-Up de Glosas
 
-## Estado da entrega
+## Estado em 29/10/2026
 
-Consulta real de demonstrativos de pagamento validada para janeiro a outubro de
-2026 após corrigir a identificação do prestador: o serviço requer a tag
-`codigoPrestadorNaOperadora`, mesmo quando seu valor é o próprio CNPJ.
-Os resultados vazios registrados nas primeiras validações foram superados por
-esta correção. São evidências históricas, não o estado atual da consulta.
+Integração implementada em branches isoladas, ainda sem implantação ou migração
+em produção. Credenciais usadas somente nas consultas autorizadas; não estão no
+Git. Transmissão de recursos permanece desabilitada.
 
-A consulta detalhada de análise dos três protocolos válidos de setembro ainda
-retorna ausência de informações. Não houve cruzamento real guia/TUSS/carteira,
-migração de produção, carga de dados ou envio de recurso. A integração permanece
-em rascunho, com transmissão desabilitada.
+Validação autenticada direta no webservice, de janeiro a outubro de 2026, seguida
+de SELECT Oracle em transação somente leitura. Nenhum XML real foi salvo; somente
+contagens agregadas foram registradas. Os arquivos fornecidos pelo usuário foram
+referências de diagnóstico, não substitutos da consulta ao serviço.
 
-## Origem e cruzamento
+| Competência | Protocolos consultados | Protocolos retornados | Guias retornadas | Itens detalhados | Registros com glosa |
+|---|---:|---:|---:|---:|---:|
+| 202601 | 4 | 1 | 1 | 84 | 12 |
+| 202602 | 3 | 1 | 1 | 67 | 28 |
+| 202603 | 3 | — | — | — | — |
+| 202604 | 8 | 2 | 2 | 217 | 37 |
+| 202605 | 3 | — | — | — | — |
+| 202606 | 6 | 3 | 3 | 576 | 102 |
+| 202607 | 3 | — | — | — | — |
+| 202608 | 6 | 1 | 1 | 391 | 51 |
+| 202609 | 3 | — | — | — | — |
+| 202610 | 5 | 2 | 2 | 193 | 12 |
 
-1. Consultar o demonstrativo de pagamento por competência (AAAAMM) na Petrobras.
-2. Persistir os protocolos retornados pela própria operadora.
-3. Consultar os demonstrativos de análise desses protocolos e persistir seus itens.
-4. Consultar `DBAMV.HPC_V_CONTA_ATENDIMENTO` em transação Oracle somente leitura,
-   restrita ao convênio configurado e às guias retornadas.
-5. Cruzar guia + código TUSS, preservando zeros à esquerda. A carteira
-   (`numeroCarteira` / `NR_CARTEIRA`) serve como conferência adicional.
+Março, maio, julho e setembro retornaram “nenhuma informação” na consulta de
+análise dos protocolos descobertos nos pagamentos. Isso não significa ausência
+de glosas: o portal mostra dados de setembro. Pagamentos foram obtidos nos dez
+meses, mas seus resumos não substituem detalhes de procedimentos.
 
-Não são usados protocolos de faturamento do Oracle. O contrato consultado não
-permite buscar demonstrativos pela carteira. Carteira divergente impede o vínculo;
-ausência da carteira gera indicação de conferência indisponível. Procedimentos
-repetidos são desambiguados por data/quantidade quando possível; o restante fica
-ambíguo. O sequencial TISS não é presumido igual ao lançamento MV.
+Foram recebidos 1.528 itens detalhados e 242 registros com motivos/valores de
+glosa nas seis competências. As somas não representam itens únicos entre meses
+nem cobertura completa. O cruzamento retornou 240 não localizados e dois com
+dados insuficientes; nenhum vínculo automático foi confirmado.
 
-`PETROBRAS_ORACLE_GUIA=pendente` impede vínculos automáticos até verificar, com
-uma guia real, se `NR_GUIA` corresponde à `guia_prestador` ou `guia_operadora`.
-Não configurar esse parâmetro por suposição. Valores divergentes permanecem
-visíveis lado a lado; a integração não escreve no Oracle.
+Diagnóstico complementar de outubro: as carteiras dos 12 itens glosados existem
+na view Oracle; nenhuma guia do prestador ou da operadora corresponde, mesmo
+sem zeros iniciais. Dois itens coincidem por carteira, procedimento e data, mas
+isso não autoriza associar contas sem confirmar a guia. Nenhum vínculo foi
+fabricado por carteira isolada.
 
-## Contratos
+## Fluxo de importação
+
+1. Buscar pagamentos por competência com `codigoPrestadorNaOperadora` nos dois
+   locais exigidos pelo contrato (cabeçalho e dados do prestador).
+2. Descobrir e persistir os protocolos reais da operadora, sem usar protocolos
+   Oracle nem substituir protocolo por lote. Protocolo zero não é consultável.
+3. Buscar análise em lotes de até 30 protocolos e importar apenas detalhes
+   explicitamente retornados. A ação da tela agora realiza essas duas consultas.
+4. Persistir fonte, valores, totais de cada escopo, cruzamento e auditoria no
+   PostgreSQL da aplicação; preservar rascunhos, anexos e histórico em reconsultas.
+5. Consultar Oracle somente para o convênio e as guias recebidas, sem escrita.
+
+Os totais de protocolo/demonstrativo podem abranger guias ausentes da resposta.
+São armazenados como metadados; não são distribuídos entre os itens. Saldos de
+uma guia não detalhados permanecem separados dos procedimentos. Totais inferiores
+à soma dos detalhes geram aviso, mantêm os valores originais e bloqueiam envio
+de recurso daquele registro. Não corrigir valores por suposição.
+
+A cobertura das respostas de análise não foi comprovada. Toda execução com
+detalhes é sinalizada como parcial; protocolos ausentes permanecem pendentes,
+e registros importados anteriormente não são removidos por ausência no retorno.
+A interface apresenta essas limitações e os avisos por registro.
+
+## Cruzamento Oracle
+
+A escolha confirmada pelo usuário é `numeroGuiaPrestador` → `NR_GUIA` da
+`DBAMV.HPC_V_CONTA_ATENDIMENTO`, padrão `PETROBRAS_ORACLE_GUIA=guia_prestador`.
+Não existe fallback silencioso para guia da operadora.
+
+A igualdade exata de guia + procedimento é preferida. Apenas para guia do
+prestador numérica, zeros iniciais podem ser removidos da chave de pesquisa;
+essa alternativa exige carteira exata em ambas as origens e registra a regra no
+resultado. Identificadores originais continuam preservados. Carteira e código
+TUSS nunca perdem zeros iniciais. Carteira divergente impede vínculo.
+
+A tabela do código também é considerada: 18, 19, 20 e 22 são pesquisadas em
+CD_TUSS; tabela 00/98 ou desconhecida exige mapeamento confirmado e não é assumida
+como TUSS. Duplicatas idênticas da view são deduplicadas; procedimentos repetidos
+são desambiguados por data/quantidade quando possível. Demais casos ficam ambíguos.
+Sequencial TISS não é presumido igual ao lançamento MV.
+
+O segundo XML de análise fornecido pelo usuário confirmou uma coincidência por
+guia normalizada + carteira + CD_TUSS, mas declara tabela 00. Esse caso não foi
+usado como autorização para mapear automaticamente todos os códigos internos.
+
+## Contratos e compatibilidade de recepção
 
 Manual: https://portaltiss.saudepetrobras.com.br/documentos/manual/manual_web_service.pdf
 
-Contratos 4.01.00 versionados em `app_prontocardio/services/petrobras_contracts`.
+WSDL/XSD 4.01.00 versionados em `app_prontocardio/services/petrobras_contracts`.
 Base HTTPS: `https://webservices.crc.com.br/tiss/ws/40100/`.
 Serviços: `tissSolicitacaoDemonstrativoRetorno`, `tissRecursoGlosa`,
-`tissSolicitacaoStatusRecursoGlosa`, `tissEnvioDocumentos`.
-Os WSDL correspondem ao mesmo nome com extensão `.wsdl`.
-O WSDL anuncia HTTP; o cliente usa somente o mesmo serviço por HTTPS, sem
-redirecionamentos. Login e senha são enviados conforme o contrato (senha MD5);
-mensagens são validadas por XSD e hash TISS. O hash exigido pelo protocolo não
-substitui TLS. Não há logs de credenciais ou de mensagens SOAP completas.
+`tissSolicitacaoStatusRecursoGlosa`, `tissEnvioDocumentos` (WSDL = nome + `.wsdl`).
+O cliente usa HTTPS, sem redirecionamentos, com senha MD5/hash conforme contrato.
+Não há logs de mensagens SOAP ou credenciais. Hash não substitui TLS.
 
-ANS configurada: 422631. O código legado 366871 encontrado no MV retornou
-`DESTINATARIO_INVALIDO`. Nenhum cadastro Oracle foi alterado.
+ANS atual configurada: 422631. O código legado 366871 encontrado no MV retornou
+DESTINATARIO_INVALIDO. Nenhum cadastro Oracle foi alterado.
 
-## Configuração e ativação
+O valor do código do prestador pode coincidir com o CNPJ, mas a tag precisa ser
+`codigoPrestadorNaOperadora`; corrigir isso resolveu a consulta de pagamentos
+vazia. `PETROBRAS_CODIGO_PRESTADOR` sobrescreve o valor quando necessário.
 
-Usar variáveis de ambiente/gerenciador de segredos; o exemplo adjacente não contém
-credenciais. Configurar os segredos fornecidos pelo responsável no ambiente da API.
-Não copiar senhas para Git, arquivos de teste, screenshots ou descrições de PR.
+Compatibilidades exclusivamente de entrada:
 
-- Instalar dependências pelo `poetry.lock` (inclui lxml).
-- Verificar o head Alembic do ambiente e aplicar a migração aditiva
-  `20261029_063` após `20261027_062` no PostgreSQL da aplicação.
-- Habilitar `PETROBRAS_ENABLED=true` na API e no frontend apenas com a API
-  correspondente e suas tabelas disponíveis.
-- Manter `PETROBRAS_TRANSMISSION_ENABLED=false` até validar o fluxo real.
-- Executar `python -m scripts.sync_petrobras` periodicamente, por exemplo a cada
-  15 minutos, com o mesmo ambiente da API. A trava PostgreSQL evita dois workers;
-  o intervalo padrão de consulta é 360 minutos. O worker nunca envia recursos.
-- Descoberta automática cobre mês atual e dois anteriores, configurável em
-  `PETROBRAS_DISCOVERY_MONTHS`. Competências anteriores podem ser consultadas
-  manualmente na tela. Protocolos descobertos continuam sendo acompanhados;
-  não se presume prazo recursal a partir da data de emissão.
+- Conferir o hash original e as identidades exatas da operadora/prestador, também
+  quando o serviço devolve o cabeçalho na orientação da solicitação.
+- O CRC pode devolver o CNPJ do prestador sem zero inicial no campo de metadados
+  da operadora. Validar uma cópia apenas para esse defeito exato, com aviso; a
+  identidade da operadora continua sendo conferida pelo registro ANS.
+- Códigos de glosa 3202, 3209, 3253, 3292 e 3306 foram recebidos fora do domínio
+  enumerado do XSD publicado. Uma variante de recepção aceita códigos numéricos
+  de quatro dígitos, mantendo todas as outras restrições estruturais/tipos, o hash
+  e as identidades. O valor original é preservado e sinalizado para revisão.
+  Isso não confirma o significado normativo desses códigos.
+- O schema de envio permanece integralmente original. Código desconhecido e
+  totais divergentes não são transmitidos. Demais erros estruturais continuam
+  bloqueando a importação, sem zerar os dados anteriores.
 
-A base usada para desenvolver foi `hospital/main`. Há trabalho de produção
-independente (incluindo OpenFinance/segurança): integrar pelo fluxo normal de PR e
-revisar diferenças do ambiente antes do deploy; não substituir diretórios do servidor.
+## Configuração e execução
 
-## Uso e validação real pendente
+Usar as variáveis de `petrobras.env.example` e um gerenciador de segredos. Nunca
+copiar senhas para Git, fixtures ou PRs. Instalar pelo `poetry.lock` (inclui lxml).
+Antes de ativar, verificar o head Alembic e aplicar a migração aditiva
+`20261029_063`, descendente de `20261027_062`, no PostgreSQL da aplicação.
+Habilitar `PETROBRAS_ENABLED=true` na API e frontend somente com tabelas/API
+disponíveis. Manter `PETROBRAS_TRANSMISSION_ENABLED=false`.
 
-A tela mantém os fluxos existentes e adiciona uma área Petrobras com filtros,
-comparação Oracle, histórico, justificativa, prazo/origem e anexos autenticados.
-PDF, PNG e JPEG: limite local padrão de 5 MiB e 20 arquivos por item (não constitui
-limite confirmado da operadora). Upload base64 exige limite de corpo HTTP/proxy
-compatível; o frontend usa 8 MiB por padrão. Não elevar limites sem revisão.
+Worker periódico: `python -m scripts.sync_petrobras`. Usa trava PostgreSQL,
+intervalo padrão de 360 minutos e descoberta dos últimos três meses, ajustável
+por `PETROBRAS_DISCOVERY_MONTHS`. Para o período solicitado:
 
-Antes de ativar transmissão: obter demonstrativo com itens, validar carteira,
-guia/TUSS, valores e ausência de duplicidades; confirmar prazo recursal e sua
-origem; validar aceitação de anexo e recibo de recurso pela operadora. O usuário
-precisa salvar o rascunho e confirmar o envio. Não foi presumida a necessidade de
-confirmação adicional no portal: verificar o comportamento real da Petrobras.
+```sh
+python -m scripts.sync_petrobras --inicio 202601 --fim 202610
+```
 
-Intenção de envio é persistida antes da chamada. Timeout/resposta sem recibo gera
-`envio_incerto`, sem reenvio automático. Conferir o portal e o histórico antes de
-qualquer intervenção; não reverter o estado para rascunho sem investigação.
-Acompanhamento de recurso já protocolado continua após o prazo de apresentação.
-Respostas parciais preservam os itens e valores acatados individualmente.
+O comando histórico respeita o intervalo das consultas recentes, importa os
+protocolos retornados pela operadora e mantém pendências nos retornos incompletos.
+O worker nunca envia recursos. Protocolos descobertos continuam acompanhados;
+não se presume prazo recursal a partir da emissão.
 
-## Validação e reversão
+## Recursos, anexos e operação
 
-Testes sintéticos cobrem contratos XSD, carteira/guia/TUSS, duplicidades,
-permissões, concorrência de rascunho, anexos, idempotência, migração e falhas de
-envio. A migração foi exercitada em SQLite com schema e PostgreSQL 12.6 descartável
-local. A versão/configuração do PostgreSQL oficial ainda deve ser considerada
-no procedimento de implantação.
+A tela mantém os fluxos existentes e adiciona comparação com Oracle, histórico,
+justificativa, prazo/origem e anexos autenticados. PDF, PNG e JPEG: limite local
+padrão de 5 MiB e 20 anexos por item (não é limite confirmado da operadora).
+O proxy precisa suportar o corpo base64; frontend limita a 8 MiB por padrão.
 
-Para desativar: `PETROBRAS_ENABLED=false` em ambos os serviços e suspender o
-agendamento. Preservar tabelas/auditoria. O downgrade exclui dados Petrobras e
-não deve ser usado como reversão operacional após importação real.
+Antes de habilitar transmissão, validar identificação dos itens, prazo recursal,
+aceitação do comprovante e recibo da Petrobras. Não presumir confirmação extra no
+portal; verificar o fluxo real. O usuário precisa salvar e confirmar o envio.
+Intenção é persistida antes da chamada. Timeout/recibo ausente gera envio incerto,
+sem reenvio automático. Consultas de recursos protocolados continuam após o prazo.
 
-## Evidências de verificação (29/10/2026)
+Há trabalho independente de OpenFinance/segurança em produção. Integrar via PR;
+não substituir diretórios do servidor pelos worktrees da integração Petrobras.
+Nenhuma migração, carga real no PostgreSQL ou envio foi feito nesta validação.
 
-- API: 92 testes aprovados (26 Petrobras e 66 regressões de Follow-Up/recursos).
-- Frontend: 7 testes Django aprovados, `node --check` sem erros.
-- Navegador local: desktop 1440 px e celular 390 px, sem rolagem horizontal;
-  carteira visível nas duas origens e salvamento de rascunho verificado.
-- Nenhuma chamada de envio ocorreu no ensaio visual; chamadas API foram simuladas.
-- Ruff passou nos módulos novos e testes da API.
-- Contratos WSDL/XSD preservados como obtidos, inclusive espaços de comentários.
+## Testes e reversão
 
-## Validação adicional solicitada (29/10/2026)
+API: 109 testes sintéticos/regressões; frontend: sete testes Django e ensaio local
+Playwright desktop 1440 px/celular 390 px, com carteira, rascunho e ausência de
+envio involuntário. Ruff nos arquivos alterados. Os XMLs reais não são fixtures.
 
-- Consultadas individualmente via HTTPS as competências 202601, 202602, 202603,
-  202604, 202605, 202606, 202607, 202608, 202609 e 202610, usando as credenciais
-  fornecidas e transmissão desabilitada. Todas retornaram a mensagem de negócio
-  “Nenhuma informação de pagamento encontrada para os parâmetros consultados”.
-  Não se conclui ausência de glosas a partir dessa resposta, nem habilitação
-  completa do prestador no serviço. Nenhum protocolo/item foi retornado.
-- PostgreSQL 12.6 local descartável: 3 novos testes aprovados, junto aos 26 testes
-  Petrobras já existentes (29 aprovados nessa execução). Verificadas criação das
-  cinco tabelas, colunas e índices, downgrade/reupgrade, importação idempotente,
-  preservação de justificativa, JSON, binário, timezone, unicidade, chave estrangeira,
-  bloqueio de linha NOWAIT e trava de worker entre duas conexões.
-- Testes reproduzíveis em `tests/services/test_petrobras_postgres.py`: exigem
-  `PETROBRAS_TEST_POSTGRES_URL`, aceitando somente host `127.0.0.1`, usuário
-  `petrobras_test` e banco `petrobras_validation`. Usar banco descartável vazio;
-  os testes criam e removem exclusivamente o schema dessa instância de teste.
-  Sem essa variável, os três testes são ignorados.
-- Consultados os comentários do dicionário Oracle para `DBAMV.GUIA` em transação
-  somente leitura. `NR_GUIA` não possui comentário que confirme sua correspondência
-  à guia do prestador ou operadora. O mapeamento permanece pendente.
-- A conferência do portal pelo navegador não foi possível: host de acesso ao
-  navegador indisponível e estado de acessibilidade da janela indisponível.
+Casos novos: lotes parciais, idempotência, rascunhos preservados, protocolo estranho
+recusado, totais divergentes, normalização restrita de guia, carteira/código com
+zeros preservados, tabela desconhecida e contrato de envio não relaxado.
+Migração previamente exercitada em SQLite e PostgreSQL 12.6 descartável. Há três
+testes PostgreSQL opt-in em `tests/services/test_petrobras_postgres.py`, restritos
+à instância local de testes; a migração não foi alterada nesta revisão.
 
-Pendência externa: confirmar a disponibilidade de demonstrativos deste prestador
-no webservice Petrobras e obter uma resposta real com itens. Só então será possível
-validar guia/TUSS/carteira com dados reais. Nenhuma migração de produção, carga real,
-recurso ou comprovante foi enviado durante estas validações.
-
-## Divergência comprovada entre portal e SOAP (29/10/2026)
-
-A imagem fornecida pelo usuário mostra demonstrativos no portal para 31/08/2026,
-30/09/2026 e 30/10/2026, todos com itens glosados. Portanto, o retorno vazio por
-competência não comprova inexistência de demonstrativos nem falta de cadastro.
-
-Foi executada consulta SOAP de leitura para cada uma dessas datas usando a
-alternativa `periodo/dataPagamento` prevista no XSD, em vez de `periodo/competencia`.
-Todas retornaram HTTP 500. O diagnóstico de 30/09 identificou SOAP-ENV:Client e
-ORA-01403 (no data found) na rotina de solicitação de demonstrativo da operadora.
-Payload bruto, credenciais e detalhes de infraestrutura não foram persistidos.
-
-Causa exata ainda não determinada: falta comparar identificadores do prestador,
-competência/data de pagamento, número do demonstrativo e protocolos com o XML de
-um extrato efetivamente disponibilizado no portal. A data exibida na lista não foi
-presumida definitivamente igual à data de pagamento. Não trocar parâmetros ou
-habilitar importação/transmissão com base apenas nessa hipótese.
-
-O manual oficial do portal documenta a emissão do XML em Extrato > Demonstrativo
-TISS, após selecionar o demonstrativo e o lote:
-https://saudepetrobras.com.br/data/files/1E/74/13/4E/A0A719109531B619A9B8F9C2/Manual_Portal_TISS_Ago_2024.pdf
-
-A próxima validação precisa desse XML real ou de acesso funcional ao portal. O
-retorno do webservice deve ser confrontado com esse extrato, sem interpretar
-HTTP 500/ausência de informação como zero glosas. Nenhuma alteração especulativa
-foi feita no mapeamento Oracle ou nos parâmetros publicados da integração.
-
-## Correção validada a partir do XML do portal
-
-O XML fornecido usa `codigoPrestadorNaOperadora` no cabeçalho e nos dados do
-prestador. A implementação anterior usava `CNPJ`/`cnpjContratado`. A mudança das
-tags fez a consulta por competência retornar os dados. `PETROBRAS_CODIGO_PRESTADOR`
-pode configurar o código; quando vazio, o valor do CNPJ é enviado como código.
-
-O XML do portal declara 4.03.00; o serviço 4.01.00 retorna 4.01.00 e os mesmos
-10 grupos/64 guias de setembro. Não foi necessária migração de versão TISS para
-recuperar os demonstrativos. Sete grupos de setembro têm protocolo zero e não
-possuem glosa; os três restantes abrangem 57 guias, 24 com glosa por guia. O XML
-é um resumo de pagamento: não fornece TUSS/carteira por procedimento.
-
-Compatibilidade restrita do retorno CRC:
-- Conferir hash sobre o documento original, antes de qualquer ajuste.
-- Aceitar direção de cabeçalho espelhada somente conferindo ANS e identificação
-  exata do prestador; rejeitar identificação ausente ou diferente.
-- O serviço devolve, em `cabecalhoDemonstrativo/numeroCNPJ`, o CNPJ do prestador
-  sem zero inicial, apesar de esse campo representar a operadora. Validar XSD
-  sobre uma cópia apenas para esse defeito exato; preservar o documento original,
-  não usar esse campo para identificar a operadora e registrar aviso na execução.
-- Demais erros de XSD e hash continuam bloqueando a importação.
-- Ignorar números de protocolo compostos somente de zeros.
-
-Reconsulta autenticada, somente leitura e em memória:
-
-| Competência | Protocolos válidos | Guias |
-|---|---:|---:|
-| 202601 | 4 | 55 |
-| 202602 | 3 | 27 |
-| 202603 | 3 | 93 |
-| 202604 | 8 | 103 |
-| 202605 | 3 | 73 |
-| 202606 | 6 | 75 |
-| 202607 | 3 | 66 |
-| 202608 | 6 | 64 |
-| 202609 | 3 | 64 |
-| 202610 | 5 | 46 |
-
-Não somar guias dessas competências como pacientes/itens distintos. Testados os
-três protocolos válidos do XML de setembro na operação de análise; todos retornam
-sem informações. Também verificadas as alternativas CNPJ/código previstas no
-contrato para um protocolo real, sem mudança no resultado. Não substituir número
-de protocolo por número de lote nem fabricar o vínculo com procedimentos Oracle.
-O próximo passo depende do demonstrativo de análise com detalhes por procedimento
-ou de esclarecimento da operadora sobre essa operação específica.
-
-Após a correção: 96 testes da API/regressões aprovados; Ruff aprovado nos módulos
-alterados. Dados reais e credenciais não foram incluídos no repositório.
-
-## Análise do XML detalhado exportado do portal
-
-O anexo de análise do mesmo demonstrativo/lote foi lido somente em memória:
-169 itens, 169 sequenciais distintos, 60 códigos distintos, carteira presente e
-nenhum `numeroProtocolo`. Há 27 motivos de glosa distribuídos por 21 itens. Todos
-os valores de motivo são zero; os totais de guia/protocolo também são zero, mas
-`valorGlosaGeral` é positivo. Não distribuir esse total por suposição.
-
-Todos os procedimentos declaram `codigoTabela=00`. Esses códigos não podem ser
-assumidos como TUSS apenas por terem formato numérico. A consulta Oracle de leitura
-não encontrou nenhuma das duas guias por igualdade exata. Consulta complementar
-pela carteira encontrou 300 linhas e 12 códigos em comum, porém nenhuma das guias
-coincidiu mesmo em comparação diagnóstica sem zeros iniciais. Isso não autoriza
-vincular por carteira+código: podem existir outros atendimentos do beneficiário.
-Não houve alteração da normalização ou associação automática.
-
-O parser de análise agora rejeita explicitamente protocolo ausente/zero e total
-geral incompatível com o detalhamento, preservando os dados já existentes. Testes
-sintéticos cobrem esses casos; o XML real não foi incluído no Git. Os 100 testes
-API/regressões passaram após a alteração.
-
-Para completar esse fluxo será necessária uma entrada de demonstrativo por
-arquivo/lote independente do protocolo e revisão das inconsistências financeiras,
-além de validar o mapeamento de guia e tabela de procedimentos. Não reutilizar
-número de lote como protocolo nem fabricar valores de glosa por item. O envio de
-recursos para esses registros segue indisponível até existir referência válida.
-
-## Segundo XML de análise: escopo parcial confirmado
-
-O usuário confirmou `numeroGuiaPrestador` como referência de guia. O segundo
-XML contém protocolo válido, uma guia, três itens e dois motivos de glosa.
-Comparação com o demonstrativo de pagamento completo confirmou:
-
-- R$ 0,03: soma das glosas dos itens e total da guia, coincidente nos dois XMLs.
-- R$ 81,73: total do protocolo/lote, que contém 33 guias no extrato completo.
-- R$ 184,34: total do demonstrativo de pagamento completo.
-
-Correção da interpretação anterior: o exportador inclui totais dos níveis
-superiores mesmo quando exporta apenas uma guia. Essa diferença não comprova
-inconsistência financeira. O parser atual pressupõe resposta completa e ainda
-não deve ser usado para importar exportações parciais: não atribuir à guia a
-sobra do lote nem tratar ausência de outras guias como remoção.
-
-Consulta Oracle somente leitura: igualdade literal de numeroGuiaPrestador não
-retornou registros; comparação diagnóstica removendo apenas zeros iniciais
-localizou três linhas. Entre as três codificações do XML, uma coincide exatamente
-com CD_TUSS para essa guia e carteira. Os outros dois códigos precisam de análise
-de mapeamento; codigoTabela continua 00. Não houve vínculo ou normalização
-persistidos. O caso confirma a necessidade de preservar o identificador original
-e validar uma chave normalizada específica da guia do prestador.
-
-Pendências de implementação: importação de exportação parcial por guia/lote;
-metadados de totais separados por escopo; identidade sem depender de protocolo
-para lotes que o omitem; mapeamento dos códigos e normalização auditável da guia.
+Para desativar, suspender agendamento e `PETROBRAS_ENABLED=false` nos serviços.
+Preservar tabelas e auditoria. Downgrade exclui dados e não deve ser usado como
+reversão operacional depois de uma importação real.

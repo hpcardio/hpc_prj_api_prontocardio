@@ -110,6 +110,47 @@ def schema():
     )
 
 
+XSD = 'http://www.w3.org/2001/XMLSchema'
+
+
+class ReceiptResolver(ET.Resolver):
+    """Receive numeric denial reasons; keep the send schema unchanged."""
+
+    def resolve(self, url, public_id, context):
+        if not url.endswith('tissSimpleTypesV4_01_00.xsd'):
+            return None
+        document = ET.parse(str(CONTRACTS / 'tissSimpleTypesV4_01_00.xsd'))
+        restriction = document.find(
+            f'{{{XSD}}}simpleType[@name="dm_tipoGlosa"]/{{{XSD}}}restriction'
+        )
+        for child in list(restriction):
+            restriction.remove(child)
+        ET.SubElement(restriction, f'{{{XSD}}}length', value='4')
+        ET.SubElement(restriction, f'{{{XSD}}}pattern', value='[0-9]{4}')
+        return self.resolve_string(ET.tostring(document), context)
+
+
+@lru_cache(maxsize=1)
+def receipt_schema():
+    parser = ET.XMLParser(resolve_entities=False, no_network=True)
+    parser.resolvers.add(ReceiptResolver())
+    return ET.XMLSchema(
+        ET.parse(str(CONTRACTS / 'tissWebServicesV4_01_00.xsd'), parser)
+    )
+
+
+@lru_cache(maxsize=1)
+def known_denial_codes():
+    document = ET.parse(str(CONTRACTS / 'tissSimpleTypesV4_01_00.xsd'))
+    return frozenset(
+        document.xpath(
+            'xs:simpleType[@name="dm_tipoGlosa"]/xs:restriction/'
+            'xs:enumeration/@value',
+            namespaces={'xs': XSD},
+        )
+    )
+
+
 def validate(root):
     if not schema().validate(root):
         raise TissError('Mensagem incompatível com o contrato TISS 4.01.00.')
@@ -344,6 +385,11 @@ class PetrobrasClient:
         return self.call('status', root)
 
     def appeal(self, source, justification, appeal_id):
+        if source.get('divergencia_totais'):
+            raise TissError(
+                'Totais divergentes na fonte; revisar o demonstrativo '
+                'antes de transmitir recurso.'
+            )
         if source.get('escopo') != 'item' or not source.get('motivos'):
             raise TissError(
                 (
@@ -412,7 +458,7 @@ class PetrobrasClient:
 
 
 def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR0915 - preserve all source balance levels
-    """Keep item reasons together and preserve unallocated balances."""
+    """Import explicit details; retain wider totals without allocating them."""
     rows, scopes = [], set()
     for demo in root.findall('.//{%s}demonstrativoAnaliseConta' % NS):
         if value(demo, 'cabecalhoDemonstrativo/registroANS') != registro_ans:
@@ -423,6 +469,7 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
         demo_id = value(demo, 'cabecalhoDemonstrativo/numeroDemonstrativo')
         issued = value(demo, 'cabecalhoDemonstrativo/dataEmissao')
         demo_start = len(rows)
+        demo_warnings = []
         for protocol in demo.findall('.//{%s}dadosProtocolo' % NS):
             number = value(protocol, 'numeroProtocolo')
             if not number or set(number) == {'0'}:
@@ -432,12 +479,19 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                     'pela consulta de protocolo.'
                 )
             scopes.add((number, demo_id))
+            protocol_start = len(rows)
+            protocol_warnings = []
             common = {
                 'prestador': prestador,
                 'demonstrativo': demo_id,
                 'protocolo': number,
                 'lote': value(protocol, 'numeroLotePrestador'),
                 'data_emissao': issued,
+                'total_glosa_demonstrativo': value(demo, 'valorGlosaGeral'),
+                'total_glosa_protocolo': value(
+                    protocol, 'valorGlosaProtocolo'
+                ),
+                'cobertura': 'parcial_nao_confirmada',
             }
             guide_total = Decimal(0)
             for guide in children(protocol, 'relacaoGuias'):
@@ -446,7 +500,9 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                     'guia_prestador': value(guide, 'numeroGuiaPrestador'),
                     'guia_operadora': value(guide, 'numeroGuiaOperadora'),
                     'carteira': value(guide, 'numeroCarteira'),
+                    'total_glosa_guia': value(guide, 'valorGlosaGuia'),
                 }
+                guide_start = len(rows)
                 item_total = Decimal(0)
                 seen = set()
                 for detail in children(guide, 'detalhesGuia'):
@@ -488,15 +544,29 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                         'motivos': reasons,
                         'valor_glosa': str(total),
                     }
+                    unknown = sorted({
+                        r['codigo']
+                        for r in reasons
+                        if r['codigo'] not in known_denial_codes()
+                    })
+                    if unknown:
+                        row.setdefault('avisos', []).append(
+                            'Código de glosa fora do domínio TISS 4.01: '
+                            + ', '.join(unknown)
+                            + '. Revisão necessária.'
+                        )
                     rows.append(row)
                 declared = value(guide, 'valorGlosaGuia')
                 total_guide = (
                     Decimal(declared) if declared is not None else item_total
                 )
                 if total_guide < item_total:
-                    raise TissError(
-                        'Total de glosa da guia inferior à soma dos itens.'
-                    )
+                    for row in rows[guide_start:]:
+                        row.setdefault('avisos', []).append(
+                            'Total da guia inferior à soma dos itens; '
+                            'valores originais preservados para revisão.'
+                        )
+                        row['divergencia_totais'] = True
                 guide_total += total_guide
                 if total_guide > item_total or children(
                     guide, 'motivoGlosaGuia'
@@ -506,7 +576,9 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                         'escopo': 'guia',
                         'sequencial': '',
                         'tuss': None,
-                        'valor_glosa': str(total_guide - item_total),
+                        'valor_glosa': str(
+                            max(total_guide - item_total, Decimal(0))
+                        ),
                         'motivos': [
                             {
                                 'codigo': value(m, 'codigoGlosa'),
@@ -520,39 +592,26 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                 Decimal(declared) if declared is not None else guide_total
             )
             if protocol_total < guide_total:
-                raise TissError(
-                    'Total de glosa do protocolo inferior à soma das guias.'
+                protocol_warnings.append(
+                    'Total de glosa do protocolo inferior às guias retornadas.'
                 )
-            if protocol_total > guide_total or children(
-                protocol, 'GlosaProtocolo'
-            ):
-                rows.append({
-                    **common,
-                    'escopo': 'protocolo',
-                    'sequencial': '',
-                    'tuss': None,
-                    'valor_glosa': str(protocol_total - guide_total),
-                    'motivos': [
-                        {
-                            'codigo': value(m, 'codigoGlosa'),
-                            'descricao': value(m, 'descricaoGlosa'),
-                        }
-                        for m in children(protocol, 'GlosaProtocolo')
-                    ],
-                })
+            for row in rows[protocol_start:]:
+                if protocol_warnings:
+                    row.setdefault('avisos', []).extend(protocol_warnings)
+                    row['divergencia_totais'] = True
         declared_total = value(demo, 'valorGlosaGeral')
         calculated = sum(
             (Decimal(row['valor_glosa']) for row in rows[demo_start:]),
             Decimal(0),
         )
-        if (
-            declared_total is not None
-            and Decimal(declared_total) != calculated
-        ):
-            raise TissError(
-                'Total geral da glosa diverge dos valores detalhados; '
-                'importação interrompida para revisão.'
+        if declared_total is not None and Decimal(declared_total) < calculated:
+            demo_warnings.append(
+                'Total geral da glosa inferior aos detalhes retornados.'
             )
+        for row in rows[demo_start:]:
+            if demo_warnings:
+                row.setdefault('avisos', []).extend(demo_warnings)
+                row['divergencia_totais'] = True
     if not scopes:
         raise TissError(
             'Demonstrativo ainda não disponível; dados anteriores preservados.'
@@ -635,6 +694,8 @@ def validate_response_schema(root, config):
     """Validate a copy for the observed CRC header defect."""
     checked = deepcopy(root)
     warnings = []
+    for demo in checked.findall('.//{%s}demonstrativoAnaliseConta' % NS):
+        validate_provider(demo, 'dadosPrestador/dadosContratado', config)
     for demo in checked.findall('.//{%s}demonstrativoPagamento' % NS):
         validate_provider(demo, 'dadosContratado/dadosPrestador', config)
         node = demo.find(
@@ -653,5 +714,24 @@ def validate_response_schema(root, config):
                 'operadora conferida pelo registro ANS. '
                 'XML original preservado.'
             )
-    validate(checked)
+    unknown = sorted({
+        node.text
+        for node in checked.findall('.//{%s}tipoGlosa' % NS)
+        if node.text not in known_denial_codes()
+    })
+    try:
+        validate(checked)
+    except TissError:
+        if (
+            not unknown
+            or checked.tag != '{%s}demonstrativoRetornoWS' % NS
+            or not receipt_schema().validate(checked)
+        ):
+            raise
+        warnings.append(
+            'Códigos de glosa fora do domínio TISS 4.01 publicado: '
+            + ', '.join(unknown)
+            + '. Preservados para revisão; envio permanece validado '
+            'pelo contrato original.'
+        )
     return warnings

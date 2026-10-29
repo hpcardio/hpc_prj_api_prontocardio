@@ -30,9 +30,9 @@ from app_prontocardio.services.petrobras_appeals import (
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import reconcile
 from app_prontocardio.services.petrobras_sync import (
-    discover_competencia,
     event,
     synchronize,
+    synchronize_competencia,
 )
 from app_prontocardio.services.petrobras_tiss import TissError
 
@@ -224,7 +224,9 @@ class CompetenciaInput(BaseModel):
 @router.post('/competencias/sincronizar')
 def discover(body: CompetenciaInput, db: DB, config: Config, user: Writer):
     try:
-        return discover_competencia(db, config, body.competencia, user.id)
+        return synchronize_competencia(
+            db, config, body.competencia, petrobras_oracle.candidates, user.id
+        )
     except (TissError, ValueError) as exc:
         raise HTTPException(502, str(exc)) from None
 

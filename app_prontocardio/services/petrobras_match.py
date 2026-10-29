@@ -7,6 +7,15 @@ def norm(value):
     return str(value).strip() if value is not None else ''
 
 
+def numeric_guide(value):
+    value = norm(value)
+    return (
+        (value.lstrip('0') or '0')
+        if value.isascii() and value.isdigit()
+        else value
+    )
+
+
 def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - explicit conservative matching decisions
     if guia_field not in {'guia_prestador', 'guia_operadora'}:
         return {
@@ -23,6 +32,8 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
             'count': 0,
             'divergencias': [],
         }
+    wallet = norm(source.get('carteira'))
+    notes = []
     rows = [
         r
         for r in candidates
@@ -30,6 +41,31 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
         and norm(r.get('nr_guia')) == guia
         and norm(r.get('cd_tuss')) == tuss
     ]
+    if not rows and guia_field == 'guia_prestador' and wallet:
+        rows = [
+            r
+            for r in candidates
+            if r.get('cd_convenio') == convenio_id
+            and numeric_guide(r.get('nr_guia')) == numeric_guide(guia)
+            and norm(r.get('cd_tuss')) == tuss
+            and norm(r.get('nr_carteira')) == wallet
+        ]
+        if rows:
+            notes.append(
+                'Guia do prestador conferida sem zeros à esquerda, '
+                'com procedimento e carteira exatos.'
+            )
+    # An unspecified/internal procedure table cannot be called TUSS merely
+    # because its digits happen to coincide with a code in the Oracle view.
+    if source.get('tabela') not in {'18', '19', '20', '22'}:
+        return {
+            'status': 'dados_insuficientes',
+            'oracle': None,
+            'count': 0,
+            'divergencias': [
+                'Tabela do procedimento exige mapeamento confirmado para TUSS.'
+            ],
+        }
     # Identical join duplicates are not multiple items; different mappings
     # remain ambiguous.
     unique = {
@@ -37,7 +73,7 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
     }
     rows = list(unique.values())
     wallet = norm(source.get('carteira'))
-    wallet_notes = []
+    wallet_notes = notes
     if wallet and rows:
         compatible = [
             r

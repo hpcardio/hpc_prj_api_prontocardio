@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from sqlalchemy import text
 
 from app_prontocardio.database import oracle_engine
+from app_prontocardio.services.petrobras_match import numeric_guide
 
 
 @contextmanager
@@ -34,6 +35,15 @@ def candidates(sources, config):
         for s in sources
         if s.get(config.oracle_guia)
     })
+    if config.oracle_guia == 'guia_prestador':
+        guias = sorted({numeric_guide(g) for g in guias})
+    guide_column = 'TRIM(nr_guia)'
+    if config.oracle_guia == 'guia_prestador':
+        guide_column = (
+            "CASE WHEN REGEXP_LIKE(TRIM(nr_guia), '^[0-9]+$') "
+            "THEN NVL(LTRIM(TRIM(nr_guia), '0'), '0') "
+            'ELSE TRIM(nr_guia) END'
+        )
     result = []
     if not guias:
         return result
@@ -53,7 +63,7 @@ def candidates(sources, config):
                        dt_lancamento, qt_lancamento, vl_total_conta, descricao
                   FROM dbamv.hpc_v_conta_atendimento
                  WHERE cd_convenio=:convenio
-                   AND TRIM(nr_guia) IN ({placeholders})
+                   AND {guide_column} IN ({placeholders})
             """),
                 binds,
             ).mappings()

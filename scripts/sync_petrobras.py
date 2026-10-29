@@ -2,6 +2,7 @@
 Usage: python -m scripts.sync_petrobras
 """
 
+import argparse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,14 +20,49 @@ from app_prontocardio.services.petrobras_appeals import poll_appeal
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_oracle import candidates
 from app_prontocardio.services.petrobras_sync import (
-    discover_competencia,
     synchronize,
+    synchronize_competencia,
 )
-from app_prontocardio.services.petrobras_tiss import TissError
+from app_prontocardio.services.petrobras_tiss import (
+    COMPETENCE_LENGTH,
+    MONTHS_PER_YEAR,
+    TissError,
+)
 
 
-def run():  # noqa: PLR0912 - sequential discovery, import and status phases
+def competencias(today, months, inicio=None, fim=None):
+    if (inicio is None) != (fim is None):
+        raise ValueError('Informe --inicio e --fim juntos (AAAAMM).')
+    if inicio is None:
+        end = today.year * 12 + today.month - 1
+        return [
+            f'{year:04}{month + 1:02}'
+            for year, month in (divmod(end - i, 12) for i in range(months))
+        ]
+    for value in (inicio, fim):
+        if (
+            len(value) != COMPETENCE_LENGTH
+            or not value.isascii()
+            or not value.isdigit()
+            or not 1 <= int(value[4:]) <= MONTHS_PER_YEAR
+        ):
+            raise ValueError('Competência inválida; informe AAAAMM.')
+    start = int(inicio[:4]) * 12 + int(inicio[4:]) - 1
+    end = int(fim[:4]) * 12 + int(fim[4:]) - 1
+    if not 0 <= end - start < MONTHS_PER_YEAR:
+        raise ValueError(
+            'Informe um período crescente de até 12 competências.'
+        )
+    return [
+        f'{year:04}{month + 1:02}'
+        for year, month in (divmod(i, 12) for i in range(start, end + 1))
+    ]
+
+
+def run(inicio=None, fim=None):  # noqa: PLR0912 - sequential discovery, import and status phases
     config = PetrobrasConfig()
+    today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+    selected = competencias(today, config.discovery_months, inicio, fim)
     if not config.enabled:
         return
     config.require_connection()
@@ -39,11 +75,7 @@ def run():  # noqa: PLR0912 - sequential discovery, import and status phases
             return
         try:
             with Session(postgres_engine) as db:
-                today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
-                month_index = today.year * 12 + today.month - 1
-                for index in range(config.discovery_months):
-                    year, month = divmod(month_index - index, 12)
-                    comp = f'{year:04}{month + 1:02}'
+                for comp in selected:
                     recent = db.scalar(
                         select(PetrobrasExecucao.id)
                         .where(
@@ -57,7 +89,7 @@ def run():  # noqa: PLR0912 - sequential discovery, import and status phases
                     if recent:
                         continue
                     try:
-                        discover_competencia(db, config, comp)
+                        synchronize_competencia(db, config, comp, candidates)
                     except TissError:
                         pass
                 ids = list(
@@ -143,4 +175,8 @@ def run():  # noqa: PLR0912 - sequential discovery, import and status phases
 
 
 if __name__ == '__main__':
-    run()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--inicio', help='Competência inicial AAAAMM')
+    parser.add_argument('--fim', help='Competência final AAAAMM')
+    args = parser.parse_args()
+    run(args.inicio, args.fim)
