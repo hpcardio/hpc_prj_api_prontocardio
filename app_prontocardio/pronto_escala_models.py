@@ -35,7 +35,10 @@ class ProntoEscalaParametro:
 @table_registry.mapped_as_dataclass
 class ProntoEscalaPlantao:
     __tablename__ = 'pronto_escala_plantoes'
-    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+    __table_args__ = (
+        UniqueConstraint('cd_agenda_central'),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, init=False)
     cd_prestador: Mapped[int] = mapped_column(Integer, index=True)
