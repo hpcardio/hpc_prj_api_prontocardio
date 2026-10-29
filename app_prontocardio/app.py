@@ -15,6 +15,7 @@ from app_prontocardio.routers import (
     agendamentos,
     angio_tc,
     app_glosas,
+    petrobras,
     autenticacao,
     biq,
     biq_admissoes_eletivas,
@@ -109,6 +110,7 @@ app.include_router(paciente_auth.router)
 app.include_router(prescricoes.router)
 app.include_router(usuarios.router)
 app.include_router(app_glosas.router)
+app.include_router(petrobras.router)
 app.include_router(financeiro.router)
 app.include_router(contas_pagar.router)
 app.include_router(requisicoes.router)
