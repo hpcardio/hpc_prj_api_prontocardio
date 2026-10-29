@@ -249,3 +249,31 @@ arquivo/lote independente do protocolo e revisão das inconsistências financeir
 além de validar o mapeamento de guia e tabela de procedimentos. Não reutilizar
 número de lote como protocolo nem fabricar valores de glosa por item. O envio de
 recursos para esses registros segue indisponível até existir referência válida.
+
+## Segundo XML de análise: escopo parcial confirmado
+
+O usuário confirmou `numeroGuiaPrestador` como referência de guia. O segundo
+XML contém protocolo válido, uma guia, três itens e dois motivos de glosa.
+Comparação com o demonstrativo de pagamento completo confirmou:
+
+- R$ 0,03: soma das glosas dos itens e total da guia, coincidente nos dois XMLs.
+- R$ 81,73: total do protocolo/lote, que contém 33 guias no extrato completo.
+- R$ 184,34: total do demonstrativo de pagamento completo.
+
+Correção da interpretação anterior: o exportador inclui totais dos níveis
+superiores mesmo quando exporta apenas uma guia. Essa diferença não comprova
+inconsistência financeira. O parser atual pressupõe resposta completa e ainda
+não deve ser usado para importar exportações parciais: não atribuir à guia a
+sobra do lote nem tratar ausência de outras guias como remoção.
+
+Consulta Oracle somente leitura: igualdade literal de numeroGuiaPrestador não
+retornou registros; comparação diagnóstica removendo apenas zeros iniciais
+localizou três linhas. Entre as três codificações do XML, uma coincide exatamente
+com CD_TUSS para essa guia e carteira. Os outros dois códigos precisam de análise
+de mapeamento; codigoTabela continua 00. Não houve vínculo ou normalização
+persistidos. O caso confirma a necessidade de preservar o identificador original
+e validar uma chave normalizada específica da guia do prestador.
+
+Pendências de implementação: importação de exportação parcial por guia/lote;
+metadados de totais separados por escopo; identidade sem depender de protocolo
+para lotes que o omitem; mapeamento dos códigos e normalização auditável da guia.
