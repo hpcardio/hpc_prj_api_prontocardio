@@ -4920,7 +4920,23 @@ def _duplicatas_maida_pendentes(session, ids_registros):
         'demonstrativo_conta_ipm', 'registros_glosa_demonstrativo_ipm',
     )):
         return set()
+    # Build the traced Maida identities once. The correlated join previously
+    # rescanned all three source tables for each pending record.
     return set(session.execute(text("""
+        WITH canonical_maida AS MATERIALIZED (
+            SELECT canonical.cd_remessa, canonical.cd_atendimento,
+                   canonical.conta, canonical.motivo_glosa,
+                   d.numero_lote, d.numero_guia_senha, d.codigo_servico,
+                   d.data_realizacao, d.valor_glosa
+              FROM api_prontocardio.demonstrativo_conta_ipm d
+              JOIN api_prontocardio.registros_glosa_demonstrativo_ipm x
+                ON x.id_registro = d.id_registro
+              JOIN api_prontocardio.registros_glosa canonical
+                ON canonical.id = x.registro_glosa_id
+             WHERE canonical.sn_ativo = 'true'
+               AND UPPER(BTRIM(canonical.convenio)) = 'ISSEC'
+               AND d.origem_maida IS NOT NULL
+        )
         SELECT g.id FROM api_prontocardio.registros_glosa g
          WHERE g.id = ANY(:ids) AND g.sn_ativo = 'true'
            AND UPPER(BTRIM(g.convenio)) = 'ISSEC'
@@ -4930,18 +4946,11 @@ def _duplicatas_maida_pendentes(session, ids_registros):
                SELECT 1 FROM api_prontocardio.registros_glosa_demonstrativo_ipm own
                 WHERE own.registro_glosa_id = g.id)
            AND EXISTS (
-               SELECT 1 FROM api_prontocardio.demonstrativo_conta_ipm d
-               JOIN api_prontocardio.registros_glosa_demonstrativo_ipm x
-                 ON x.id_registro = d.id_registro
-               JOIN api_prontocardio.registros_glosa canonical
-                 ON canonical.id = x.registro_glosa_id
-              WHERE canonical.sn_ativo = 'true'
-                AND canonical.cd_remessa = g.cd_remessa
-                AND canonical.cd_atendimento = g.cd_atendimento
-                AND canonical.conta = g.conta
-                AND canonical.motivo_glosa = g.motivo_glosa
-                AND UPPER(BTRIM(canonical.convenio)) = 'ISSEC'
-                AND d.origem_maida IS NOT NULL
+               SELECT 1 FROM canonical_maida d
+              WHERE d.cd_remessa = g.cd_remessa
+                AND d.cd_atendimento = g.cd_atendimento
+                AND d.conta = g.conta
+                AND d.motivo_glosa = g.motivo_glosa
                 AND BTRIM(d.numero_lote) = COALESCE(
                     NULLIF(BTRIM(g.numero_lote), ''),
                     NULLIF(BTRIM(g.processo_controle_fatura_gab), '')
