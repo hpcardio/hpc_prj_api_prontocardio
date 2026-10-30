@@ -9,7 +9,7 @@ def test_duplicate_scope_keeps_treatments_and_requires_exact_demonstrative(monke
     assert financeiro._duplicatas_maida_pendentes(session, {10, 11, 12}) == {10, 11}
     sql = str(session.execute.call_args.args[0])
     for condition in ['g.dt_recurso IS NULL', 'NOT EXISTS', 'canonical.sn_ativo',
-        'canonical.cd_remessa = g.cd_remessa', 'd.numero_lote', 'd.numero_guia_senha',
+        'd.cd_remessa = g.cd_remessa', 'd.numero_lote', 'd.numero_guia_senha',
         'd.codigo_servico', 'd.data_realizacao', 'g.valor_recursado']:
         assert condition in sql
     assert session.execute.call_args.args[1] == {'ids': [10, 11, 12]}

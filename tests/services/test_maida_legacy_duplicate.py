@@ -11,9 +11,9 @@ def test_legacy_duplicate_requires_exact_identity_and_no_treatment(
     monkeypatch.setattr(f, '_tabela_ipm_existe', lambda *a: True)
     capture = Mock()
     capture.execute.return_value.scalars.return_value = []
-    f._duplicatas_maida_pendentes(capture, set(range(1, 10)))
+    f._duplicatas_maida_pendentes(capture, set(range(1, 20)))
     sql = str(capture.execute.call_args.args[0])
-    sql = sql.replace('g.id = ANY(:ids)', 'g.id < 10')
+    sql = sql.replace('g.id = ANY(:ids)', 'g.id < 20')
     sql = sql.replace('BTRIM(', 'TRIM(')
     sql = sql.replace('d.data_realizacao::date', 'date(d.data_realizacao)')
     sql = sql.replace(
@@ -41,7 +41,7 @@ def test_legacy_duplicate_requires_exact_identity_and_no_treatment(
             VALUES(100,'true','ISSEC','triagem',NULL,'true',20035,1,424496,
             '1811',NULL,'31554','580314','40101010',NULL,
             '2026-08-26','2026-08-26',NULL,30)""")
-        for ident in range(1, 10):
+        for ident in range(1, 20):
             conn.exec_driver_sql(
                 """INSERT INTO api_prontocardio.registros_glosa
                 SELECT ?,sn_ativo,convenio,origem_registro,
@@ -67,10 +67,22 @@ def test_legacy_duplicate_requires_exact_identity_and_no_treatment(
             7: "data_lancamento='2026-08-25'",
             8: 'valor=31',
             9: "motivo_glosa='2601'",
+            10: "sn_ativo='false'",
+            11: "convenio='OUTRO'",
+            12: "origem_registro='manual'",
+            13: "procedimento='OUTRO'",
+            14: "guia=NULL",
+            15: "data_lancamento=NULL, data_atendimento=NULL",
+            16: "procedimento='OUTRO', cd_tuss='40101010'",
+            17: "cd_remessa=NULL",
+            18: "numero_lote='   '",
         }
         for ident, change in changes.items():
             conn.exec_driver_sql(
                 f'UPDATE api_prontocardio.registros_glosa SET {change} '
                 f'WHERE id={ident}'
             )
-        assert set(conn.execute(text(sql)).scalars()) == {1}
+        conn.exec_driver_sql("""INSERT INTO
+            api_prontocardio.registros_glosa_demonstrativo_ipm
+            VALUES(19,'x')""")
+        assert set(conn.execute(text(sql)).scalars()) == {1, 16, 18}
