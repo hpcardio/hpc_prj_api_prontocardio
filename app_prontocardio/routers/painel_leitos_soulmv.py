@@ -479,6 +479,32 @@ order by ev.dt_pre_med desc, ev.hr_pre_med desc
 fetch first 50 rows only
 """
 
+SQL_ESCALAS_ASSISTENCIAIS = """
+select
+    a.cd_avaliacao,
+    a.dh_avaliacao,
+    a.vl_resultado,
+    a.ds_interpretacao_resultado,
+    a.nm_usuario,
+    f.cd_formula,
+    trim(f.ds_formula) as ds_formula
+from dbamv.pagu_avaliacao a
+join dbamv.pagu_formula f
+  on f.cd_formula = a.cd_formula
+where a.cd_atendimento = :admission_id
+  and a.dh_avaliacao >= :start_date
+  and nvl(a.sn_estado_previo, 'N') = 'N'
+  and nvl(a.sn_exibir_resultado, 'S') = 'S'
+  and (
+       upper(f.ds_formula) like '%BRADEN%'
+    or upper(f.ds_formula) like '%MORSE%'
+    or upper(f.ds_formula) like '%GLASGOW%'
+    or upper(f.ds_formula) like '%BRONCO%'
+    or upper(f.ds_formula) like '%ALDRETE%'
+  )
+order by a.dh_avaliacao desc
+"""
+
 SQL_PRESCRICOES = """
 select
     pm.cd_pre_med,
@@ -1218,6 +1244,45 @@ def evolucoes_clinicas(admission_id: int):
         }
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha ao consultar evoluções no Soul MV: {exc}") from exc
+
+
+@router.get('/paciente/{admission_id}/escalas-assistenciais')
+def escalas_assistenciais(admission_id: int):
+    try:
+        rows = fetch_all(
+            SQL_ESCALAS_ASSISTENCIAIS,
+            {
+                'admission_id': admission_id,
+                'start_date': datetime.now() - timedelta(days=7),
+            },
+        )
+        return {
+            'source': 'soulmv',
+            'period': '7d',
+            'updatedAt': datetime.now().isoformat(),
+            'evaluations': [
+                {
+                    'id': _plain(row.get('CD_AVALIACAO')),
+                    'formulaId': _plain(row.get('CD_FORMULA')),
+                    'formula': str(row.get('DS_FORMULA') or 'Escala').strip(),
+                    'date': _iso(row.get('DH_AVALIACAO')),
+                    'value': _plain(row.get('VL_RESULTADO')),
+                    'interpretation': str(
+                        row.get('DS_INTERPRETACAO_RESULTADO') or ''
+                    ).strip()
+                    or None,
+                    'user': str(
+                        row.get('NM_USUARIO') or 'Profissional não informado'
+                    ).strip(),
+                }
+                for row in rows
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail='Falha ao consultar escalas assistenciais no Soul MV.',
+        ) from exc
 
 
 @router.get("/paciente/{admission_id}/prescricoes")
