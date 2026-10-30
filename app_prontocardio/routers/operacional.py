@@ -57,6 +57,24 @@ def _validar_periodo_confirmacoes(data_inicio: date, data_fim: date) -> None:
         )
 
 
+def montar_resposta_confirmacoes(rows):
+    agendamentos = [dict(row) for row in rows]
+    total_agendamentos = len(agendamentos)
+    total_pacientes = len(
+        {
+            row['cd_paciente']
+            for row in agendamentos
+            if row.get('cd_paciente') is not None
+        }
+    )
+    return {
+        'agendamentos': agendamentos,
+        'total': total_agendamentos,
+        'total_agendamentos': total_agendamentos,
+        'total_pacientes': total_pacientes,
+    }
+
+
 @router.get('/agendamentos/confirmacoes')
 def consultar_confirmacoes_agendamentos(
     _: UsuarioOperacional,
@@ -113,8 +131,8 @@ def consultar_confirmacoes_agendamentos(
                        iac.CD_AGENDA_CENTRAL AS cd_agenda_central,
                        iac.CD_PACIENTE AS cd_paciente,
                        p.NM_PACIENTE AS nm_paciente,
-                       p.NR_DDD_CELULAR AS nr_ddd_celular,
-                       p.NR_CELULAR AS nr_celular,
+                       NVL(p.NR_DDD_CELULAR, iac.NR_DDD_CELULAR) AS nr_ddd_celular,
+                       NVL(p.NR_CELULAR, iac.NR_CELULAR) AS nr_celular,
                        iac.HR_AGENDA AS horario,
                        iac.CD_ITEM_AGENDAMENTO AS cd_item_agendamento,
                        ia.DS_ITEM_AGENDAMENTO AS ds_item_agendamento,
@@ -158,6 +176,8 @@ def consultar_confirmacoes_agendamentos(
                     ON rc.CD_REGISTRO_VINCULADO = iac.CD_IT_AGENDA_CENTRAL
                    AND rc.ordem = 1
                  WHERE iac.CD_PACIENTE IS NOT NULL
+                   AND NVL(iac.TP_SITUACAO, 'M') <> 'C'
+                   AND iac.CD_IT_AGENDA_PAI IS NULL
                    AND iac.HR_AGENDA >= :data_inicio
                    AND iac.HR_AGENDA < :data_fim + 1
             )
@@ -171,7 +191,7 @@ def consultar_confirmacoes_agendamentos(
         ),
         params,
     ).mappings().all()
-    return {'agendamentos': [dict(row) for row in rows], 'total': len(rows)}
+    return montar_resposta_confirmacoes(rows)
 
 
 @router.put('/agendamentos/{cd_it_agenda_central}/confirmacao-contato')
