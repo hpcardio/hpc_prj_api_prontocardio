@@ -31,6 +31,16 @@ STATUS_ASSUNTO = {
     'reagendamento_solicitado': 'REAGENDAMENTO SOLICITADO VIA WHATSAPP',
 }
 INTERVALO_MAXIMO_CONFIRMACOES_DIAS = 31
+UNIDADES_CONFIRMACAO = {
+    '1': (
+        'Unidade Diagnóstica 01 - Endereço: Avenida Barão de Studart '
+        '- Nº 560 - Meireles'
+    ),
+    '2': (
+        'Unidade Diagnóstica 02 - Endereço: Avenida Barão de Studart '
+        '- Nº 600 - Meireles'
+    ),
+}
 
 
 class ConfirmacaoContatoInput(BaseModel):
@@ -57,8 +67,21 @@ def _validar_periodo_confirmacoes(data_inicio: date, data_fim: date) -> None:
         )
 
 
+def _nome_unidade_confirmacao(
+    codigo: object,
+    nome: str | None,
+) -> str | None:
+    codigo_normalizado = None if codigo is None else str(codigo).strip()
+    return UNIDADES_CONFIRMACAO.get(codigo_normalizado, nome)
+
+
 def montar_resposta_confirmacoes(rows):
     agendamentos = [dict(row) for row in rows]
+    for agendamento in agendamentos:
+        agendamento['ds_unidade_atendimento'] = _nome_unidade_confirmacao(
+            agendamento.get('cd_unidade_atendimento'),
+            agendamento.get('ds_unidade_atendimento'),
+        )
     total_agendamentos = len(agendamentos)
     total_pacientes = len(
         {
