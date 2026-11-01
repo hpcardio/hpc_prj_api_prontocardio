@@ -69,7 +69,7 @@ def config():
         login=SecretStr('synthetic'),
         password=SecretStr('synthetic-only'),
         prestador_cnpj='00000000000000',
-        oracle_guia='guia_operadora',
+        oracle_guia='guia_prestador',
     )
 
 
@@ -112,7 +112,7 @@ def source():
         'lote': '1',
         'escopo': 'item',
         'sequencial': '1',
-        'guia_prestador': 'P001',
+        'guia_prestador': '000000000000000P0123',
         'guia_operadora': '000123',
         'tuss': '00123456',
         'tabela': '22',
@@ -131,8 +131,9 @@ def candidate():
     return {
         'nr_carteira': '00000001',
         'cd_convenio': 37,
-        'nr_guia': '000123',
-        'cd_tuss': '00123456',
+        'nr_guia': 'P0123',
+        'cd_pro_fat': '00123456',
+        'cd_tuss': '99999999',
         'cd_reg': 10,
         'cd_lancamento': 1,
         'data_realizacao': '2026-10-01',
@@ -143,17 +144,17 @@ def candidate():
 
 def test_exact_match_keeps_zeros(source, candidate):
     assert (
-        reconcile(source, [candidate], 37, 'guia_operadora')['status']
+        reconcile(source, [candidate], 37, 'guia_prestador')['status']
         == 'conciliado'
     )
     bad = {**candidate, 'nr_guia': '123'}
     assert (
-        reconcile(source, [bad], 37, 'guia_operadora')['status']
+        reconcile(source, [bad], 37, 'guia_prestador')['status']
         == 'nao_localizado'
     )
     assert (
         reconcile(
-            source, [{**candidate, 'cd_convenio': 9}], 37, 'guia_operadora'
+            source, [{**candidate, 'cd_convenio': 9}], 37, 'guia_prestador'
         )['status']
         == 'nao_localizado'
     )
@@ -165,20 +166,20 @@ def test_no_assumption_about_guide_type(source, candidate):
         == 'dados_insuficientes'
     )
     assert (
-        reconcile(source, [candidate], 37, 'guia_prestador')['status']
-        == 'nao_localizado'
+        reconcile(source, [candidate], 37, 'guia_operadora')['status']
+        == 'dados_insuficientes'
     )
 
 
 def test_repeated_procedure_never_selects_first(source, candidate):
     other = {**candidate, 'cd_lancamento': 2}
     assert (
-        reconcile(source, [candidate, other], 37, 'guia_operadora')['status']
+        reconcile(source, [candidate, other], 37, 'guia_prestador')['status']
         == 'ambiguo'
     )
     other['data_realizacao'] = '2026-10-02'
     assert (
-        reconcile(source, [candidate, other], 37, 'guia_operadora')['oracle'][
+        reconcile(source, [candidate, other], 37, 'guia_prestador')['oracle'][
             'cd_lancamento'
         ]
         == 1
@@ -187,7 +188,7 @@ def test_repeated_procedure_never_selects_first(source, candidate):
 
 def test_financial_divergence_does_not_destroy_match(source, candidate):
     r = reconcile(
-        source, [{**candidate, 'valor': '110.00'}], 37, 'guia_operadora'
+        source, [{**candidate, 'valor': '110.00'}], 37, 'guia_prestador'
     )
     assert r['status'] == 'conciliado'
     assert r['divergencias']
@@ -196,7 +197,7 @@ def test_financial_divergence_does_not_destroy_match(source, candidate):
 def test_numeric_quantity_disambiguation(source, candidate):
     other = {**candidate, 'cd_lancamento': 2, 'quantidade': '2'}
     assert (
-        reconcile(source, [candidate, other], 37, 'guia_operadora')['count']
+        reconcile(source, [candidate, other], 37, 'guia_prestador')['count']
         == 1
     )
 
@@ -603,7 +604,7 @@ def test_competence_discovery_uses_only_payer(db, config):
 def test_wallet_mismatch_prevents_even_single_match(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = '00000002'
-    result = reconcile(source, [candidate], 37, 'guia_operadora')
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
     assert result['status'] == 'ambiguo'
     assert result['oracle'] is None
     assert any('carteira' in d for d in result['divergencias'])
@@ -613,7 +614,7 @@ def test_wallet_preserves_leading_zeros(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = '1'
     assert (
-        reconcile(source, [candidate], 37, 'guia_operadora')['oracle'] is None
+        reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
     )
 
 
@@ -622,7 +623,7 @@ def test_wallet_disambiguates_beneficiaries(source, candidate):
     candidate['nr_carteira'] = '00000001'
     other = {**candidate, 'cd_lancamento': 2, 'nr_carteira': '00000002'}
     assert (
-        reconcile(source, [candidate, other], 37, 'guia_operadora')['oracle'][
+        reconcile(source, [candidate, other], 37, 'guia_prestador')['oracle'][
             'cd_lancamento'
         ]
         == 1
@@ -632,7 +633,7 @@ def test_wallet_disambiguates_beneficiaries(source, candidate):
 def test_missing_oracle_wallet_prevents_match(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = None
-    result = reconcile(source, [candidate], 37, 'guia_operadora')
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
     assert result['status'] == 'ambiguo'
     assert result['oracle'] is None
     assert any('carteira' in d for d in result['divergencias'])
@@ -799,7 +800,7 @@ def test_provider_guide_normalization_requires_exact_wallet(source, candidate):
             is None
         )
     source['carteira'] = '00000001'
-    candidate['cd_tuss'] = '123456'
+    candidate['cd_pro_fat'] = '123456'
     assert (
         reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
     )
@@ -814,7 +815,6 @@ def test_table_does_not_block_confirmed_composite_key(
     result = reconcile(source, [candidate], 37, 'guia_prestador')
     assert result['status'] == 'conciliado'
     assert result['oracle'] == candidate
-    assert any('tabela original' in d for d in result['divergencias'])
 
 
 def test_partial_totals_are_retained_and_block_transmission(config):
@@ -964,7 +964,7 @@ def test_every_source_key_component_is_required(source, candidate, field):
     assert result['oracle'] is None
 
 
-@pytest.mark.parametrize('field', ['nr_carteira', 'nr_guia', 'cd_tuss'])
+@pytest.mark.parametrize('field', ['nr_carteira', 'nr_guia', 'cd_pro_fat'])
 def test_each_component_must_belong_to_the_same_oracle_item(
     source, candidate, field
 ):
@@ -973,3 +973,159 @@ def test_each_component_must_belong_to_the_same_oracle_item(
     assert reconcile(source, [other], 37, 'guia_prestador')['oracle'] is None
     result = reconcile(source, [other, candidate], 37, 'guia_prestador')
     assert result['oracle'] == candidate
+
+
+def test_provider_guide_without_left_padding_matches_mv_guide(
+    source, candidate
+):
+    source['guia_prestador'] = '0000000000000B386348'
+    candidate['nr_guia'] = 'B386348'
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    assert result['status'] == 'conciliado'
+    assert result['oracle'] == candidate
+    assert any('zeros' in d for d in result['divergencias'])
+
+
+def test_procedure_matches_cd_pro_fat_not_cd_tuss(source, candidate):
+    candidate['cd_tuss'] = source['tuss']
+    candidate['cd_pro_fat'] = '99999999'
+    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    assert result['status'] == 'nao_localizado'
+    assert result['oracle'] is None
+
+
+def test_operator_guide_is_never_used_as_key(source, candidate):
+    candidate['nr_guia'] = source['guia_operadora']
+    assert (
+        reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
+    )
+
+
+def test_parser_keeps_senha_and_processed_value():
+    root = demo_xml()
+    guide = root.find('.//{%s}relacaoGuias' % NS)
+    element(guide, 'senha', 'B386348')
+    detail = guide.find('{%s}detalhesGuia' % NS)
+    element(detail, 'valorProcessado', '298.43')
+    rows, _ = parse_demonstrativos(root, '00000000000000', '422631')
+    assert rows[0]['senha'] == 'B386348'
+    assert rows[0]['valor_processado'] == '298.43'
+    # New informative fields never change the persisted identity.
+    assert (
+        rows[0]['chave']
+        == parse_demonstrativos(demo_xml(), '00000000000000', '422631')[0][0][
+            'chave'
+        ]
+    )
+
+
+def petrobras_client(db, config, perfil='usuario'):
+    app = FastAPI()
+    app.include_router(petrobras.router)
+    user = SimpleNamespace(
+        id=1, perfil=perfil, telas_permitidas=['follow_up_glosas']
+    )
+    app.dependency_overrides[petrobras.valida_token_usuario_atual] = lambda: (
+        user
+    )
+    app.dependency_overrides[petrobras.get_session_postgres] = lambda: db
+    app.dependency_overrides[petrobras.get_config] = lambda: config
+    return TestClient(app)
+
+
+def test_demonstrativos_page_groups_all_items_and_totals(
+    db, protocol, config, source, candidate
+):
+    other = {
+        **source,
+        'chave': 'other-key',
+        'demonstrativo': 'D2',
+        'data_emissao': '2026-10-05',
+        'valor_glosa': '5.00',
+    }
+    source['data_emissao'] = '2026-10-01'
+    import_rows(db, protocol, [source, other], set(), [candidate], config)
+    db.commit()
+    with petrobras_client(db, config) as client:
+        data = client.get(
+            '/app_glosas/petrobras/demonstrativos', params={'limit': 1}
+        ).json()
+        assert data['total'] == 2
+        assert data['quantidade_glosas'] == 2
+        assert Decimal(str(data['valor_total_glosado'])) == Decimal('25.00')
+        assert Decimal(str(data['valor_total_tratado'])) == 0
+        # Most recent demonstrativo first; no item from another page leaks.
+        assert data['demonstrativos'] == ['D2']
+        assert {i['demonstrativo'] for i in data['items']} == {'D2'}
+        filtered = client.get(
+            '/app_glosas/petrobras/demonstrativos',
+            params={'guia': 'P0123'},
+        ).json()
+        assert filtered['quantidade_glosas'] == 2
+        empty = client.get(
+            '/app_glosas/petrobras/demonstrativos',
+            params={'protocolo': 'outro'},
+        ).json()
+        assert empty['total'] == 0
+        assert empty['items'] == []
+
+
+def test_match_all_rechecks_stored_sources_without_payer(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    import_rows(db, protocol, [source], set(), [], config)
+    db.commit()
+    row = db.scalar(select(PetrobrasGlosa))
+    assert row.cruzamento == 'nao_localizado'
+    monkeypatch.setattr(
+        petrobras.petrobras_oracle, 'candidates', lambda s, c: [candidate]
+    )
+    with petrobras_client(db, config) as client:
+        data = client.post('/app_glosas/petrobras/glosas/cruzar').json()
+        assert data == {
+            'conferidos': 1,
+            'alterados': 1,
+            'situacao': {'conciliado': 1},
+        }
+        assert (
+            client.post('/app_glosas/petrobras/glosas/cruzar').json()[
+                'alterados'
+            ]
+            == 0
+        )
+    db.refresh(row)
+    assert row.oracle == candidate
+    kinds = [
+        e.tipo
+        for e in db.scalars(
+            select(PetrobrasEvento).where(PetrobrasEvento.glosa_id == row.id)
+        )
+    ]
+    assert kinds.count('cruzamento_manual') == 1
+
+
+def test_match_all_preserves_previous_match_when_oracle_fails(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    import_rows(db, protocol, [source], set(), [candidate], config)
+    db.commit()
+
+    def unavailable(*_):
+        raise RuntimeError('offline')
+
+    monkeypatch.setattr(petrobras.petrobras_oracle, 'candidates', unavailable)
+    with petrobras_client(db, config) as client:
+        assert (
+            client.post('/app_glosas/petrobras/glosas/cruzar').status_code
+            == 503
+        )
+    row = db.scalar(select(PetrobrasGlosa))
+    assert row.cruzamento == 'conciliado'
+
+
+def test_match_all_requires_writer(db, protocol, config):
+    with petrobras_client(db, config, perfil='leitura') as client:
+        assert (
+            client.post('/app_glosas/petrobras/glosas/cruzar').status_code
+            == 403
+        )

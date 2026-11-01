@@ -1,121 +1,111 @@
-"""Conservative, exact identifiers. No fuzzy names or first-row fallback."""
+"""Conservative, exact identifiers. No fuzzy names or first-row fallback.
+
+Confirmed key: numeroCarteira = NR_CARTEIRA, numeroGuiaPrestador = NR_GUIA
+(MV stores the guide without the TISS left zero padding, e.g.
+0000000000000B386348 = B386348) and codigoProcedimento = CD_PRO_FAT.
+"""
 
 from decimal import Decimal
+
+GUIDE_FIELD = 'guia_prestador'
 
 
 def norm(value):
     return str(value).strip() if value is not None else ''
 
 
-def numeric_guide(value):
+def provider_guide(value):
+    """Remove only the left zero padding sent by the TISS field."""
     value = norm(value)
-    return (
-        (value.lstrip('0') or '0')
-        if value.isascii() and value.isdigit()
-        else value
-    )
+    return (value.lstrip('0') or '0') if value else ''
 
 
-def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - explicit conservative matching decisions
-    if guia_field not in {'guia_prestador', 'guia_operadora'}:
-        return {
-            'status': 'dados_insuficientes',
-            'oracle': None,
-            'count': 0,
-            'divergencias': ['Mapeamento da guia Oracle pendente.'],
-        }
-    guia, tuss = norm(source.get(guia_field)), norm(source.get('tuss'))
+def _result(status, oracle=None, count=0, divergencias=None):
+    return {
+        'status': status,
+        'oracle': oracle,
+        'count': count,
+        'divergencias': divergencias or [],
+    }
+
+
+def _refine(rows, source):
+    # TISS sequencialItem != MV cd_lancamento. Never equate them without a
+    # map; only exact date and quantity may narrow repeated procedures.
+    for field in ('data_realizacao', 'quantidade'):
+        value = source.get(field)
+        if value is None or not norm(value):
+            continue
+        refined = [
+            r
+            for r in rows
+            if r.get(field) is not None
+            and (
+                Decimal(str(r[field])) == Decimal(str(value))
+                if field == 'quantidade'
+                else norm(r.get(field)) == norm(value)
+            )
+        ]
+        if refined:
+            rows = refined
+    return rows
+
+
+def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0911 - explicit conservative matching decisions
+    if guia_field != GUIDE_FIELD:
+        return _result(
+            'dados_insuficientes',
+            divergencias=['Mapeamento da guia Oracle pendente.'],
+        )
+    guia = provider_guide(source.get(GUIDE_FIELD))
+    procedure = norm(source.get('tuss'))
     wallet = norm(source.get('carteira'))
-    if not guia or not tuss or not wallet or source.get('escopo') != 'item':
-        return {
-            'status': 'dados_insuficientes',
-            'oracle': None,
-            'count': 0,
-            'divergencias': [
-                'Vínculo exige carteira, guia e procedimento informados.'
+    if (
+        not guia
+        or not procedure
+        or not wallet
+        or source.get('escopo') != 'item'
+    ):
+        return _result(
+            'dados_insuficientes',
+            divergencias=[
+                'Vínculo exige carteira, guia do prestador e procedimento.'
             ],
-        }
-    notes = []
-    rows = [
+        )
+    same_guide = [
         r
         for r in candidates
         if r.get('cd_convenio') == convenio_id
-        and norm(r.get('nr_guia')) == guia
-        and norm(r.get('cd_tuss')) == tuss
+        and provider_guide(r.get('nr_guia')) == guia
+        and norm(r.get('cd_pro_fat')) == procedure
     ]
-    if not rows and guia_field == 'guia_prestador' and wallet:
-        rows = [
-            r
-            for r in candidates
-            if r.get('cd_convenio') == convenio_id
-            and numeric_guide(r.get('nr_guia')) == numeric_guide(guia)
-            and norm(r.get('cd_tuss')) == tuss
-            and norm(r.get('nr_carteira')) == wallet
-        ]
-        if rows:
-            notes.append(
-                'Guia do prestador conferida sem zeros à esquerda, '
-                'com procedimento e carteira exatos.'
-            )
+    rows = [r for r in same_guide if norm(r.get('nr_carteira')) == wallet]
+    if same_guide and not rows:
+        return _result(
+            'ambiguo',
+            count=len(same_guide),
+            divergencias=[
+                'Guia e procedimento encontrados, mas a carteira está '
+                'ausente ou é divergente. Vínculo não confirmado.'
+            ],
+        )
     # Identical join duplicates are not multiple items; different mappings
     # remain ambiguous.
-    unique = {
-        tuple(sorted((k, norm(v)) for k, v in r.items())): r for r in rows
-    }
-    rows = list(unique.values())
-    wallet = norm(source.get('carteira'))
-    wallet_notes = notes
-    if wallet and rows:
-        compatible = [r for r in rows if norm(r.get('nr_carteira')) == wallet]
-        if not compatible:
-            return {
-                'status': 'ambiguo',
-                'oracle': None,
-                'count': len(rows),
-                'divergencias': [
-                    (
-                        'Guia e TUSS encontrados, mas a carteira '
-                        'está ausente ou é divergente. Vínculo não confirmado.'
-                    )
-                ],
-            }
-        rows = compatible
+    rows = list(
+        {
+            tuple(sorted((k, norm(v)) for k, v in r.items())): r for r in rows
+        }.values()
+    )
     if len(rows) > 1:
-        # TISS sequencialItem != MV cd_lancamento. Never equate them without a
-        # map.
-        for sf, of in [
-            ('data_realizacao', 'data_realizacao'),
-            ('quantidade', 'quantidade'),
-        ]:
-            value = source.get(sf)
-            if value is None or not norm(value):
-                continue
-            refined = [
-                r
-                for r in rows
-                if r.get(of) is not None
-                and (
-                    Decimal(str(r[of])) == Decimal(str(value))
-                    if sf == 'quantidade'
-                    else norm(r.get(of)) == norm(value)
-                )
-            ]
-            if refined:
-                rows = refined
+        rows = _refine(rows, source)
     if len(rows) != 1:
-        return {
-            'status': 'ambiguo' if rows else 'nao_localizado',
-            'oracle': None,
-            'count': len(rows),
-            'divergencias': [],
-        }
-    row = rows[0]
-    diffs = wallet_notes
-    if source.get('tabela') not in {'18', '19', '20', '22'}:
-        diffs.append(
-            'Vínculo pela chave carteira + guia + procedimento em CD_TUSS; '
-            'tabela original preservada sem conversão de código.'
+        return _result(
+            'ambiguo' if rows else 'nao_localizado', count=len(rows)
         )
+    row = rows[0]
+    diffs = []
+    if norm(source.get(GUIDE_FIELD)) != norm(row.get('nr_guia')):
+        diffs.append('Guia do prestador conferida sem zeros à esquerda.')
     for sf, of in [('valor_informado', 'valor'), ('quantidade', 'quantidade')]:
         if (
             source.get(sf) is not None
@@ -129,9 +119,4 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0912 - e
         and source['data_realizacao'] != row['data_realizacao']
     ):
         diffs.append('Data de realização divergente.')
-    return {
-        'status': 'conciliado',
-        'oracle': row,
-        'count': 1,
-        'divergencias': diffs,
-    }
+    return _result('conciliado', row, 1, diffs)
