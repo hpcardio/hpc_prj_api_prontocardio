@@ -499,6 +499,7 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                     **common,
                     'guia_prestador': value(guide, 'numeroGuiaPrestador'),
                     'guia_operadora': value(guide, 'numeroGuiaOperadora'),
+                    'senha': value(guide, 'senha'),
                     'carteira': value(guide, 'numeroCarteira'),
                     'total_glosa_guia': value(guide, 'valorGlosaGuia'),
                 }
@@ -540,6 +541,7 @@ def parse_demonstrativos(root, prestador, registro_ans):  # noqa: PLR0912, PLR09
                         'data_realizacao': value(detail, 'dataRealizacao'),
                         'quantidade': value(detail, 'qtdExecutada'),
                         'valor_informado': value(detail, 'valorInformado'),
+                        'valor_processado': value(detail, 'valorProcessado'),
                         'valor_liberado': value(detail, 'valorLiberado'),
                         'motivos': reasons,
                         'valor_glosa': str(total),

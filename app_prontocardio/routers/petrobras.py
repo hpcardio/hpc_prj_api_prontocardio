@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_postgres
@@ -28,7 +28,10 @@ from app_prontocardio.services.petrobras_appeals import (
     send_appeal,
 )
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
-from app_prontocardio.services.petrobras_match import reconcile
+from app_prontocardio.services.petrobras_match import (
+    provider_guide,
+    reconcile,
+)
 from app_prontocardio.services.petrobras_sync import (
     event,
     synchronize,
@@ -174,6 +177,124 @@ def list_items(  # noqa: PLR0913 - independent HTTP query parameters
     return {'total': total, 'items': [public(r) for r in rows]}
 
 
+MAX_DEMONSTRATIVO_ITEMS = 2000
+
+
+@router.get('/demonstrativos')
+def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
+    db: DB,
+    config: Config,
+    user: User,
+    protocolo: str = Query('', max_length=20),
+    guia: str = Query('', max_length=100),
+    lote: str = Query('', max_length=100),
+    paciente: str = Query('', max_length=150),
+    cd_atendimento: int | None = Query(None, ge=1),
+    cd_remessa: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(10, ge=0, le=50),
+):
+    """Follow-Up cards: one page of demonstrativos with all their items.
+
+    ``limit=0`` returns only the totals used to paginate the merged list.
+    """
+    filters = [PetrobrasProtocolo.prestador == config.prestador_cnpj]
+    if protocolo.strip():
+        filters.append(PetrobrasProtocolo.numero == protocolo.strip())
+    if guia.strip():
+        filters.append(
+            or_(
+                func.ltrim(PetrobrasGlosa.guia_prestador, '0')
+                == provider_guide(guia),
+                PetrobrasGlosa.guia_operadora == guia.strip(),
+            )
+        )
+    if lote.strip():
+        filters.append(
+            PetrobrasGlosa.fonte['lote'].as_string() == lote.strip()
+        )
+    if paciente.strip():
+        filters.append(
+            PetrobrasGlosa
+            .oracle['nm_paciente']
+            .as_string()
+            .ilike(f'%{paciente.strip()}%')
+        )
+    if cd_atendimento:
+        filters.append(
+            PetrobrasGlosa.oracle['cd_atendimento'].as_integer()
+            == cd_atendimento
+        )
+    if cd_remessa:
+        filters.append(
+            PetrobrasGlosa.oracle['cd_remessa'].as_integer() == cd_remessa
+        )
+    scoped = select(PetrobrasGlosa).join(PetrobrasProtocolo).where(*filters)
+    base = scoped.subquery()
+    summary = db.execute(
+        select(
+            func.count(func.distinct(base.c.demonstrativo)),
+            func.count(base.c.id),
+            func.coalesce(func.sum(base.c.valor_glosa), 0),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            base.c.recurso_estado != 'rascunho',
+                            base.c.valor_glosa,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        )
+    ).one()
+    page = list(
+        db.scalars(
+            select(PetrobrasGlosa.demonstrativo)
+            .join(PetrobrasProtocolo)
+            .where(*filters)
+            .group_by(PetrobrasGlosa.demonstrativo)
+            .order_by(
+                func.max(
+                    PetrobrasGlosa.fonte['data_emissao'].as_string()
+                ).desc(),
+                PetrobrasGlosa.demonstrativo.desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+    )
+    rows = []
+    if page:
+        rows = db.scalars(
+            scoped
+            .where(PetrobrasGlosa.demonstrativo.in_(page))
+            .order_by(
+                PetrobrasGlosa.demonstrativo,
+                PetrobrasProtocolo.numero,
+                PetrobrasGlosa.guia_prestador,
+                PetrobrasGlosa.id,
+            )
+            .limit(MAX_DEMONSTRATIVO_ITEMS)
+        ).all()
+    return {
+        'total': summary[0],
+        'quantidade_glosas': summary[1],
+        'valor_total_glosado': summary[2],
+        'valor_total_tratado': summary[3],
+        'offset': offset,
+        'limit': limit,
+        'demonstrativos': page,
+        'integracao': {
+            'transmissao_habilitada': config.transmission_enabled,
+            'limite_anexo_bytes': config.max_attachment_bytes,
+        },
+        'items': [public(r) for r in rows],
+    }
+
+
 @router.get('/protocolos')
 def list_protocols(db: DB, config: Config, user: User):
     rows = db.scalars(
@@ -269,8 +390,21 @@ def match_again(item_id: int, db: DB, config: Config, user: Writer):
         raise HTTPException(
             503, 'Oracle indisponível; cruzamento anterior preservado.'
         ) from None
+    apply_match(db, config, row, candidates, user.id)
+    db.commit()
+    return public(row)
+
+
+def apply_match(  # noqa: PLR0913 - explicit audit context
+    db, config, row, candidates, user_id, always_log=True
+):
     result = reconcile(
         row.fonte, candidates, config.convenio_id, config.oracle_guia
+    )
+    changed = (row.cruzamento, row.oracle, row.divergencias) != (
+        result['status'],
+        result['oracle'],
+        result['divergencias'],
     )
     row.cruzamento, row.oracle = result['status'], result['oracle']
     row.divergencias, row.candidatos, row.erro_oracle = (
@@ -278,9 +412,55 @@ def match_again(item_id: int, db: DB, config: Config, user: Writer):
         result['count'],
         None,
     )
-    event(db, row, 'cruzamento_manual', result, user.id)
-    db.commit()
-    return public(row)
+    if changed or always_log:
+        event(db, row, 'cruzamento_manual', result, user_id)
+    return changed
+
+
+RECROSS_BATCH = 500
+
+
+@router.post('/glosas/cruzar')
+def match_all(db: DB, config: Config, user: Writer):
+    """Re-check stored sources against Oracle; never calls the payer."""
+    ids = list(
+        db.scalars(
+            select(PetrobrasGlosa.id)
+            .join(PetrobrasProtocolo)
+            .where(PetrobrasProtocolo.prestador == config.prestador_cnpj)
+            .order_by(PetrobrasGlosa.id)
+        )
+    )
+    changed = 0
+    for start in range(0, len(ids), RECROSS_BATCH):
+        rows = db.scalars(
+            select(PetrobrasGlosa)
+            .where(PetrobrasGlosa.id.in_(ids[start : start + RECROSS_BATCH]))
+            .with_for_update()
+        ).all()
+        try:
+            candidates = petrobras_oracle.candidates(
+                [r.fonte for r in rows], config
+            )
+        except Exception:
+            db.rollback()
+            raise HTTPException(
+                503, 'Oracle indisponível; cruzamento anterior preservado.'
+            ) from None
+        changed += sum(
+            apply_match(db, config, row, candidates, user.id, False)
+            for row in rows
+        )
+        db.commit()
+    totals = dict(
+        db.execute(
+            select(PetrobrasGlosa.cruzamento, func.count())
+            .join(PetrobrasProtocolo)
+            .where(PetrobrasProtocolo.prestador == config.prestador_cnpj)
+            .group_by(PetrobrasGlosa.cruzamento)
+        ).all()
+    )
+    return {'conferidos': len(ids), 'alterados': changed, 'situacao': totals}
 
 
 class DraftInput(BaseModel):

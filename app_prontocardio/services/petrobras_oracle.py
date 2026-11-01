@@ -5,7 +5,10 @@ from contextlib import contextmanager
 from sqlalchemy import text
 
 from app_prontocardio.database import oracle_engine
-from app_prontocardio.services.petrobras_match import numeric_guide
+from app_prontocardio.services.petrobras_match import (
+    GUIDE_FIELD,
+    provider_guide,
+)
 
 
 @contextmanager
@@ -25,25 +28,26 @@ def connection():
 
 
 MAX_CANDIDATES = 20000
+# MV keeps NR_GUIA without the TISS left zero padding (B386348).
+GUIDE_COLUMN = "NVL(LTRIM(TRIM(nr_guia), '0'), '0')"
+
+
+def _date(value):
+    return value.date().isoformat() if value else None
+
+
+def _text(value):
+    return str(value) if value is not None else None
 
 
 def candidates(sources, config):
-    if config.oracle_guia not in {'guia_prestador', 'guia_operadora'}:
+    if config.oracle_guia != GUIDE_FIELD:
         return []
     guias = sorted({
-        s[config.oracle_guia].strip()
+        provider_guide(s.get(GUIDE_FIELD))
         for s in sources
-        if s.get(config.oracle_guia)
+        if provider_guide(s.get(GUIDE_FIELD))
     })
-    if config.oracle_guia == 'guia_prestador':
-        guias = sorted({numeric_guide(g) for g in guias})
-    guide_column = 'TRIM(nr_guia)'
-    if config.oracle_guia == 'guia_prestador':
-        guide_column = (
-            "CASE WHEN REGEXP_LIKE(TRIM(nr_guia), '^[0-9]+$') "
-            "THEN NVL(LTRIM(TRIM(nr_guia), '0'), '0') "
-            'ELSE TRIM(nr_guia) END'
-        )
     result = []
     if not guias:
         return result
@@ -53,17 +57,19 @@ def candidates(sources, config):
             binds = {f'g{i}': v for i, v in enumerate(batch)}
             placeholders = ','.join(':' + k for k in binds)
             binds['convenio'] = config.convenio_id
-            # No patient name is needed. Include full item identity to preserve
-            # repeats.
+            # Full item identity preserves repeats; display fields fill the
+            # standard Follow-Up cards when the composite key is confirmed.
             rows = conn.execute(
                 text(f"""
-                SELECT cd_convenio, cd_reg, cd_lancamento, cd_atendimento,
-                       cd_remessa, tp_atendimento, nr_guia,
-                       cd_tuss, nr_carteira,
-                       dt_lancamento, qt_lancamento, vl_total_conta, descricao
+                SELECT cd_convenio, nm_convenio, cd_reg, cd_lancamento,
+                       cd_atendimento, cd_paciente, nm_paciente, cd_remessa,
+                       tp_atendimento, nr_guia, cd_pro_fat, cd_tuss,
+                       nr_carteira, cd_gru_fat, ds_gru_fat, dt_atendimento,
+                       dt_alta, dt_lancamento, qt_lancamento, vl_total_conta,
+                       descricao
                   FROM dbamv.hpc_v_conta_atendimento
                  WHERE cd_convenio=:convenio
-                   AND {guide_column} IN ({placeholders})
+                   AND {GUIDE_COLUMN} IN ({placeholders})
             """),
                 binds,
             ).mappings()
@@ -77,23 +83,25 @@ def candidates(sources, config):
                     )
                 result.append({
                     'cd_convenio': r['cd_convenio'],
+                    'nm_convenio': r['nm_convenio'],
                     'cd_reg': r['cd_reg'],
                     'cd_lancamento': r['cd_lancamento'],
                     'cd_atendimento': r['cd_atendimento'],
+                    'cd_paciente': r['cd_paciente'],
+                    'nm_paciente': r['nm_paciente'],
                     'cd_remessa': r['cd_remessa'],
                     'tp_atendimento': r['tp_atendimento'],
                     'nr_guia': r['nr_guia'],
+                    'cd_pro_fat': r['cd_pro_fat'],
                     'cd_tuss': r['cd_tuss'],
                     'nr_carteira': r['nr_carteira'],
-                    'data_realizacao': r['dt_lancamento'].date().isoformat()
-                    if r['dt_lancamento']
-                    else None,
-                    'quantidade': str(r['qt_lancamento'])
-                    if r['qt_lancamento'] is not None
-                    else None,
-                    'valor': str(r['vl_total_conta'])
-                    if r['vl_total_conta'] is not None
-                    else None,
+                    'cd_gru_fat': r['cd_gru_fat'],
+                    'ds_gru_fat': r['ds_gru_fat'],
+                    'dt_atendimento': _date(r['dt_atendimento']),
+                    'dt_alta': _date(r['dt_alta']),
+                    'data_realizacao': _date(r['dt_lancamento']),
+                    'quantidade': _text(r['qt_lancamento']),
+                    'valor': _text(r['vl_total_conta']),
                     'descricao': r['descricao'],
                 })
     return result
