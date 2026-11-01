@@ -18,8 +18,9 @@ class PetrobrasConfig(BaseSettings):
     interval_minutes: int = Field(default=360, ge=15, le=10080)
     timeout_seconds: int = Field(default=30, ge=5, le=120)
     max_attachment_bytes: int = Field(default=5242880, ge=1024, le=10485760)
-    # User-confirmed mapping: numeroGuiaPrestador. No operator alias fallback.
     discovery_months: int = Field(default=3, ge=1, le=12)
+    # Deprecated and ignored: the Oracle key is fixed to senha in
+    # petrobras_match. Kept so existing environments still load.
     oracle_guia: str = 'guia_prestador'
 
     @property

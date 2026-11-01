@@ -95,9 +95,7 @@ def import_rows(  # noqa: PLR0913 - explicit source, Oracle and audit context
                 oracle_error  # Preserve last successful match on outage.
             )
         else:
-            match = reconcile(
-                source, oracle_rows, config.convenio_id, config.oracle_guia
-            )
+            match = reconcile(source, oracle_rows, config.convenio_id)
             new = (match['status'], match['oracle'], match['divergencias'])
             if (row.cruzamento, row.oracle, row.divergencias) != new:
                 event(

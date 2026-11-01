@@ -69,7 +69,6 @@ def config():
         login=SecretStr('synthetic'),
         password=SecretStr('synthetic-only'),
         prestador_cnpj='00000000000000',
-        oracle_guia='guia_prestador',
     )
 
 
@@ -112,7 +111,8 @@ def source():
         'lote': '1',
         'escopo': 'item',
         'sequencial': '1',
-        'guia_prestador': '000000000000000P0123',
+        'guia_prestador': '000000000000000X9999',
+        'senha': 'P0123',
         'guia_operadora': '000123',
         'tuss': '00123456',
         'tabela': '22',
@@ -143,63 +143,45 @@ def candidate():
 
 
 def test_exact_match_keeps_zeros(source, candidate):
-    assert (
-        reconcile(source, [candidate], 37, 'guia_prestador')['status']
-        == 'conciliado'
-    )
+    assert reconcile(source, [candidate], 37)['status'] == 'conciliado'
     bad = {**candidate, 'nr_guia': '123'}
+    assert reconcile(source, [bad], 37)['status'] == 'nao_localizado'
     assert (
-        reconcile(source, [bad], 37, 'guia_prestador')['status']
-        == 'nao_localizado'
-    )
-    assert (
-        reconcile(
-            source, [{**candidate, 'cd_convenio': 9}], 37, 'guia_prestador'
-        )['status']
+        reconcile(source, [{**candidate, 'cd_convenio': 9}], 37)['status']
         == 'nao_localizado'
     )
 
 
-def test_no_assumption_about_guide_type(source, candidate):
-    assert (
-        reconcile(source, [candidate], 37, 'pendente')['status']
-        == 'dados_insuficientes'
-    )
-    assert (
-        reconcile(source, [candidate], 37, 'guia_operadora')['status']
-        == 'dados_insuficientes'
-    )
+def test_provider_guide_is_never_used_as_key(source, candidate):
+    candidate['nr_guia'] = 'X9999'
+    assert reconcile(source, [candidate], 37)['oracle'] is None
+    source['senha'] = None
+    source['guia_prestador'] = '000000000000000P0123'
+    candidate['nr_guia'] = 'P0123'
+    result = reconcile(source, [candidate], 37)
+    assert result['status'] == 'dados_insuficientes'
+    assert 'senha' in result['divergencias'][0]
 
 
 def test_repeated_procedure_never_selects_first(source, candidate):
     other = {**candidate, 'cd_lancamento': 2}
-    assert (
-        reconcile(source, [candidate, other], 37, 'guia_prestador')['status']
-        == 'ambiguo'
-    )
+    assert reconcile(source, [candidate, other], 37)['status'] == 'ambiguo'
     other['data_realizacao'] = '2026-10-02'
     assert (
-        reconcile(source, [candidate, other], 37, 'guia_prestador')['oracle'][
-            'cd_lancamento'
-        ]
+        reconcile(source, [candidate, other], 37)['oracle']['cd_lancamento']
         == 1
     )
 
 
 def test_financial_divergence_does_not_destroy_match(source, candidate):
-    r = reconcile(
-        source, [{**candidate, 'valor': '110.00'}], 37, 'guia_prestador'
-    )
+    r = reconcile(source, [{**candidate, 'valor': '110.00'}], 37)
     assert r['status'] == 'conciliado'
     assert r['divergencias']
 
 
 def test_numeric_quantity_disambiguation(source, candidate):
     other = {**candidate, 'cd_lancamento': 2, 'quantidade': '2'}
-    assert (
-        reconcile(source, [candidate, other], 37, 'guia_prestador')['count']
-        == 1
-    )
+    assert reconcile(source, [candidate, other], 37)['count'] == 1
 
 
 def test_idempotence_and_manual_preservation(
@@ -604,7 +586,7 @@ def test_competence_discovery_uses_only_payer(db, config):
 def test_wallet_mismatch_prevents_even_single_match(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = '00000002'
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'ambiguo'
     assert result['oracle'] is None
     assert any('carteira' in d for d in result['divergencias'])
@@ -613,9 +595,7 @@ def test_wallet_mismatch_prevents_even_single_match(source, candidate):
 def test_wallet_preserves_leading_zeros(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = '1'
-    assert (
-        reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
-    )
+    assert reconcile(source, [candidate], 37)['oracle'] is None
 
 
 def test_wallet_disambiguates_beneficiaries(source, candidate):
@@ -623,9 +603,7 @@ def test_wallet_disambiguates_beneficiaries(source, candidate):
     candidate['nr_carteira'] = '00000001'
     other = {**candidate, 'cd_lancamento': 2, 'nr_carteira': '00000002'}
     assert (
-        reconcile(source, [candidate, other], 37, 'guia_prestador')['oracle'][
-            'cd_lancamento'
-        ]
+        reconcile(source, [candidate, other], 37)['oracle']['cd_lancamento']
         == 1
     )
 
@@ -633,7 +611,7 @@ def test_wallet_disambiguates_beneficiaries(source, candidate):
 def test_missing_oracle_wallet_prevents_match(source, candidate):
     source['carteira'] = '00000001'
     candidate['nr_carteira'] = None
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'ambiguo'
     assert result['oracle'] is None
     assert any('carteira' in d for d in result['divergencias'])
@@ -788,22 +766,17 @@ def test_partial_header_total_is_not_fabricated_as_item(config):
 
 
 def test_provider_guide_normalization_requires_exact_wallet(source, candidate):
-    source['guia_prestador'] = '000123'
+    source['senha'] = '000123'
     candidate['nr_guia'] = '123'
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'conciliado'
     assert 'zeros' in result['divergencias'][0]
     for wallet in ['', '1', 'different']:
         source['carteira'] = wallet
-        assert (
-            reconcile(source, [candidate], 37, 'guia_prestador')['oracle']
-            is None
-        )
+        assert reconcile(source, [candidate], 37)['oracle'] is None
     source['carteira'] = '00000001'
     candidate['cd_pro_fat'] = '123456'
-    assert (
-        reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
-    )
+    assert reconcile(source, [candidate], 37)['oracle'] is None
 
 
 @pytest.mark.parametrize('table', ['00', '98', None])
@@ -811,8 +784,8 @@ def test_table_does_not_block_confirmed_composite_key(
     source, candidate, table
 ):
     source['tabela'] = table
-    source['guia_prestador'] = candidate['nr_guia']
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    source['senha'] = candidate['nr_guia']
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'conciliado'
     assert result['oracle'] == candidate
 
@@ -955,11 +928,11 @@ def test_analysis_identity_cannot_rely_only_on_echoed_header(
     assert tiss.validate_response_schema(root, config) == []
 
 
-@pytest.mark.parametrize('field', ['carteira', 'guia_prestador', 'tuss'])
+@pytest.mark.parametrize('field', ['carteira', 'senha', 'tuss'])
 def test_every_source_key_component_is_required(source, candidate, field):
-    source['guia_prestador'] = candidate['nr_guia']
+    source['senha'] = candidate['nr_guia']
     source[field] = None
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'dados_insuficientes'
     assert result['oracle'] is None
 
@@ -968,19 +941,17 @@ def test_every_source_key_component_is_required(source, candidate, field):
 def test_each_component_must_belong_to_the_same_oracle_item(
     source, candidate, field
 ):
-    source['guia_prestador'] = candidate['nr_guia']
+    source['senha'] = candidate['nr_guia']
     other = {**candidate, field: 'different', 'cd_lancamento': 2}
-    assert reconcile(source, [other], 37, 'guia_prestador')['oracle'] is None
-    result = reconcile(source, [other, candidate], 37, 'guia_prestador')
+    assert reconcile(source, [other], 37)['oracle'] is None
+    result = reconcile(source, [other, candidate], 37)
     assert result['oracle'] == candidate
 
 
-def test_provider_guide_without_left_padding_matches_mv_guide(
-    source, candidate
-):
-    source['guia_prestador'] = '0000000000000B386348'
+def test_senha_without_left_padding_matches_mv_guide(source, candidate):
+    source['senha'] = '0000B386348'
     candidate['nr_guia'] = 'B386348'
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'conciliado'
     assert result['oracle'] == candidate
     assert any('zeros' in d for d in result['divergencias'])
@@ -989,16 +960,14 @@ def test_provider_guide_without_left_padding_matches_mv_guide(
 def test_procedure_matches_cd_pro_fat_not_cd_tuss(source, candidate):
     candidate['cd_tuss'] = source['tuss']
     candidate['cd_pro_fat'] = '99999999'
-    result = reconcile(source, [candidate], 37, 'guia_prestador')
+    result = reconcile(source, [candidate], 37)
     assert result['status'] == 'nao_localizado'
     assert result['oracle'] is None
 
 
 def test_operator_guide_is_never_used_as_key(source, candidate):
     candidate['nr_guia'] = source['guia_operadora']
-    assert (
-        reconcile(source, [candidate], 37, 'guia_prestador')['oracle'] is None
-    )
+    assert reconcile(source, [candidate], 37)['oracle'] is None
 
 
 def test_parser_keeps_senha_and_processed_value():

@@ -1,13 +1,13 @@
 """Conservative, exact identifiers. No fuzzy names or first-row fallback.
 
-Confirmed key: numeroCarteira = NR_CARTEIRA, numeroGuiaPrestador = NR_GUIA
-(MV stores the guide without the TISS left zero padding, e.g.
-0000000000000B386348 = B386348) and codigoProcedimento = CD_PRO_FAT.
+Confirmed key: numeroCarteira = NR_CARTEIRA, senha = NR_GUIA (compared
+without TISS left zero padding) and codigoProcedimento = CD_PRO_FAT.
+numeroGuiaPrestador and numeroGuiaOperadora are never part of the key.
 """
 
 from decimal import Decimal
 
-GUIDE_FIELD = 'guia_prestador'
+GUIDE_FIELD = 'senha'
 
 
 def norm(value):
@@ -51,12 +51,7 @@ def _refine(rows, source):
     return rows
 
 
-def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0911 - explicit conservative matching decisions
-    if guia_field != GUIDE_FIELD:
-        return _result(
-            'dados_insuficientes',
-            divergencias=['Mapeamento da guia Oracle pendente.'],
-        )
+def reconcile(source, candidates, convenio_id):  # noqa: PLR0911 - explicit conservative matching decisions
     guia = provider_guide(source.get(GUIDE_FIELD))
     procedure = norm(source.get('tuss'))
     wallet = norm(source.get('carteira'))
@@ -68,9 +63,7 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0911 - e
     ):
         return _result(
             'dados_insuficientes',
-            divergencias=[
-                'Vínculo exige carteira, guia do prestador e procedimento.'
-            ],
+            divergencias=['Vínculo exige carteira, senha e procedimento.'],
         )
     same_guide = [
         r
@@ -85,7 +78,7 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0911 - e
             'ambiguo',
             count=len(same_guide),
             divergencias=[
-                'Guia e procedimento encontrados, mas a carteira está '
+                'Senha e procedimento encontrados, mas a carteira está '
                 'ausente ou é divergente. Vínculo não confirmado.'
             ],
         )
@@ -105,7 +98,7 @@ def reconcile(source, candidates, convenio_id, guia_field):  # noqa: PLR0911 - e
     row = rows[0]
     diffs = []
     if norm(source.get(GUIDE_FIELD)) != norm(row.get('nr_guia')):
-        diffs.append('Guia do prestador conferida sem zeros à esquerda.')
+        diffs.append('Senha conferida sem zeros à esquerda.')
     for sf, of in [('valor_informado', 'valor'), ('quantidade', 'quantidade')]:
         if (
             source.get(sf) is not None

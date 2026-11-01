@@ -28,7 +28,7 @@ def connection():
 
 
 MAX_CANDIDATES = 20000
-# MV keeps NR_GUIA without the TISS left zero padding (B386348).
+# NR_GUIA holds the payer senha (B386348) without left zero padding.
 GUIDE_COLUMN = "NVL(LTRIM(TRIM(nr_guia), '0'), '0')"
 
 
@@ -41,8 +41,6 @@ def _text(value):
 
 
 def candidates(sources, config):
-    if config.oracle_guia != GUIDE_FIELD:
-        return []
     guias = sorted({
         provider_guide(s.get(GUIDE_FIELD))
         for s in sources
