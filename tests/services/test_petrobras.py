@@ -1068,6 +1068,11 @@ def test_demonstrativos_page_groups_all_items_and_totals(
         ).json()
         assert empty['total'] == 0
         assert empty['items'] == []
+        totals = client.get(
+            '/app_glosas/petrobras/demonstrativos', params={'limit': 0}
+        ).json()
+        assert totals['total'] == 2
+        assert totals['items'] == []
 
 
 def test_match_all_rechecks_stored_sources_without_payer(  # noqa: PLR0913 - pytest fixtures

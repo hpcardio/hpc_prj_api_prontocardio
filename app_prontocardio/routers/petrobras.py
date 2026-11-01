@@ -192,9 +192,12 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
     cd_atendimento: int | None = Query(None, ge=1),
     cd_remessa: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=50),
+    limit: int = Query(10, ge=0, le=50),
 ):
-    """Follow-Up cards: one page of demonstrativos with all their items."""
+    """Follow-Up cards: one page of demonstrativos with all their items.
+
+    ``limit=0`` returns only the totals used to paginate the merged list.
+    """
     filters = [PetrobrasProtocolo.prestador == config.prestador_cnpj]
     if protocolo.strip():
         filters.append(PetrobrasProtocolo.numero == protocolo.strip())
