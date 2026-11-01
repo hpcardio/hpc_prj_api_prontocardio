@@ -199,7 +199,11 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
 
     ``limit=0`` returns only the totals used to paginate the merged list.
     """
-    filters = [PetrobrasProtocolo.prestador == config.prestador_cnpj]
+    filters = [
+        PetrobrasProtocolo.prestador == config.prestador_cnpj,
+        # Items replaced by a reissued demonstrativo stay only in history.
+        PetrobrasGlosa.presente_na_fonte.is_(True),
+    ]
     if protocolo.strip():
         filters.append(PetrobrasProtocolo.numero == protocolo.strip())
     if guia.strip():

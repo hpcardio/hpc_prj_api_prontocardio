@@ -1103,3 +1103,70 @@ def test_match_all_requires_writer(db, protocol, config):
             client.post('/app_glosas/petrobras/glosas/cruzar').status_code
             == 403
         )
+
+
+def reissued(source, demonstrativo, emissao):
+    return {
+        **source,
+        'chave': f'key-{demonstrativo}',
+        'demonstrativo': demonstrativo,
+        'data_emissao': emissao,
+    }
+
+
+def test_reissued_demonstrativo_supersedes_untouched_item(
+    db, protocol, config, source, candidate
+):
+    import_rows(
+        db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
+    )
+    import_rows(
+        db,
+        protocol,
+        [reissued(source, 'D2', '2026-10-01')],
+        set(),
+        [candidate],
+        config,
+    )
+    db.commit()
+    rows = {r.demonstrativo: r for r in db.scalars(select(PetrobrasGlosa))}
+    assert rows['D1'].presente_na_fonte is False
+    assert rows['D2'].presente_na_fonte is True
+    kinds = [
+        e.tipo
+        for e in db.scalars(
+            select(PetrobrasEvento).where(
+                PetrobrasEvento.glosa_id == rows['D1'].id
+            )
+        )
+    ]
+    assert 'substituido' in kinds
+    with petrobras_client(db, config) as client:
+        data = client.get('/app_glosas/petrobras/demonstrativos').json()
+    assert data['demonstrativos'] == ['D2']
+    assert data['quantidade_glosas'] == 1
+
+
+def test_item_with_user_work_is_never_superseded(db, protocol, config, source):
+    import_rows(
+        db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
+    )
+    old = db.scalar(select(PetrobrasGlosa))
+    old.justificativa = 'Recurso em elaboração'
+    import_rows(
+        db, protocol, [reissued(source, 'D2', '2026-10-01')], set(), [], config
+    )
+    db.commit()
+    assert all(r.presente_na_fonte for r in db.scalars(select(PetrobrasGlosa)))
+
+
+def test_older_reissue_does_not_hide_newer_item(db, protocol, config, source):
+    import_rows(
+        db, protocol, [reissued(source, 'D2', '2026-10-01')], set(), [], config
+    )
+    import_rows(
+        db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
+    )
+    db.commit()
+    rows = {r.demonstrativo: r for r in db.scalars(select(PetrobrasGlosa))}
+    assert rows['D2'].presente_na_fonte is True
