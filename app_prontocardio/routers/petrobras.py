@@ -29,6 +29,7 @@ from app_prontocardio.services.petrobras_appeals import (
 )
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import (
+    GUIDE_FIELD,
     provider_guide,
     reconcile,
 )
@@ -122,7 +123,7 @@ def status(config: Config, user: User):
     return {
         'habilitado': config.enabled,
         'transmissao_habilitada': config.transmission_enabled,
-        'mapeamento_guia': config.oracle_guia,
+        'mapeamento_guia': GUIDE_FIELD,
         'convenio_id': config.convenio_id,
         'registro_ans': config.registro_ans,
         'intervalo_minutos': config.interval_minutes,
@@ -206,6 +207,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             or_(
                 func.ltrim(PetrobrasGlosa.guia_prestador, '0')
                 == provider_guide(guia),
+                PetrobrasGlosa.fonte['senha'].as_string() == guia.strip(),
                 PetrobrasGlosa.guia_operadora == guia.strip(),
             )
         )
@@ -398,9 +400,7 @@ def match_again(item_id: int, db: DB, config: Config, user: Writer):
 def apply_match(  # noqa: PLR0913 - explicit audit context
     db, config, row, candidates, user_id, always_log=True
 ):
-    result = reconcile(
-        row.fonte, candidates, config.convenio_id, config.oracle_guia
-    )
+    result = reconcile(row.fonte, candidates, config.convenio_id)
     changed = (row.cruzamento, row.oracle, row.divergencias) != (
         result['status'],
         result['oracle'],
