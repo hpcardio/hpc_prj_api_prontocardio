@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app_prontocardio.petrobras_models import (
+    PetrobrasAnexo,
     PetrobrasEvento,
     PetrobrasExecucao,
     PetrobrasGlosa,
@@ -47,6 +48,7 @@ def import_rows(  # noqa: PLR0913 - explicit source, Oracle and audit context
         )
     }
     seen = set()
+    current = []
     count = 0
     for source in rows:
         if source['protocolo'] != protocol.numero:
@@ -111,7 +113,9 @@ def import_rows(  # noqa: PLR0913 - explicit source, Oracle and audit context
                 )
             row.cruzamento, row.oracle, row.divergencias = new
             row.candidatos, row.erro_oracle = match['count'], None
+        current.append(row)
         count += 1
+    supersede_older(session, protocol, current, user_id)
     # Only authoritative returned demonstrativos; absence from a
     # partial/asynchronous response is not removal.
     for key, row in existing.items():
@@ -129,6 +133,58 @@ def import_rows(  # noqa: PLR0913 - explicit source, Oracle and audit context
                 user_id,
             )
     return count
+
+
+def _identity(row):
+    fonte = row.fonte or {}
+    return (row.guia_prestador, fonte.get('escopo'), fonte.get('sequencial'))
+
+
+def supersede_older(session, protocol, current, user_id=None):
+    """A reissued demonstrativo replaces the same item of the protocol.
+
+    Only untouched drafts are hidden; anything with user work stays visible.
+    The row and its history are kept (presente_na_fonte=False + event).
+    """
+    current_ids = {row.id for row in current}
+    latest = {_identity(row): row for row in current}
+    with_attachments = set(
+        session.scalars(
+            select(PetrobrasAnexo.glosa_id)
+            .join(PetrobrasGlosa)
+            .where(PetrobrasGlosa.protocolo_id == protocol.id)
+        )
+    )
+    for old in session.scalars(
+        select(PetrobrasGlosa).where(
+            PetrobrasGlosa.protocolo_id == protocol.id,
+            PetrobrasGlosa.presente_na_fonte.is_(True),
+        )
+    ):
+        new = latest.get(_identity(old))
+        if (
+            new is None
+            or old.id in current_ids
+            or old.demonstrativo == new.demonstrativo
+            or (old.fonte.get('data_emissao') or '')
+            > (new.fonte.get('data_emissao') or '')
+        ):
+            continue
+        if (
+            old.recurso_estado != 'rascunho'
+            or (old.justificativa or '').strip()
+            or old.prazo is not None
+            or old.id in with_attachments
+        ):
+            continue
+        old.presente_na_fonte = False
+        event(
+            session,
+            old,
+            'substituido',
+            {'demonstrativo': new.demonstrativo, 'glosa_id': new.id},
+            user_id,
+        )
 
 
 def synchronize(  # noqa: PLR0913 - explicit source and audit context
