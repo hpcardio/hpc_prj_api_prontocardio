@@ -1235,3 +1235,55 @@ def test_match_all_uses_same_guide_senha(  # noqa: PLR0913 - pytest fixtures
     with petrobras_client(db, config) as client:
         data = client.post('/app_glosas/petrobras/glosas/cruzar').json()
     assert data['situacao'] == {'conciliado': 2}
+
+
+def test_internal_acato_counts_as_treated_and_can_be_removed(
+    db, protocol, config, source
+):
+    import_rows(db, protocol, [source], set(), [], config)
+    db.commit()
+    row = db.scalar(select(PetrobrasGlosa))
+    url = f'/app_glosas/petrobras/glosas/{row.id}/acato'
+    body = {'data': '2026-11-02', 'quantidade': '1', 'valor': '5.00'}
+    with petrobras_client(db, config) as client:
+        too_much = client.put(url, json={**body, 'valor': '999.00'})
+        saved = client.put(url, json={**body, 'descricao': 'Glosa aceita'})
+        listed = client.get('/app_glosas/petrobras/demonstrativos').json()
+        removed = client.delete(url)
+        again = client.delete(url)
+        after = client.get('/app_glosas/petrobras/demonstrativos').json()
+    assert too_much.status_code == 422
+    assert saved.status_code == 200
+    assert saved.json()['acato']['descricao'] == 'Glosa aceita'
+    assert listed['items'][0]['acato']['valor'] == '5.00'
+    assert Decimal(str(listed['valor_total_tratado'])) == Decimal('5.00')
+    assert Decimal(str(listed['valor_total_acatado'])) == Decimal('5.00')
+    assert Decimal(str(listed['valor_total_recursado'])) == 0
+    assert removed.status_code == 200
+    assert again.status_code == 404
+    assert after['items'][0]['acato'] is None
+    assert Decimal(str(after['valor_total_tratado'])) == 0
+    assert row.recurso_estado == 'rascunho'
+
+
+def test_acato_requires_writer_and_keeps_reissued_item(
+    db, protocol, config, source
+):
+    import_rows(
+        db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
+    )
+    db.commit()
+    first = db.scalar(select(PetrobrasGlosa))
+    url = f'/app_glosas/petrobras/glosas/{first.id}/acato'
+    body = {'data': '2026-11-02', 'quantidade': '1', 'valor': '1.00'}
+    with petrobras_client(db, config, perfil='leitura') as client:
+        assert client.put(url, json=body).status_code == 403
+    with petrobras_client(db, config) as client:
+        assert client.put(url, json=body).status_code == 200
+    import_rows(
+        db, protocol, [reissued(source, 'D2', '2026-10-01')], set(), [], config
+    )
+    db.commit()
+    with petrobras_client(db, config) as client:
+        data = client.get('/app_glosas/petrobras/demonstrativos').json()
+    assert data['quantidade_glosas'] == 2

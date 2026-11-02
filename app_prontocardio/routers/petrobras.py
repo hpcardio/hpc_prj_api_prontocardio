@@ -4,12 +4,13 @@ import base64
 import binascii
 import hashlib
 from datetime import date
+from decimal import Decimal
 from pathlib import PurePath
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app_prontocardio.database import get_session_postgres
@@ -183,6 +184,53 @@ def list_items(  # noqa: PLR0913 - independent HTTP query parameters
 MAX_DEMONSTRATIVO_ITEMS = 2000
 
 
+ACATO_EVENTS = ('acato', 'acato_removido')
+
+
+def acato_ativo():
+    """Item whose latest acceptance event is an internal acato."""
+    newer = aliased(PetrobrasEvento)
+    return exists().where(
+        PetrobrasEvento.glosa_id == PetrobrasGlosa.id,
+        PetrobrasEvento.tipo == 'acato',
+        ~exists().where(
+            newer.glosa_id == PetrobrasEvento.glosa_id,
+            newer.tipo.in_(ACATO_EVENTS),
+            newer.id > PetrobrasEvento.id,
+        ),
+    )
+
+
+def acatos(db, ids):
+    """Internal acato (never sent to the payer): latest event per item."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    last = (
+        select(func.max(PetrobrasEvento.id))
+        .where(
+            PetrobrasEvento.glosa_id.in_(ids),
+            PetrobrasEvento.tipo.in_(ACATO_EVENTS),
+        )
+        .group_by(PetrobrasEvento.glosa_id)
+    )
+    return {
+        e.glosa_id: e.dados
+        for e in db.scalars(
+            select(PetrobrasEvento).where(PetrobrasEvento.id.in_(last))
+        )
+        if e.tipo == 'acato'
+    }
+
+
+def treated(valor_glosa, recurso_estado, acato):
+    """Sent appeal treats the whole glosa; otherwise the acato value."""
+    glosa = Decimal(str(valor_glosa or 0))
+    if recurso_estado != 'rascunho':
+        return glosa
+    return min(glosa, Decimal(str((acato or {}).get('valor') or 0)))
+
+
 def superseded_by_reissue():
     """Untouched item also returned by a more recent demonstrativo.
 
@@ -212,6 +260,7 @@ def superseded_by_reissue():
         ),
     )
     untouched = and_(
+        ~acato_ativo(),
         PetrobrasGlosa.recurso_estado == 'rascunho',
         func.coalesce(PetrobrasGlosa.justificativa, '') == '',
         PetrobrasGlosa.prazo.is_(None),
@@ -289,20 +338,19 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             func.count(func.distinct(base.c.demonstrativo)),
             func.count(base.c.id),
             func.coalesce(func.sum(base.c.valor_glosa), 0),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            base.c.recurso_estado != 'rascunho',
-                            base.c.valor_glosa,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ),
         )
     ).one()
+    states = db.execute(
+        select(base.c.id, base.c.valor_glosa, base.c.recurso_estado)
+    ).all()
+    accepted = acatos(db, (r.id for r in states))
+    appealed = sum(
+        (Decimal(str(v or 0)) for _, v, e in states if e != 'rascunho'),
+        Decimal(0),
+    )
+    total_treated = sum(
+        (treated(v, e, accepted.get(i)) for i, v, e in states), Decimal(0)
+    )
     page = list(
         db.scalars(
             select(PetrobrasGlosa.demonstrativo)
@@ -337,7 +385,9 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
         'total': summary[0],
         'quantidade_glosas': summary[1],
         'valor_total_glosado': summary[2],
-        'valor_total_tratado': summary[3],
+        'valor_total_tratado': total_treated,
+        'valor_total_recursado': appealed,
+        'valor_total_acatado': total_treated - appealed,
         'offset': offset,
         'limit': limit,
         'demonstrativos': page,
@@ -345,14 +395,20 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             'transmissao_habilitada': config.transmission_enabled,
             'limite_anexo_bytes': config.max_attachment_bytes,
         },
-        'items': [with_guide_senha(r, senhas) for r in rows],
+        'items': [with_guide_senha(r, senhas, accepted) for r in rows],
     }
 
 
-def with_guide_senha(row, senhas):
+def with_guide_senha(row, senhas, accepted=None):
     """Public row plus the senha of its guide, when the guide has only one."""
     source = matching_source(row.fonte or {}, senhas)
-    return {**public(row), 'senha_guia': source.get('senha')}
+    acato = (accepted or {}).get(row.id)
+    return {
+        **public(row),
+        'senha_guia': source.get('senha'),
+        'acato': acato,
+        'valor_tratado': treated(row.valor_glosa, row.recurso_estado, acato),
+    }
 
 
 @router.get('/protocolos')
@@ -581,6 +637,45 @@ def history(item_id: int, db: DB, config: Config, user: User):
             .limit(100)
         )
     ]
+
+
+class AcatoInput(BaseModel):
+    data: date
+    quantidade: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    valor: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    lote: str | None = Field(None, max_length=255)
+    processo: str | None = Field(None, max_length=255)
+    descricao: str = Field('', max_length=2000)
+
+
+@router.put('/glosas/{item_id}/acato')
+def save_acato(
+    item_id: int, body: AcatoInput, db: DB, config: Config, user: Writer
+):
+    """Internal control only, as for payers without integration."""
+    row = item(db, config, item_id, lock=True)
+    if row.recurso_estado != 'rascunho':
+        raise HTTPException(409, 'Recurso já transmitido; acato bloqueado.')
+    if body.valor > Decimal(str(row.valor_glosa or 0)):
+        raise HTTPException(422, 'Valor acatado maior que o valor glosado.')
+    quantity = (row.fonte or {}).get('quantidade')
+    if quantity and body.quantidade > Decimal(str(quantity)):
+        raise HTTPException(422, 'Quantidade acatada maior que a do item.')
+    data = body.model_dump(mode='json')
+    event(db, row, 'acato', data, user.id)
+    db.commit()
+    return with_guide_senha(row, {}, {row.id: data})
+
+
+@router.delete('/glosas/{item_id}/acato')
+def remove_acato(item_id: int, db: DB, config: Config, user: Writer):
+    row = item(db, config, item_id, lock=True)
+    current = acatos(db, [row.id]).get(row.id)
+    if current is None:
+        raise HTTPException(404, 'Acato não registrado para o item.')
+    event(db, row, 'acato_removido', {'antes': current}, user.id)
+    db.commit()
+    return with_guide_senha(row, {})
 
 
 class AttachmentInput(BaseModel):
