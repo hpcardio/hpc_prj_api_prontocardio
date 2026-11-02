@@ -246,12 +246,20 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
     if protocolo.strip():
         filters.append(PetrobrasProtocolo.numero == protocolo.strip())
     if guia.strip():
+        # Senha belongs to the guide: a reissue without it is still found by
+        # the senha sent in another demonstrativo of the same guide.
+        same_guide = aliased(PetrobrasGlosa)
         filters.append(
             or_(
                 func.ltrim(PetrobrasGlosa.guia_prestador, '0')
                 == provider_guide(guia),
                 PetrobrasGlosa.fonte['senha'].as_string() == guia.strip(),
                 PetrobrasGlosa.guia_operadora == guia.strip(),
+                exists().where(
+                    same_guide.protocolo_id == PetrobrasGlosa.protocolo_id,
+                    same_guide.guia_prestador == PetrobrasGlosa.guia_prestador,
+                    same_guide.fonte['senha'].as_string() == guia.strip(),
+                ),
             )
         )
     if lote.strip():
@@ -311,7 +319,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             .limit(limit)
         )
     )
-    rows = []
+    rows, senhas = [], {}
     if page:
         rows = db.scalars(
             scoped
@@ -324,6 +332,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             )
             .limit(MAX_DEMONSTRATIVO_ITEMS)
         ).all()
+        senhas = guide_senhas(db, {r.protocolo_id for r in rows})
     return {
         'total': summary[0],
         'quantidade_glosas': summary[1],
@@ -336,8 +345,14 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             'transmissao_habilitada': config.transmission_enabled,
             'limite_anexo_bytes': config.max_attachment_bytes,
         },
-        'items': [public(r) for r in rows],
+        'items': [with_guide_senha(r, senhas) for r in rows],
     }
+
+
+def with_guide_senha(row, senhas):
+    """Public row plus the senha of its guide, when the guide has only one."""
+    source = matching_source(row.fonte or {}, senhas)
+    return {**public(row), 'senha_guia': source.get('senha')}
 
 
 @router.get('/protocolos')

@@ -1174,6 +1174,33 @@ def test_missing_senha_uses_same_guide_senha(
     assert any('mesma guia' in d for d in row.divergencias)
 
 
+def test_guide_filter_finds_reissue_by_same_guide_senha(
+    db, protocol, config, source, candidate
+):
+    import_rows(
+        db,
+        protocol,
+        [reissued(source, 'D1', '2026-09-01')],
+        set(),
+        [candidate],
+        config,
+    )
+    newer = {**reissued(source, 'D2', '2026-10-01'), 'senha': None}
+    import_rows(db, protocol, [newer], set(), [candidate], config)
+    db.commit()
+    with petrobras_client(db, config) as client:
+        data = client.get(
+            '/app_glosas/petrobras/demonstrativos', params={'guia': 'P0123'}
+        ).json()
+        other = client.get(
+            '/app_glosas/petrobras/demonstrativos', params={'guia': 'NADA'}
+        ).json()
+    assert data['demonstrativos'] == ['D2']
+    assert data['items'][0]['fonte'].get('senha') is None
+    assert data['items'][0]['senha_guia'] == 'P0123'
+    assert other['total'] == 0
+
+
 def test_guide_with_conflicting_senhas_is_not_inherited(
     db, protocol, config, source, candidate
 ):
