@@ -1009,6 +1009,7 @@ def test_demonstrativos_page_groups_all_items_and_totals(
         **source,
         'chave': 'other-key',
         'demonstrativo': 'D2',
+        'sequencial': '2',
         'data_emissao': '2026-10-05',
         'valor_glosa': '5.00',
     }
@@ -1114,59 +1115,96 @@ def reissued(source, demonstrativo, emissao):
     }
 
 
-def test_reissued_demonstrativo_supersedes_untouched_item(
-    db, protocol, config, source, candidate
+@pytest.mark.parametrize('order', [('D1', 'D2'), ('D2', 'D1')])
+def test_latest_demonstrativo_is_listed_once(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, order
 ):
-    import_rows(
-        db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
-    )
-    import_rows(
-        db,
-        protocol,
-        [reissued(source, 'D2', '2026-10-01')],
-        set(),
-        [candidate],
-        config,
-    )
-    db.commit()
-    rows = {r.demonstrativo: r for r in db.scalars(select(PetrobrasGlosa))}
-    assert rows['D1'].presente_na_fonte is False
-    assert rows['D2'].presente_na_fonte is True
-    kinds = [
-        e.tipo
-        for e in db.scalars(
-            select(PetrobrasEvento).where(
-                PetrobrasEvento.glosa_id == rows['D1'].id
-            )
+    emitted = {'D1': '2026-09-01', 'D2': '2026-10-01'}
+    for demo in order:
+        import_rows(
+            db,
+            protocol,
+            [reissued(source, demo, emitted[demo])],
+            set(),
+            [candidate],
+            config,
         )
-    ]
-    assert 'substituido' in kinds
+    db.commit()
+    assert all(r.presente_na_fonte for r in db.scalars(select(PetrobrasGlosa)))
     with petrobras_client(db, config) as client:
         data = client.get('/app_glosas/petrobras/demonstrativos').json()
     assert data['demonstrativos'] == ['D2']
     assert data['quantidade_glosas'] == 1
+    assert Decimal(str(data['valor_total_glosado'])) == Decimal('20.00')
 
 
-def test_item_with_user_work_is_never_superseded(db, protocol, config, source):
+def test_item_with_user_work_remains_listed(db, protocol, config, source):
     import_rows(
         db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
     )
-    old = db.scalar(select(PetrobrasGlosa))
-    old.justificativa = 'Recurso em elaboração'
+    db.scalar(select(PetrobrasGlosa)).justificativa = 'Recurso em elaboração'
     import_rows(
         db, protocol, [reissued(source, 'D2', '2026-10-01')], set(), [], config
     )
     db.commit()
-    assert all(r.presente_na_fonte for r in db.scalars(select(PetrobrasGlosa)))
+    with petrobras_client(db, config) as client:
+        data = client.get('/app_glosas/petrobras/demonstrativos').json()
+    assert data['quantidade_glosas'] == 2
 
 
-def test_older_reissue_does_not_hide_newer_item(db, protocol, config, source):
+def test_missing_senha_uses_same_guide_senha(
+    db, protocol, config, source, candidate
+):
     import_rows(
-        db, protocol, [reissued(source, 'D2', '2026-10-01')], set(), [], config
+        db,
+        protocol,
+        [reissued(source, 'D1', '2026-09-01')],
+        set(),
+        [candidate],
+        config,
     )
+    newer = {**reissued(source, 'D2', '2026-10-01'), 'senha': None}
+    import_rows(db, protocol, [newer], set(), [candidate], config)
+    db.commit()
+    row = db.scalar(
+        select(PetrobrasGlosa).where(PetrobrasGlosa.demonstrativo == 'D2')
+    )
+    assert row.cruzamento == 'conciliado'
+    assert row.fonte.get('senha') is None
+    assert any('mesma guia' in d for d in row.divergencias)
+
+
+def test_guide_with_conflicting_senhas_is_not_inherited(
+    db, protocol, config, source, candidate
+):
+    first = reissued(source, 'D1', '2026-09-01')
+    second = {
+        **reissued(source, 'D2', '2026-09-15'),
+        'sequencial': '2',
+        'senha': 'OUTRA',
+    }
+    import_rows(db, protocol, [first, second], set(), [candidate], config)
+    newer = {**reissued(source, 'D3', '2026-10-01'), 'senha': None}
+    import_rows(db, protocol, [newer], set(), [candidate], config)
+    db.commit()
+    row = db.scalar(
+        select(PetrobrasGlosa).where(PetrobrasGlosa.demonstrativo == 'D3')
+    )
+    assert row.cruzamento == 'dados_insuficientes'
+
+
+def test_match_all_uses_same_guide_senha(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
     import_rows(
         db, protocol, [reissued(source, 'D1', '2026-09-01')], set(), [], config
     )
+    newer = {**reissued(source, 'D2', '2026-10-01'), 'senha': None}
+    import_rows(db, protocol, [newer], set(), [], config)
     db.commit()
-    rows = {r.demonstrativo: r for r in db.scalars(select(PetrobrasGlosa))}
-    assert rows['D2'].presente_na_fonte is True
+    monkeypatch.setattr(
+        petrobras.petrobras_oracle, 'candidates', lambda s, c: [candidate]
+    )
+    with petrobras_client(db, config) as client:
+        data = client.post('/app_glosas/petrobras/glosas/cruzar').json()
+    assert data['situacao'] == {'conciliado': 2}

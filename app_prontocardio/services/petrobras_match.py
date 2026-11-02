@@ -97,6 +97,10 @@ def reconcile(source, candidates, convenio_id):  # noqa: PLR0911 - explicit cons
         )
     row = rows[0]
     diffs = []
+    if source.get('senha_da_guia'):
+        diffs.append(
+            'Senha obtida da mesma guia em outro demonstrativo do protocolo.'
+        )
     if norm(source.get(GUIDE_FIELD)) != norm(row.get('nr_guia')):
         diffs.append('Senha conferida sem zeros à esquerda.')
     for sf, of in [('valor_informado', 'valor'), ('quantidade', 'quantidade')]:
