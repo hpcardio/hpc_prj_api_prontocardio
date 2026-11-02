@@ -18,11 +18,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from lxml import etree as ET
 from pydantic import SecretStr
-from sqlalchemy import create_engine, inspect, select
+from sqlalchemy import create_engine, insert, inspect, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app_prontocardio.models import table_registry
+from app_prontocardio.models import Tiss, table_registry
 from app_prontocardio.petrobras_models import (
     PetrobrasEvento,
     PetrobrasExecucao,
@@ -84,7 +84,7 @@ def db():
     tables = [
         t
         for t in table_registry.metadata.sorted_tables
-        if t.name.startswith('petrobras_')
+        if t.name.startswith('petrobras_') or t.name == 'tiss'
     ]
     table_registry.metadata.create_all(engine, tables=tables)
     with Session(engine) as session:
@@ -1287,3 +1287,25 @@ def test_acato_requires_writer_and_keeps_reissued_item(
     with petrobras_client(db, config) as client:
         data = client.get('/app_glosas/petrobras/demonstrativos').json()
     assert data['quantidade_glosas'] == 2
+
+
+def test_list_brings_glosa_reason_description(db, protocol, config, source):
+    db.execute(
+        insert(Tiss).values(
+            codigo_termo='1701',
+            termo='COBRANÇA FORA DO PRAZO DE VALIDADE',
+            fonte='TUSS 38',
+            pagina_pdf=1,
+        )
+    )
+    import_rows(db, protocol, [source], set(), [], config)
+    db.commit()
+    with petrobras_client(db, config) as client:
+        data = client.get('/app_glosas/petrobras/demonstrativos').json()
+    assert data['items'][0]['motivos'] == [
+        {
+            'codigo': '1701',
+            'valor': '20.00',
+            'descricao': 'COBRANÇA FORA DO PRAZO DE VALIDADE',
+        }
+    ]

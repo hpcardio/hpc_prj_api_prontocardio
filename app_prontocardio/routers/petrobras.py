@@ -14,7 +14,7 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app_prontocardio.database import get_session_postgres
-from app_prontocardio.models import Usuario
+from app_prontocardio.models import Tiss, Usuario
 from app_prontocardio.petrobras_models import (
     PetrobrasAnexo,
     PetrobrasEvento,
@@ -367,7 +367,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             .limit(limit)
         )
     )
-    rows, senhas = [], {}
+    rows, senhas, terms = [], {}, {}
     if page:
         rows = db.scalars(
             scoped
@@ -381,6 +381,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             .limit(MAX_DEMONSTRATIVO_ITEMS)
         ).all()
         senhas = guide_senhas(db, {r.protocolo_id for r in rows})
+        terms = glosa_terms(db, rows)
     return {
         'total': summary[0],
         'quantidade_glosas': summary[1],
@@ -395,16 +396,39 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             'transmissao_habilitada': config.transmission_enabled,
             'limite_anexo_bytes': config.max_attachment_bytes,
         },
-        'items': [with_guide_senha(r, senhas, accepted) for r in rows],
+        'items': [with_guide_senha(r, senhas, accepted, terms) for r in rows],
     }
 
 
-def with_guide_senha(row, senhas, accepted=None):
+def glosa_terms(db, rows):
+    """TISS descriptions (table 38) of the glosa codes on the page."""
+    codes = {
+        str(m.get('codigo'))
+        for r in rows
+        for m in (r.fonte or {}).get('motivos') or []
+        if m.get('codigo')
+    }
+    if not codes:
+        return {}
+    return dict(
+        db.execute(
+            select(Tiss.codigo_termo, Tiss.termo).where(
+                Tiss.codigo_termo.in_(codes)
+            )
+        ).all()
+    )
+
+
+def with_guide_senha(row, senhas, accepted=None, terms=None):
     """Public row plus the senha of its guide, when the guide has only one."""
     source = matching_source(row.fonte or {}, senhas)
     acato = (accepted or {}).get(row.id)
     return {
         **public(row),
+        'motivos': [
+            {**m, 'descricao': (terms or {}).get(str(m.get('codigo')))}
+            for m in (row.fonte or {}).get('motivos') or []
+        ],
         'senha_guia': source.get('senha'),
         'acato': acato,
         'valor_tratado': treated(row.valor_glosa, row.recurso_estado, acato),
