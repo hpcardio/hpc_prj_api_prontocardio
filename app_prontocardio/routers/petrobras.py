@@ -9,8 +9,8 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from app_prontocardio.database import get_session_postgres
 from app_prontocardio.models import Usuario
@@ -35,6 +35,8 @@ from app_prontocardio.services.petrobras_match import (
 )
 from app_prontocardio.services.petrobras_sync import (
     event,
+    guide_senhas,
+    matching_source,
     synchronize,
     synchronize_competencia,
 )
@@ -181,6 +183,43 @@ def list_items(  # noqa: PLR0913 - independent HTTP query parameters
 MAX_DEMONSTRATIVO_ITEMS = 2000
 
 
+def superseded_by_reissue():
+    """Untouched item also returned by a more recent demonstrativo.
+
+    The payer reissues analyses of a protocol; the same item (provider guide
+    + scope + sequence) is then listed once, from the latest emission. Items
+    with justification, deadline, attachments or an appeal always remain.
+    """
+    newer = aliased(PetrobrasGlosa)
+    emitted = func.coalesce(
+        PetrobrasGlosa.fonte['data_emissao'].as_string(), ''
+    )
+    newer_emitted = func.coalesce(newer.fonte['data_emissao'].as_string(), '')
+    reissued = exists().where(
+        newer.protocolo_id == PetrobrasGlosa.protocolo_id,
+        newer.id != PetrobrasGlosa.id,
+        newer.presente_na_fonte.is_(True),
+        newer.guia_prestador.is_not_distinct_from(
+            PetrobrasGlosa.guia_prestador
+        ),
+        newer.fonte['escopo'].as_string()
+        == PetrobrasGlosa.fonte['escopo'].as_string(),
+        func.coalesce(newer.fonte['sequencial'].as_string(), '')
+        == func.coalesce(PetrobrasGlosa.fonte['sequencial'].as_string(), ''),
+        or_(
+            newer_emitted > emitted,
+            and_(newer_emitted == emitted, newer.id > PetrobrasGlosa.id),
+        ),
+    )
+    untouched = and_(
+        PetrobrasGlosa.recurso_estado == 'rascunho',
+        func.coalesce(PetrobrasGlosa.justificativa, '') == '',
+        PetrobrasGlosa.prazo.is_(None),
+        ~exists().where(PetrobrasAnexo.glosa_id == PetrobrasGlosa.id),
+    )
+    return and_(untouched, reissued)
+
+
 @router.get('/demonstrativos')
 def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
     db: DB,
@@ -201,8 +240,8 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
     """
     filters = [
         PetrobrasProtocolo.prestador == config.prestador_cnpj,
-        # Items replaced by a reissued demonstrativo stay only in history.
         PetrobrasGlosa.presente_na_fonte.is_(True),
+        ~superseded_by_reissue(),
     ]
     if protocolo.strip():
         filters.append(PetrobrasProtocolo.numero == protocolo.strip())
@@ -390,21 +429,22 @@ def runs(db: DB, user: User):
 @router.post('/glosas/{item_id}/cruzar')
 def match_again(item_id: int, db: DB, config: Config, user: Writer):
     row = item(db, config, item_id, lock=True)
+    source = matching_source(row.fonte, guide_senhas(db, [row.protocolo_id]))
     try:
-        candidates = petrobras_oracle.candidates([row.fonte], config)
+        candidates = petrobras_oracle.candidates([source], config)
     except Exception:
         raise HTTPException(
             503, 'Oracle indisponível; cruzamento anterior preservado.'
         ) from None
-    apply_match(db, config, row, candidates, user.id)
+    apply_match(db, config, row, source, candidates, user.id)
     db.commit()
     return public(row)
 
 
-def apply_match(  # noqa: PLR0913 - explicit audit context
-    db, config, row, candidates, user_id, always_log=True
+def apply_match(  # noqa: PLR0913, PLR0917 - explicit audit context
+    db, config, row, source, candidates, user_id, always_log=True
 ):
-    result = reconcile(row.fonte, candidates, config.convenio_id)
+    result = reconcile(source, candidates, config.convenio_id)
     changed = (row.cruzamento, row.oracle, row.divergencias) != (
         result['status'],
         result['oracle'],
@@ -442,9 +482,11 @@ def match_all(db: DB, config: Config, user: Writer):
             .where(PetrobrasGlosa.id.in_(ids[start : start + RECROSS_BATCH]))
             .with_for_update()
         ).all()
+        senhas = guide_senhas(db, {r.protocolo_id for r in rows})
+        sources = {r.id: matching_source(r.fonte, senhas) for r in rows}
         try:
             candidates = petrobras_oracle.candidates(
-                [r.fonte for r in rows], config
+                list(sources.values()), config
             )
         except Exception:
             db.rollback()
@@ -452,7 +494,9 @@ def match_all(db: DB, config: Config, user: Writer):
                 503, 'Oracle indisponível; cruzamento anterior preservado.'
             ) from None
         changed += sum(
-            apply_match(db, config, row, candidates, user.id, False)
+            apply_match(
+                db, config, row, sources[row.id], candidates, user.id, False
+            )
             for row in rows
         )
         db.commit()
