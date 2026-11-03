@@ -365,13 +365,13 @@ def test_send_timeout_does_not_allow_retry(
     row.origem_prazo = 'Regra comprovada'
     db.commit()
     client = Mock()
-    client.appeal.side_effect = TimeoutError()
+    client.appeal_protocol.side_effect = TimeoutError()
     with pytest.raises(TissError, match='não confirmado'):
         send_appeal(db, config, row, row.versao, 1, client)
     assert row.recurso_estado == 'envio_incerto'
     with pytest.raises(TissError, match='iniciada'):
         send_appeal(db, config, row, row.versao, 1, client)
-    assert client.appeal.call_count == 1
+    assert client.appeal_protocol.call_count == 1
 
 
 def test_validation_failure_never_marks_sent(
@@ -389,7 +389,7 @@ def test_validation_failure_never_marks_sent(
     with pytest.raises(TissError):
         send_appeal(db, config, row, row.versao, 1, client)
     assert row.recurso_estado == 'rascunho'
-    client.appeal.assert_not_called()
+    client.appeal_protocol.assert_not_called()
 
 
 def test_authorization_and_draft_conflict(
@@ -1727,10 +1727,10 @@ def test_send_and_listing_accept_table38_reason(  # noqa: PLR0913 - pytest fixtu
     row.origem_prazo = 'Regra comprovada'
     db.commit()
     client = Mock()
-    client.appeal.side_effect = TimeoutError()
+    client.appeal_protocol.side_effect = TimeoutError()
     with pytest.raises(TissError, match='não confirmado'):
         send_appeal(db, config, row, row.versao, 1, client)
-    assert client.appeal.call_args.args[3] == {'3209'}
+    assert client.appeal_protocol.call_args.args[2] == {'3209'}
 
 
 def receipt(protocolo, numero='RG1'):
@@ -1807,8 +1807,9 @@ def test_batch_send_transmits_each_and_reports_failures(  # noqa: PLR0913 - pyte
         if dry_run:
             return real(cfg, dry_run=True)
         fake = Mock()
-        fake.appeal.side_effect = lambda src, *a: (
-            sent.append(src['sequencial']) or receipt(src['protocolo'])
+        fake.appeal_protocol.side_effect = lambda entries, *a: (
+            sent.extend(src['sequencial'] for src, _ in entries)
+            or receipt(entries[0][0]['protocolo'])
         )
         return fake
 
@@ -1842,7 +1843,7 @@ def test_uncertain_send_records_safe_cause(
 ):
     rows = ready_rows(db, protocol, config, source, candidate)
     client = Mock()
-    client.appeal.side_effect = TissError(
+    client.appeal_protocol.side_effect = TissError(
         'Operadora recusou a consulta/transação (5001 - X); verificar.'
     )
     with pytest.raises(TissError, match='Motivo: Operadora recusou'):
@@ -1853,3 +1854,94 @@ def test_uncertain_send_records_safe_cause(
         )
     ).one()
     assert '5001 - X' in data['causa']
+
+
+def test_protocol_appeal_groups_guides_and_items(config, source):
+    second_item = {
+        **source,
+        'sequencial': '2',
+        'valor_glosa': '5.00',
+        'motivos': [{'codigo': '1705', 'valor': '5.00'}],
+    }
+    other_guide = {
+        **source,
+        'guia_prestador': '000000000000000X8888',
+        'guia_operadora': '000124',
+        'sequencial': '1',
+    }
+    root = PetrobrasClient(config, dry_run=True).appeal_protocol(
+        [(source, 'J1'), (second_item, 'J2'), (other_guide, 'J3')], 'R1'
+    )
+    guide = root.find('.//{%s}guiaRecursoGlosa' % NS)
+    assert len(guide.findall('.//{%s}guiaRecursoGlosa' % NS)) == 0
+    origins = guide.findall('{%s}opcaoRecurso/{%s}recursoGuia' % (NS, NS))
+    assert [value(o, 'numeroGuiaOrigem') for o in origins] == [
+        '000000000000000X9999',
+        '000000000000000X8888',
+    ]
+    assert len(origins[0].findall('.//{%s}itensGuia' % NS)) == 2
+    assert value(guide, 'valorTotalRecursado') == '45.00'
+    assert value(guide, 'numeroProtocolo') == '123'
+    with pytest.raises(TissError, match='único lote/protocolo'):
+        PetrobrasClient(config, dry_run=True).appeal_protocol(
+            [(source, 'J'), ({**source, 'protocolo': '456'}, 'J')], 'R2'
+        )
+
+
+def test_batch_sends_one_appeal_per_protocol(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    same = {**source, 'chave': 'k2', 'sequencial': '2'}
+    other = {
+        **source,
+        'chave': 'k3',
+        'sequencial': '1',
+        'protocolo': '456',
+        'lote': '9',
+    }
+    second = PetrobrasProtocolo(prestador=config.prestador_cnpj, numero='456')
+    db.add(second)
+    db.commit()
+    import_rows(db, protocol, [source, same], set(), [candidate], config)
+    import_rows(db, second, [other], set(), [candidate], config)
+    db.commit()
+    rows = list(db.scalars(select(PetrobrasGlosa).order_by(PetrobrasGlosa.id)))
+    for row in rows:
+        row.justificativa = 'J'
+        row.prazo = date.today() + timedelta(days=5)
+        row.origem_prazo = 'Contrato'
+    db.commit()
+    calls = []
+
+    def factory(cfg, dry_run=False):
+        if dry_run:
+            return PetrobrasClient(cfg, dry_run=True)
+        fake = Mock()
+
+        def answer(entries, *a):
+            calls.append(sorted(s['sequencial'] for s, _ in entries))
+            return receipt(entries[0][0]['protocolo'], f'RG{len(calls)}')
+
+        fake.appeal_protocol.side_effect = answer
+        return fake
+
+    monkeypatch.setattr(petrobras_appeals, 'PetrobrasClient', factory)
+    body = {
+        'itens': [{'id': r.id, 'versao': r.versao} for r in rows],
+        'confirmar_envio': True,
+    }
+    with pilot_client(db, config) as client:
+        data = client.post(
+            '/app_glosas/petrobras/glosas/enviar-lote', json=body
+        ).json()
+    assert len(calls) == 2
+    assert sorted(calls) == [['1'], ['1', '2']]
+    appeals = {a['protocolo_petrobras']: a for a in data['recursos']}
+    assert len(appeals['123']['itens']) == 2
+    assert appeals['123']['protocolo'] != appeals['456']['protocolo']
+    assert data['protocolados'] == 3
+    db.expire_all()
+    guides = {r.fonte['protocolo']: set() for r in rows}
+    for r in db.scalars(select(PetrobrasGlosa)):
+        guides[r.fonte['protocolo']].add(r.recurso_guia)
+    assert all(len(v) == 1 for v in guides.values())

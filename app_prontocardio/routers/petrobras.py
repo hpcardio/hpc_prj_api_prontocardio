@@ -29,6 +29,7 @@ from app_prontocardio.services.petrobras_appeals import (
     appeal_readiness,
     poll_appeal,
     send_appeal,
+    send_protocol_appeal,
 )
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import (
@@ -906,6 +907,7 @@ def ready_appeals(db: DB, config: Config, user: User):
             'id': row.id,
             'versao': row.versao,
             'protocolo': source.get('protocolo'),
+            'lote': source.get('lote'),
             'guia': row.guia_prestador,
             'senha': source.get('senha'),
             'tuss': row.tuss,
@@ -935,35 +937,64 @@ class BatchSendInput(BaseModel):
 
 
 @router.post('/glosas/enviar-lote')
-def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):
-    """Each appeal is its own explicit transmission; no retry on failure."""
+def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):  # noqa: PLR0914 - per item and per protocol outcomes
+    """One TISS appeal per lot/protocol with the selected ready items."""
     if not config.can_transmit(getattr(user, 'email', None)):
         raise HTTPException(
             403, 'Envio de recurso em piloto; usuário ainda não liberado.'
         )
-    results = []
+    results, groups = {}, {}
     for entry in {i.id: i for i in body.itens}.values():
         try:
             row = item(db, config, entry.id, lock=True)
-            row = send_appeal(db, config, row, entry.versao, user.id)
-            results.append({
+        except HTTPException as exc:
+            results[entry.id] = {'id': entry.id, 'erro': exc.detail}
+            continue
+        issue = (
+            'Recurso alterado; atualize a tela.'
+            if row.versao != entry.versao
+            else appeal_readiness(row, appeal_codes(db, config, [row.fonte]))
+        )
+        if issue:
+            results[entry.id] = {
                 'id': entry.id,
                 'situacao': row.recurso_estado,
-                'protocolo': row.recurso_protocolo,
-            })
-        except (TissError, ValueError, HTTPException) as exc:
+                'erro': issue,
+            }
+            continue
+        source = row.fonte or {}
+        key = (source.get('lote'), source.get('protocolo'))
+        groups.setdefault(key, []).append((row, entry.versao))
+    appeals = []
+    for (lote, protocolo), pairs in groups.items():
+        ids = [row.id for row, _ in pairs]
+        try:
+            rows = send_protocol_appeal(db, config, pairs, user.id)
+            outcome = {
+                'situacao': 'protocolado',
+                'protocolo': rows[0].recurso_protocolo,
+            }
+        except (TissError, ValueError) as exc:
             db.rollback()
-            current = db.get(PetrobrasGlosa, entry.id)
-            results.append({
-                'id': entry.id,
+            current = db.get(PetrobrasGlosa, ids[0])
+            outcome = {
                 'situacao': current.recurso_estado if current else None,
-                'erro': exc.detail
-                if isinstance(exc, HTTPException)
-                else str(exc),
-            })
+                'erro': str(exc),
+            }
+        appeals.append({
+            'lote': lote,
+            'protocolo_petrobras': protocolo,
+            'itens': ids,
+            **outcome,
+        })
+        for item_id in ids:
+            results[item_id] = {'id': item_id, **outcome}
     return {
-        'protocolados': sum(r['situacao'] == 'protocolado' for r in results),
-        'resultados': results,
+        'protocolados': sum(
+            r.get('situacao') == 'protocolado' for r in results.values()
+        ),
+        'recursos': appeals,
+        'resultados': list(results.values()),
     }
 
 

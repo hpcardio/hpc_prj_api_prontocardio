@@ -192,6 +192,12 @@ não se presume prazo recursal a partir da emissão.
 
 ## Recursos, anexos e operação
 
+Recurso por protocolo/lote: cada `loteRecursoGlosaWS` leva um único
+`guiaRecursoGlosa` (lote + protocolo) com até 100 `recursoGuia` e seus
+`itensGuia`. `POST /glosas/enviar-lote` agrupa os itens selecionados por
+lote/protocolo e faz uma transmissão por grupo; todos os itens do grupo
+compartilham `recurso_guia`, o protocolo do recurso ou o envio incerto.
+
 A tela mantém os fluxos existentes e adiciona comparação com Oracle, histórico,
 justificativa, prazo/origem e anexos autenticados. PDF, PNG e JPEG: limite local
 padrão de 5 MiB e 20 anexos por item (não é limite confirmado da operadora).

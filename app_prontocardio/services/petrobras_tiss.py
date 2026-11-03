@@ -25,6 +25,7 @@ NS = 'http://www.ans.gov.br/padroes/tiss/schemas'
 SOAP = 'http://schemas.xmlsoap.org/soap/envelope/'
 CONTRACTS = Path(__file__).with_name('petrobras_contracts')
 MAX_PROTOCOLS = 30
+MAX_APPEAL_GUIDES = 100  # recursoGuia maxOccurs in ctm_recursoGlosa.
 PROTOCOL_LENGTH = 12
 COMPETENCE_LENGTH = 6
 MONTHS_PER_YEAR = 12
@@ -437,9 +438,35 @@ class PetrobrasClient:
     def appeal(
         self, source, justification, appeal_id, table_codes=frozenset()
     ):
-        blocked = appeal_block(source, table_codes)
-        if blocked:
-            raise TissError(blocked)
+        return self.appeal_protocol(
+            [(source, justification)], appeal_id, table_codes
+        )
+
+    def appeal_protocol(self, entries, appeal_id, table_codes=frozenset()):
+        """One TISS appeal (guiaRecursoGlosa) per lot/protocol.
+
+        entries: [(source, justification)] of item glosas of the same lote
+        and protocolo; items are grouped by origin guide (max 100 guides).
+        """
+        if not entries:
+            raise TissError('Nenhum item selecionado para o recurso.')
+        for source, _ in entries:
+            blocked = appeal_block(source, table_codes)
+            if blocked:
+                raise TissError(blocked)
+        first = entries[0][0]
+        if {(s.get('lote'), s.get('protocolo')) for s, _ in entries} != {
+            (first.get('lote'), first.get('protocolo'))
+        }:
+            raise TissError('Recurso reúne itens de um único lote/protocolo.')
+        guides = {}
+        for source, justification in entries:
+            key = (source['guia_prestador'], source.get('guia_operadora'))
+            guides.setdefault(key, []).append((source, justification))
+        if len(guides) > MAX_APPEAL_GUIDES:
+            raise TissError(
+                f'Recurso aceita até {MAX_APPEAL_GUIDES} guias por protocolo.'
+            )
         root = message(self.config, 'recurso')
         guide = element(element(root, 'loteRecurso'), 'guiaRecursoGlosa')
         element(guide, 'registroANS', self.config.registro_ans)
@@ -447,32 +474,39 @@ class PetrobrasClient:
         element(guide, 'nomeOperadora', 'SAUDE PETROBRAS')
         element(guide, 'objetoRecurso', '2')
         contracted(element(guide, 'dadosContratado'), self.config)
-        element(guide, 'numeroLote', source['lote'])
-        element(guide, 'numeroProtocolo', source['protocolo'])
-        origin = element(element(guide, 'opcaoRecurso'), 'recursoGuia')
-        element(origin, 'numeroGuiaOrigem', source['guia_prestador'])
-        if source.get('guia_operadora'):
-            element(origin, 'numeroGuiaOperadora', source['guia_operadora'])
-        items = element(origin, 'opcaoRecursoGuia')
-        for reason in source['motivos']:
-            item = element(items, 'itensGuia')
-            element(item, 'sequencialItem', source['sequencial'])
-            element(item, 'dataInicio', source['data_realizacao'])
-            proc = element(item, 'procRecurso')
-            element(proc, 'codigoTabela', source['tabela'])
-            element(proc, 'codigoProcedimento', source['tuss'])
-            element(proc, 'descricaoProcedimento', source['descricao'])
-            element(item, 'codGlosaItem', reason['codigo'])
-            element(item, 'valorRecursado', reason['valor'])
-            element(item, 'justificativaItem', justification)
-        element(guide, 'valorTotalRecursado', source['valor_glosa'])
+        element(guide, 'numeroLote', first['lote'])
+        element(guide, 'numeroProtocolo', first['protocolo'])
+        option = element(guide, 'opcaoRecurso')
+        for (origin_guide, operator_guide), items in guides.items():
+            origin = element(option, 'recursoGuia')
+            element(origin, 'numeroGuiaOrigem', origin_guide)
+            if operator_guide:
+                element(origin, 'numeroGuiaOperadora', operator_guide)
+            listed = element(origin, 'opcaoRecursoGuia')
+            for source, justification in items:
+                for reason in source['motivos']:
+                    item = element(listed, 'itensGuia')
+                    element(item, 'sequencialItem', source['sequencial'])
+                    element(item, 'dataInicio', source['data_realizacao'])
+                    proc = element(item, 'procRecurso')
+                    element(proc, 'codigoTabela', source['tabela'])
+                    element(proc, 'codigoProcedimento', source['tuss'])
+                    element(proc, 'descricaoProcedimento', source['descricao'])
+                    element(item, 'codGlosaItem', reason['codigo'])
+                    element(item, 'valorRecursado', reason['valor'])
+                    element(item, 'justificativaItem', justification)
+        total = sum(
+            (Decimal(str(s['valor_glosa'])) for s, _ in entries), Decimal(0)
+        )
+        element(guide, 'valorTotalRecursado', f'{total:.2f}')
         element(
             guide,
             'dataRecurso',
             datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat(),
         )
         # Remaining off-domain reasons are table 38 codes: relax that field.
-        return self.call('recurso', root, bool(operator_codes(source)))
+        relaxed = any(operator_codes(s) for s, _ in entries)
+        return self.call('recurso', root, relaxed)
 
     def document(self, source, attachment):
         root = message(self.config, 'documento')
