@@ -850,7 +850,7 @@ def test_batch_rejects_foreign_protocol(db, config, protocol):
 def test_unknown_denial_received_does_not_weaken_send_contract(config, source):
     source['motivos'][0]['codigo'] = '3292'
     assert '3292' not in tiss.known_denial_codes()
-    with pytest.raises(TissError, match='contrato'):
+    with pytest.raises(TissError, match='3292.*fora do padrão'):
         PetrobrasClient(config, dry_run=True).appeal(source, 'Test', '1')
     # Build a valid outgoing structure with a known reason, then modify only
     # its denial code to exercise the independently compiled receive schema.
@@ -1532,3 +1532,86 @@ def test_guide_detailed_later_by_analysis_is_listed_once(
         after = api.get('/app_glosas/petrobras/demonstrativos').json()
     assert after['quantidade_glosas'] == 1
     assert after['items'][0]['fonte']['escopo'] == 'item'
+
+
+def test_pilot_allows_only_listed_users(config):
+    config.transmission_users = (
+        ' Leticia.Oliveira@hospitalprontocardio.com.br ,'
+    )
+    assert config.can_transmit('leticia.oliveira@hospitalprontocardio.com.br')
+    assert not config.can_transmit('outro@hospitalprontocardio.com.br')
+    assert not config.can_transmit(None)
+    config.transmission_users = ''
+    assert config.can_transmit('outro@hospitalprontocardio.com.br')
+    config.transmission_enabled = False
+    assert not config.can_transmit(
+        'leticia.oliveira@hospitalprontocardio.com.br'
+    )
+
+
+def test_operator_codes_outside_published_domain_are_blocked(config, source):
+    source = {**source, 'motivos': [{'codigo': '3209', 'valor': '74.00'}]}
+    message = tiss.appeal_block(source)
+    assert '3209' in message
+    assert 'portal' in message
+    with pytest.raises(TissError, match='3209'):
+        PetrobrasClient(config, dry_run=True).appeal(source, 'J', 'R1')
+    assert (
+        tiss.appeal_block({**source, 'motivos': [{'codigo': '1705'}]}) is None
+    )
+
+
+def test_send_endpoint_respects_pilot_and_exposes_block(
+    db, protocol, config, source, candidate
+):
+    other = {
+        **source,
+        'chave': 'blocked-key',
+        'sequencial': '2',
+        'motivos': [{'codigo': '3253', 'valor': '6.61'}],
+    }
+    import_rows(db, protocol, [source, other], set(), [candidate], config)
+    db.commit()
+    config.transmission_users = 'piloto@hospitalprontocardio.com.br'
+    user = SimpleNamespace(
+        id=1,
+        perfil='usuario',
+        telas_permitidas=['follow_up_glosas'],
+        email='outro@hospitalprontocardio.com.br',
+    )
+    app = FastAPI()
+    app.include_router(petrobras.router)
+    app.dependency_overrides[petrobras.valida_token_usuario_atual] = lambda: (
+        user
+    )
+    app.dependency_overrides[petrobras.get_session_postgres] = lambda: db
+    app.dependency_overrides[petrobras.get_config] = lambda: config
+    rows = {
+        r.fonte['sequencial']: r for r in db.scalars(select(PetrobrasGlosa))
+    }
+    with TestClient(app) as client:
+        assert (
+            client.get('/app_glosas/petrobras/status').json()[
+                'transmissao_usuario'
+            ]
+            is False
+        )
+        url = f'/app_glosas/petrobras/glosas/{rows["1"].id}/enviar'
+        body = {'versao': rows['1'].versao, 'confirmar_envio': True}
+        denied = client.post(url, json=body)
+        assert denied.status_code == 403
+        assert 'piloto' in denied.json()['detail']
+        assert rows['1'].recurso_estado == 'rascunho'
+        user.email = 'Piloto@hospitalprontocardio.com.br'
+        assert (
+            client.get('/app_glosas/petrobras/status').json()[
+                'transmissao_usuario'
+            ]
+            is True
+        )
+        items = {
+            i['fonte']['sequencial']: i
+            for i in client.get('/app_glosas/petrobras/glosas').json()['items']
+        }
+    assert items['1']['bloqueio_envio'] is None
+    assert '3253' in items['2']['bloqueio_envio']
