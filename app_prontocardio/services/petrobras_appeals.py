@@ -71,7 +71,36 @@ def appeal_readiness(row, table_codes=frozenset(), today=None):
     return appeal_block(row.fonte or {}, table_codes)
 
 
-def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR0913, PLR0915 - durable transmission state transitions
+def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR0913 - explicit audit context
+    """Single item: a protocol appeal with one item."""
+    return send_protocol_appeal(db, config, [(row, version)], user_id, client)[
+        0
+    ]
+
+
+def check_draft(row, version, today):
+    if row.versao != version or row.recurso_estado != 'rascunho':
+        raise TissError(
+            'Recurso alterado ou transmissão iniciada. Consulte a situação.'
+        )
+    if (
+        not row.presente_na_fonte
+        or not (row.justificativa or '').strip()
+        or Decimal(row.valor_glosa or 0) <= 0
+    ):
+        raise TissError('Revise a glosa e preencha a justificativa.')
+    if row.prazo is None or row.prazo < today or not row.origem_prazo:
+        raise TissError(
+            'Confirme o prazo vigente e sua origem antes do envio.'
+        )
+
+
+def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0912, PLR0914, PLR0915 - durable transmission state transitions
+    """One TISS appeal for items of one lot/protocol; never retried.
+
+    pairs: [(row, version)] already locked by the caller. All items share
+    the appeal number and its outcome (protocol or envio incerto).
+    """
     if not config.transmission_enabled:
         raise TissError(
             (
@@ -79,72 +108,77 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
                 'integração Petrobras neste ambiente.'
             )
         )
-    if row.versao != version or row.recurso_estado != 'rascunho':
-        raise TissError(
-            'Recurso alterado ou transmissão iniciada. Consulte a situação.'
-        )
-    if (
-        not row.presente_na_fonte
-        or not row.justificativa.strip()
-        or Decimal(row.valor_glosa or 0) <= 0
-    ):
-        raise TissError('Revise a glosa e preencha a justificativa.')
     today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
-    if row.prazo is None or row.prazo < today or not row.origem_prazo:
-        raise TissError(
-            'Confirme o prazo vigente e sua origem antes do envio.'
+    for row, version in pairs:
+        check_draft(row, version, today)
+    rows = [row for row, _ in pairs]
+    files = {
+        row.id: list(
+            db.scalars(
+                select(PetrobrasAnexo).where(PetrobrasAnexo.glosa_id == row.id)
+            )
         )
-    files = list(
-        db.scalars(
-            select(PetrobrasAnexo).where(PetrobrasAnexo.glosa_id == row.id)
-        )
-    )
-    if any(a.estado in {'transmitindo', 'envio_incerto'} for a in files):
+        for row in rows
+    }
+    if any(
+        a.estado in {'transmitindo', 'envio_incerto'}
+        for f in files.values()
+        for a in f
+    ):
         raise TissError(
             'Documento com envio incerto; confira o portal antes de reenviar.'
         )
-    source, justification = deepcopy(row.fonte), row.justificativa
-    appeal_id = row.recurso_guia or uuid4().hex[:20]
-    codes = appeal_codes(db, config, [source])
-    preflight = PetrobrasClient(config, dry_run=True)
-    preflight.appeal(source, justification, appeal_id, codes)
-    for a in files:
-        preflight.document(source, a)
-    row.recurso_guia = appeal_id
-    row.recurso_estado = 'transmitindo'
-    row.versao += 1
-    item_id = row.id
-    event(
-        db,
-        row,
-        'transmissao_iniciada',
-        {
-            'guia_recurso': appeal_id,
-            'fonte': source,
-            'justificativa': justification,
-        },
-        user_id,
+    entries = [(deepcopy(r.fonte), r.justificativa) for r in rows]
+    protocolo = entries[0][0].get('protocolo')
+    appeal_id = next(
+        (r.recurso_guia for r in rows if r.recurso_guia), uuid4().hex[:20]
     )
+    codes = appeal_codes(db, config, [s for s, _ in entries])
+    preflight = PetrobrasClient(config, dry_run=True)
+    preflight.appeal_protocol(entries, appeal_id, codes)
+    for row, (source, _) in zip(rows, entries):
+        for a in files[row.id]:
+            preflight.document(source, a)
+    ids = [row.id for row in rows]
+    for row, (source, justification) in zip(rows, entries):
+        row.recurso_guia = appeal_id
+        row.recurso_estado = 'transmitindo'
+        row.versao += 1
+        event(
+            db,
+            row,
+            'transmissao_iniciada',
+            {
+                'guia_recurso': appeal_id,
+                'itens_no_recurso': len(rows),
+                'fonte': source,
+                'justificativa': justification,
+            },
+            user_id,
+        )
     db.commit()  # before network: a crash cannot trigger a blind resend
     client = client or PetrobrasClient(config)
     try:
-        for a in files:
-            if a.estado == 'protocolado':
-                continue
-            a.estado = 'transmitindo'
-            db.commit()
-            answer = client.document(source, a)
-            receipt = value(
-                answer, 'recebimentoDocumento/reciboDocumentos/protocoloDoc'
-            )
-            doc_id = value(
-                answer, 'recebimentoDocumento/reciboDocumentos/numeroDocumento'
-            )
-            if not receipt or doc_id != str(a.id):
-                raise TissError('Documento sem recibo correspondente.')
-            a.estado, a.protocolo = 'protocolado', receipt
-            db.commit()
-        answer = client.appeal(source, justification, appeal_id, codes)
+        for row, (source, _) in zip(rows, entries):
+            for a in files[row.id]:
+                if a.estado == 'protocolado':
+                    continue
+                a.estado = 'transmitindo'
+                db.commit()
+                answer = client.document(source, a)
+                receipt = value(
+                    answer,
+                    'recebimentoDocumento/reciboDocumentos/protocoloDoc',
+                )
+                doc_id = value(
+                    answer,
+                    'recebimentoDocumento/reciboDocumentos/numeroDocumento',
+                )
+                if not receipt or doc_id != str(a.id):
+                    raise TissError('Documento sem recibo correspondente.')
+                a.estado, a.protocolo = 'protocolado', receipt
+                db.commit()
+        answer = client.appeal_protocol(entries, appeal_id, codes)
         node = answer.find(
             '{%s}recebimentoRecurso/{%s}protocoloRecebimento' % (NS, NS)
         )
@@ -153,17 +187,15 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
             if node is not None
             else None
         )
-        if (
-            not protocol
-            or value(node, 'nrProtocoloRecursado') != source['protocolo']
-        ):
+        if not protocol or value(node, 'nrProtocoloRecursado') != protocolo:
             raise TissError(
                 'Resposta sem protocolo correspondente; confira o portal.'
             )
-        row.recurso_estado, row.recurso_protocolo = 'protocolado', protocol
-        event(db, row, 'protocolado', {'protocolo': protocol}, user_id)
+        for row in rows:
+            row.recurso_estado, row.recurso_protocolo = 'protocolado', protocol
+            event(db, row, 'protocolado', {'protocolo': protocol}, user_id)
         db.commit()
-        return row
+        return rows
     except Exception as exc:
         # Safe cause for diagnosis: TissError text never carries credentials.
         cause = (
@@ -172,31 +204,37 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
             else type(exc).__name__
         )
         db.rollback()
-        row = db.scalar(
-            select(PetrobrasGlosa)
-            .where(PetrobrasGlosa.id == item_id)
-            .with_for_update()
+        rows = list(
+            db.scalars(
+                select(PetrobrasGlosa)
+                .where(PetrobrasGlosa.id.in_(ids))
+                .order_by(PetrobrasGlosa.id)
+                .with_for_update()
+            )
         )
-        row.recurso_estado = 'envio_incerto'
+        for row in rows:
+            row.recurso_estado = 'envio_incerto'
+            event(
+                db,
+                row,
+                'envio_incerto',
+                {
+                    'orientacao': (
+                        'Conferir protocolo no portal antes de qualquer '
+                        'reenvio.'
+                    ),
+                    'causa': cause,
+                    'guia_recurso': appeal_id,
+                },
+                user_id,
+            )
         for a in db.scalars(
             select(PetrobrasAnexo).where(
-                PetrobrasAnexo.glosa_id == item_id,
+                PetrobrasAnexo.glosa_id.in_(ids),
                 PetrobrasAnexo.estado == 'transmitindo',
             )
         ):
             a.estado = 'envio_incerto'
-        event(
-            db,
-            row,
-            'envio_incerto',
-            {
-                'orientacao': (
-                    'Conferir protocolo no portal antes de qualquer reenvio.'
-                ),
-                'causa': cause,
-            },
-            user_id,
-        )
         db.commit()
         raise TissError(
             'Envio não confirmado. Consulte o portal; não haverá reenvio '
