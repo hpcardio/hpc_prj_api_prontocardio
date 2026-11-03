@@ -1615,3 +1615,36 @@ def test_send_endpoint_respects_pilot_and_exposes_block(
         }
     assert items['1']['bloqueio_envio'] is None
     assert '3253' in items['2']['bloqueio_envio']
+
+
+def test_operator_codes_flag_relaxes_only_the_denial_code(config, source):
+    source = {**source, 'motivos': [{'codigo': '3209', 'valor': '74.00'}]}
+    assert tiss.operator_codes(source) == ['3209']
+    with pytest.raises(TissError, match='3209'):
+        PetrobrasClient(config, dry_run=True).appeal(source, 'J', 'R1')
+    config.appeal_operator_codes = True
+    assert tiss.appeal_block(source, True) is None
+    root = PetrobrasClient(config, dry_run=True).appeal(source, 'J', 'R1')
+    assert value(root, 'loteRecurso/guiaRecursoGlosa/numeroProtocolo') == '123'
+    assert root.find('.//{%s}codGlosaItem' % NS).text == '3209'
+    # Codes that are not four digits stay blocked even with the flag.
+    odd = {**source, 'motivos': [{'codigo': 'X1', 'valor': '1.00'}]}
+    assert 'X1' in tiss.appeal_block(odd, True)
+    # Any other contract violation still fails with the relaxed schema.
+    with pytest.raises(TissError, match='contrato'):
+        PetrobrasClient(config, dry_run=True).appeal(
+            {**source, 'tabela': 'invalid'}, 'J', 'R1'
+        )
+
+
+def test_public_block_follows_operator_codes_flag(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    fonte = {**source, 'motivos': [{'codigo': '3253', 'valor': '6.61'}]}
+    import_rows(db, protocol, [fonte], set(), [candidate], config)
+    db.commit()
+    row = db.scalar(select(PetrobrasGlosa))
+    monkeypatch.setattr(petrobras, 'operator_codes_allowed', lambda: False)
+    assert '3253' in petrobras.public(row)['bloqueio_envio']
+    monkeypatch.setattr(petrobras, 'operator_codes_allowed', lambda: True)
+    assert petrobras.public(row)['bloqueio_envio'] is None

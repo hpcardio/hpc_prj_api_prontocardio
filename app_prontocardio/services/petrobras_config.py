@@ -28,6 +28,10 @@ class PetrobrasConfig(BaseSettings):
     # Pilot: comma-separated e-mails allowed to transmit appeals. Empty keeps
     # every writer allowed once transmission is enabled.
     transmission_users: str = ''
+    # Appeal items whose denial code is the operator's own 4-digit code
+    # (3209, 3253...) outside the published dm_tipoGlosa. Only that field is
+    # relaxed; turn off if the payer rejects such appeals.
+    appeal_operator_codes: bool = False
 
     @property
     def identificador_prestador(self):

@@ -169,6 +169,10 @@ disponíveis. A transmissão de recursos fica desligada até o piloto:
 demais recebem 403 e a tela mostra "Envio de recurso em piloto". Cada item
 expõe `bloqueio_envio` (totais divergentes, glosa sem itens ou motivo fora do
 `dm_tipoGlosa` publicado, como 3209/3253) e não é transmitido pelo webservice.
+`PETROBRAS_APPEAL_OPERATOR_CODES=true` permite recorrer desses itens pelo
+webservice: só o `dm_tipoGlosa` aceita código numérico de 4 dígitos (mesma
+variante usada na recepção); todo o restante do XML segue o contrato original.
+Desligar se a operadora recusar esses recursos.
 
 Worker periódico: `python -m scripts.sync_petrobras`. Usa trava PostgreSQL,
 intervalo padrão de 360 minutos e descoberta dos últimos três meses, ajustável
