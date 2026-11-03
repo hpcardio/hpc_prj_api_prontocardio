@@ -79,6 +79,18 @@ ITEM_FIELDS = (
 )
 
 
+def shared_account(rows):
+    """Account fields when all rows are one MV attendance, else None."""
+    accounts = {r.get('cd_atendimento') for r in rows}
+    if len(accounts) != 1 or None in accounts:
+        return None
+    return {
+        f: rows[0].get(f)
+        for f in ACCOUNT_FIELDS
+        if len({norm(r.get(f)) for r in rows}) == 1
+    }
+
+
 def reconcile_guide(source, candidates, convenio_id):
     """Guide without items: senha = NR_GUIA identifies the MV account.
 
@@ -108,11 +120,7 @@ def reconcile_guide(source, candidates, convenio_id):
                 else []
             ),
         )
-    oracle = {
-        f: rows[0].get(f)
-        for f in ACCOUNT_FIELDS
-        if len({norm(r.get(f)) for r in rows}) == 1
-    }
+    oracle = shared_account(rows) or {}
     oracle['itens_mv'] = len(rows)
     oracle['itens'] = [{f: r.get(f) for f in ITEM_FIELDS} for r in rows]
     oracle['valor_mv'] = str(
@@ -170,8 +178,12 @@ def reconcile(source, candidates, convenio_id):  # noqa: PLR0911 - explicit cons
     if len(rows) > 1:
         rows = _refine(rows, source)
     if len(rows) != 1:
+        # The MV launch stays undecided, but when every candidate is the same
+        # account its patient/attendance data is certain and is kept.
         return _result(
-            'ambiguo' if rows else 'nao_localizado', count=len(rows)
+            'ambiguo' if rows else 'nao_localizado',
+            oracle=shared_account(rows),
+            count=len(rows),
         )
     row = rows[0]
     diffs = []
