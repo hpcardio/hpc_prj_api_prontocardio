@@ -340,12 +340,27 @@ class PetrobrasClient:
                     'para os parâmetros consultados.'
                 )
             )
-        if error is not None or value(result, 'cabecalho/falhaNegocio'):
-            raise TissError(
-                (
-                    'Operadora recusou a consulta/transação; '
-                    'verificar cadastro, credenciais e protocolo.'
+        failure = value(result, 'cabecalho/falhaNegocio')
+        if error is not None or failure:
+            # Operator code/description only: never request or credentials.
+            detail = ' - '.join(
+                filter(
+                    None,
+                    [
+                        value(error, 'codigoGlosa')
+                        if error is not None
+                        else None,
+                        value(error, 'descricaoGlosa')
+                        if error is not None
+                        else None,
+                        failure,
+                    ],
                 )
+            )[:150]
+            raise TissError(
+                'Operadora recusou a consulta/transação'
+                + (f' ({detail})' if detail else '')
+                + '; verificar cadastro, credenciais e protocolo.'
             )
         received_hash = value(result, 'hash')
 

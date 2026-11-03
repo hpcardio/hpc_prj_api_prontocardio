@@ -30,7 +30,7 @@ from app_prontocardio.petrobras_models import (
     PetrobrasProtocolo,
 )
 from app_prontocardio.routers import petrobras
-from app_prontocardio.services import petrobras_sync
+from app_prontocardio.services import petrobras_appeals, petrobras_sync
 from app_prontocardio.services import petrobras_tiss as tiss
 from app_prontocardio.services.petrobras_appeals import (
     appeal_codes,
@@ -1710,3 +1710,125 @@ def test_send_and_listing_accept_table38_reason(  # noqa: PLR0913 - pytest fixtu
     with pytest.raises(TissError, match='não confirmado'):
         send_appeal(db, config, row, row.versao, 1, client)
     assert client.appeal.call_args.args[3] == {'3209'}
+
+
+def receipt(protocolo, numero='RG1'):
+    root = ET.Element('{%s}protocoloRecebimentoRecursoWS' % NS)
+    node = element(element(root, 'recebimentoRecurso'), 'protocoloRecebimento')
+    element(node, 'nrProtocoloRecursoGlosa', numero)
+    element(node, 'nrProtocoloRecursado', protocolo)
+    return root
+
+
+def ready_rows(db, protocol, config, source, candidate):
+    other = {**source, 'chave': 'k2', 'sequencial': '2'}
+    blocked = {
+        **source,
+        'chave': 'k3',
+        'sequencial': '3',
+        'motivos': [{'codigo': '3253', 'valor': '1.00'}],
+    }
+    import_rows(
+        db, protocol, [source, other, blocked], set(), [candidate], config
+    )
+    db.commit()
+    rows = {
+        r.fonte['sequencial']: r for r in db.scalars(select(PetrobrasGlosa))
+    }
+    for row in rows.values():
+        row.justificativa = 'Justificativa'
+        row.prazo = date.today() + timedelta(days=10)
+        row.origem_prazo = 'Contrato'
+    rows['2'].prazo = None
+    db.commit()
+    return rows
+
+
+def pilot_client(db, config, email='piloto@hospitalprontocardio.com.br'):
+    config.transmission_users = 'piloto@hospitalprontocardio.com.br'
+    app = FastAPI()
+    app.include_router(petrobras.router)
+    user = SimpleNamespace(
+        id=1,
+        perfil='usuario',
+        telas_permitidas=['follow_up_glosas'],
+        email=email,
+    )
+    app.dependency_overrides[petrobras.valida_token_usuario_atual] = lambda: (
+        user
+    )
+    app.dependency_overrides[petrobras.get_session_postgres] = lambda: db
+    app.dependency_overrides[petrobras.get_config] = lambda: config
+    return TestClient(app)
+
+
+def test_ready_appeals_lists_sendable_drafts_and_pending_reasons(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    with pilot_client(db, config) as client:
+        data = client.get('/app_glosas/petrobras/glosas/prontos').json()
+    assert [r['id'] for r in data['prontos']] == [rows['1'].id]
+    pending = {r['id']: r['pendencia'] for r in data['pendencias']}
+    assert 'prazo' in pending[rows['2'].id]
+    assert '3253' in pending[rows['3'].id]
+    assert data['usuario_liberado'] is True
+
+
+def test_batch_send_transmits_each_and_reports_failures(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    real = petrobras_appeals.PetrobrasClient
+    sent = []
+
+    def factory(cfg, dry_run=False):
+        if dry_run:
+            return real(cfg, dry_run=True)
+        fake = Mock()
+        fake.appeal.side_effect = lambda src, *a: (
+            sent.append(src['sequencial']) or receipt(src['protocolo'])
+        )
+        return fake
+
+    monkeypatch.setattr(petrobras_appeals, 'PetrobrasClient', factory)
+    body = {
+        'itens': [{'id': r.id, 'versao': r.versao} for r in rows.values()],
+        'confirmar_envio': True,
+    }
+    with pilot_client(db, config, 'outro@x.com') as client:
+        assert (
+            client.post(
+                '/app_glosas/petrobras/glosas/enviar-lote', json=body
+            ).status_code
+            == 403
+        )
+    with pilot_client(db, config) as client:
+        data = client.post(
+            '/app_glosas/petrobras/glosas/enviar-lote', json=body
+        ).json()
+    result = {r['id']: r for r in data['resultados']}
+    assert data['protocolados'] == 1
+    assert sent == ['1']
+    assert result[rows['1'].id]['protocolo'] == 'RG1'
+    assert 'prazo' in result[rows['2'].id]['erro']
+    assert '3253' in result[rows['3'].id]['erro']
+    assert result[rows['2'].id]['situacao'] == 'rascunho'
+
+
+def test_uncertain_send_records_safe_cause(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    client = Mock()
+    client.appeal.side_effect = TissError(
+        'Operadora recusou a consulta/transação (5001 - X); verificar.'
+    )
+    with pytest.raises(TissError, match='Motivo: Operadora recusou'):
+        send_appeal(db, config, rows['1'], rows['1'].versao, 1, client)
+    data = db.scalars(
+        select(PetrobrasEvento.dados).where(
+            PetrobrasEvento.tipo == 'envio_incerto'
+        )
+    ).one()
+    assert '5001 - X' in data['causa']
