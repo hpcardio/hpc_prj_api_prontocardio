@@ -168,6 +168,27 @@ def test_provider_guide_is_never_used_as_key(source, candidate):
 def test_repeated_procedure_never_selects_first(source, candidate):
     other = {**candidate, 'cd_lancamento': 2}
     assert reconcile(source, [candidate, other], 37)['status'] == 'ambiguo'
+    # Same MV account: patient/attendance kept, the launch stays undecided.
+    account = {
+        'cd_atendimento': 337959,
+        'nm_paciente': 'PACIENTE',
+        'cd_remessa': 9,
+    }
+    result = reconcile(
+        source, [{**candidate, **account}, {**other, **account}], 37
+    )
+    assert result['status'] == 'ambiguo'
+    assert result['oracle']['cd_atendimento'] == 337959
+    assert result['oracle']['nm_paciente'] == 'PACIENTE'
+    assert 'cd_lancamento' not in result['oracle']
+    split = reconcile(
+        source,
+        [{**candidate, **account}, {**other, **account, 'cd_atendimento': 1}],
+        37,
+    )
+    assert split['status'] == 'ambiguo'
+    assert split['oracle'] is None
+    assert reconcile(source, [candidate, other], 37)['oracle'] is None
     other['data_realizacao'] = '2026-10-02'
     assert (
         reconcile(source, [candidate, other], 37)['oracle']['cd_lancamento']
