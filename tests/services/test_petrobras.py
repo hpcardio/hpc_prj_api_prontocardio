@@ -1434,6 +1434,13 @@ def test_guide_only_match_uses_senha_and_one_mv_account():
     assert match['oracle']['valor_mv'] == '529.50'
     # Item data never chosen for a guide without items.
     assert 'cd_pro_fat' not in match['oracle']
+    # MV items listed as reference, with no glosa value of their own.
+    assert [i['cd_pro_fat'] for i in match['oracle']['itens']] == [
+        '10101012',
+        '40301630',
+    ]
+    assert match['oracle']['itens'][1]['valor'] == '29.50'
+    assert 'valor_glosa' not in match['oracle']['itens'][0]
 
     other_account = [mv_row(), mv_row(cd_atendimento=1)]
     assert reconcile(source, other_account, 37)['status'] == 'ambiguo'
