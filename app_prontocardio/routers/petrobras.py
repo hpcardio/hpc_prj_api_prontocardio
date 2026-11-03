@@ -5,7 +5,6 @@ import binascii
 import hashlib
 from datetime import date
 from decimal import Decimal
-from functools import lru_cache
 from pathlib import PurePath
 from typing import Annotated, Literal
 
@@ -26,6 +25,7 @@ from app_prontocardio.petrobras_models import (
 from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services import petrobras_oracle
 from app_prontocardio.services.petrobras_appeals import (
+    appeal_codes,
     poll_appeal,
     send_appeal,
 )
@@ -93,7 +93,7 @@ def item(session, config, item_id, lock=False):
     return row
 
 
-def public(row):
+def public(row, table_codes=frozenset()):
     return {
         key: getattr(row, key)
         for key in (
@@ -121,17 +121,7 @@ def public(row):
             'recurso_resultado',
             'ultima_consulta_recurso',
         )
-    } | {
-        'bloqueio_envio': appeal_block(
-            row.fonte or {}, operator_codes_allowed()
-        )
-    }
-
-
-@lru_cache(maxsize=1)
-def operator_codes_allowed():
-    # Environment is read once per process; changing it needs a restart.
-    return PetrobrasConfig().appeal_operator_codes
+    } | {'bloqueio_envio': appeal_block(row.fonte or {}, table_codes)}
 
 
 @router.get('/status')
@@ -194,7 +184,8 @@ def list_items(  # noqa: PLR0913 - independent HTTP query parameters
         .offset(offset)
         .limit(limit)
     ).all()
-    return {'total': total, 'items': [public(r) for r in rows]}
+    codes = appeal_codes(db, config, [r.fonte for r in rows])
+    return {'total': total, 'items': [public(r, codes) for r in rows]}
 
 
 MAX_DEMONSTRATIVO_ITEMS = 2000
@@ -419,6 +410,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
         ).all()
         senhas = guide_senhas(db, {r.protocolo_id for r in rows})
         terms = glosa_terms(db, rows)
+    codes = appeal_codes(db, config, [r.fonte for r in rows])
     return {
         'total': summary[0],
         'quantidade_glosas': summary[1],
@@ -433,7 +425,9 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
             'transmissao_habilitada': config.transmission_enabled,
             'limite_anexo_bytes': config.max_attachment_bytes,
         },
-        'items': [with_guide_senha(r, senhas, accepted, terms) for r in rows],
+        'items': [
+            with_guide_senha(r, senhas, accepted, terms, codes) for r in rows
+        ],
     }
 
 
@@ -456,12 +450,14 @@ def glosa_terms(db, rows):
     )
 
 
-def with_guide_senha(row, senhas, accepted=None, terms=None):
+def with_guide_senha(  # noqa: PLR0913 - page-level lookups
+    row, senhas, accepted=None, terms=None, table_codes=frozenset()
+):
     """Public row plus the senha of its guide, when the guide has only one."""
     source = matching_source(row.fonte or {}, senhas)
     acato = (accepted or {}).get(row.id)
     return {
-        **public(row),
+        **public(row, table_codes),
         'motivos': [
             {**m, 'descricao': (terms or {}).get(str(m.get('codigo')))}
             for m in (row.fonte or {}).get('motivos') or []

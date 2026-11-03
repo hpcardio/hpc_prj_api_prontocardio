@@ -33,8 +33,10 @@ from app_prontocardio.routers import petrobras
 from app_prontocardio.services import petrobras_sync
 from app_prontocardio.services import petrobras_tiss as tiss
 from app_prontocardio.services.petrobras_appeals import (
+    appeal_codes,
     response_data,
     send_appeal,
+    table38_codes,
 )
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import reconcile
@@ -850,7 +852,7 @@ def test_batch_rejects_foreign_protocol(db, config, protocol):
 def test_unknown_denial_received_does_not_weaken_send_contract(config, source):
     source['motivos'][0]['codigo'] = '3292'
     assert '3292' not in tiss.known_denial_codes()
-    with pytest.raises(TissError, match='3292.*fora do padrão'):
+    with pytest.raises(TissError, match='3292 fora da Tabela 38'):
         PetrobrasClient(config, dry_run=True).appeal(source, 'Test', '1')
     # Build a valid outgoing structure with a known reason, then modify only
     # its denial code to exercise the independently compiled receive schema.
@@ -1617,34 +1619,94 @@ def test_send_endpoint_respects_pilot_and_exposes_block(
     assert '3253' in items['2']['bloqueio_envio']
 
 
-def test_operator_codes_flag_relaxes_only_the_denial_code(config, source):
+def test_table38_codes_relax_only_the_denial_code(config, source):
     source = {**source, 'motivos': [{'codigo': '3209', 'valor': '74.00'}]}
     assert tiss.operator_codes(source) == ['3209']
-    with pytest.raises(TissError, match='3209'):
+    with pytest.raises(TissError, match='3209 fora da Tabela 38'):
         PetrobrasClient(config, dry_run=True).appeal(source, 'J', 'R1')
-    config.appeal_operator_codes = True
-    assert tiss.appeal_block(source, True) is None
-    root = PetrobrasClient(config, dry_run=True).appeal(source, 'J', 'R1')
-    assert value(root, 'loteRecurso/guiaRecursoGlosa/numeroProtocolo') == '123'
+    assert tiss.appeal_block(source, frozenset({'3209'})) is None
+    root = PetrobrasClient(config, dry_run=True).appeal(
+        source, 'J', 'R1', frozenset({'3209'})
+    )
     assert root.find('.//{%s}codGlosaItem' % NS).text == '3209'
-    # Codes that are not four digits stay blocked even with the flag.
-    odd = {**source, 'motivos': [{'codigo': 'X1', 'valor': '1.00'}]}
-    assert 'X1' in tiss.appeal_block(odd, True)
+    # A code missing from the table stays blocked.
+    assert '3253' in tiss.appeal_block(
+        {**source, 'motivos': [{'codigo': '3253'}]}, frozenset({'3209'})
+    )
     # Any other contract violation still fails with the relaxed schema.
     with pytest.raises(TissError, match='contrato'):
         PetrobrasClient(config, dry_run=True).appeal(
-            {**source, 'tabela': 'invalid'}, 'J', 'R1'
+            {**source, 'tabela': 'invalid'}, 'J', 'R1', frozenset({'3209'})
         )
 
 
-def test_public_block_follows_operator_codes_flag(  # noqa: PLR0913 - pytest fixtures
-    db, protocol, config, source, candidate, monkeypatch
-):
-    fonte = {**source, 'motivos': [{'codigo': '3253', 'valor': '6.61'}]}
-    import_rows(db, protocol, [fonte], set(), [candidate], config)
+def table38(db):
+    today = date.today()
+    for code, start, end, fonte in [
+        ('3209', today - timedelta(days=30), None, 'Tabela 38, versão 202607'),
+        (
+            '3253',
+            today - timedelta(days=60),
+            today - timedelta(days=1),
+            'Tabela 38, versão 202607',
+        ),
+        ('3210', today + timedelta(days=5), None, 'Tabela 38, versão 202607'),
+        ('3292', today - timedelta(days=30), None, 'Outra tabela'),
+    ]:
+        db.execute(
+            insert(Tiss).values(
+                codigo_termo=code,
+                termo=f'Termo {code}',
+                dt_inicio_vigencia=start,
+                dt_fim_vigencia=end,
+                fonte=fonte,
+                pagina_pdf=0,
+            )
+        )
     db.commit()
-    row = db.scalar(select(PetrobrasGlosa))
-    monkeypatch.setattr(petrobras, 'operator_codes_allowed', lambda: False)
-    assert '3253' in petrobras.public(row)['bloqueio_envio']
-    monkeypatch.setattr(petrobras, 'operator_codes_allowed', lambda: True)
-    assert petrobras.public(row)['bloqueio_envio'] is None
+
+
+def test_table38_codes_use_vigencia_and_pilot_flag(db, config):
+    table38(db)
+    codes = {'3209', '3253', '3210', '3292', '1705'}
+    assert table38_codes(db, codes) == {'3209'}
+    assert appeal_codes(db, config, [{'motivos': [{'codigo': '3209'}]}]) == (
+        frozenset()
+    )
+    config.appeal_table_codes = True
+    assert appeal_codes(
+        db, config, [{'motivos': [{'codigo': '3209'}, {'codigo': '1705'}]}]
+    ) == {'3209'}
+
+
+def test_send_and_listing_accept_table38_reason(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate
+):
+    table38(db)
+    config.appeal_table_codes = True
+    accepted = {**source, 'motivos': [{'codigo': '3209', 'valor': '20.00'}]}
+    expired = {
+        **source,
+        'chave': 'expired-key',
+        'sequencial': '2',
+        'motivos': [{'codigo': '3253', 'valor': '6.61'}],
+    }
+    import_rows(db, protocol, [accepted, expired], set(), [candidate], config)
+    db.commit()
+    with petrobras_client(db, config) as client:
+        items = {
+            i['fonte']['sequencial']: i
+            for i in client.get('/app_glosas/petrobras/glosas').json()['items']
+        }
+    assert items['1']['bloqueio_envio'] is None
+    assert '3253' in items['2']['bloqueio_envio']
+    row = db.get(PetrobrasGlosa, items['1']['id'])
+    row.justificativa = 'Justificativa'
+    row.prazo = date.today() + timedelta(days=30)
+    row.origem_prazo = 'Regra comprovada'
+    db.commit()
+    client = Mock()
+    client.appeal.side_effect = TimeoutError()
+    with pytest.raises(TissError, match='não confirmado'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    assert client.appeal.call_args.args[3] == {'3209'}

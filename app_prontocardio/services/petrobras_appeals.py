@@ -6,8 +6,9 @@ from decimal import Decimal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
+from app_prontocardio.models import Tiss
 from app_prontocardio.petrobras_models import (
     PetrobrasAnexo,
     PetrobrasGlosa,
@@ -18,8 +19,41 @@ from app_prontocardio.services.petrobras_tiss import (
     NS,
     PetrobrasClient,
     TissError,
+    operator_codes,
     value,
 )
+
+
+def table38_codes(db, codes, today=None):
+    """Codes valid today in the ANS TISS table 38 loaded in `tiss`."""
+    if not codes:
+        return frozenset()
+    today = today or datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+    return frozenset(
+        db.scalars(
+            select(Tiss.codigo_termo).where(
+                Tiss.codigo_termo.in_(set(codes)),
+                Tiss.fonte.ilike('%tabela 38%'),
+                or_(
+                    Tiss.dt_inicio_vigencia.is_(None),
+                    Tiss.dt_inicio_vigencia <= today,
+                ),
+                or_(
+                    Tiss.dt_fim_vigencia.is_(None),
+                    Tiss.dt_fim_vigencia >= today,
+                ),
+            )
+        )
+    )
+
+
+def appeal_codes(db, config, sources):
+    """Table 38 reasons accepted for appeal, when the pilot allows them."""
+    if not config.appeal_table_codes:
+        return frozenset()
+    return table38_codes(
+        db, {c for source in sources for c in operator_codes(source or {})}
+    )
 
 
 def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR0913, PLR0915 - durable transmission state transitions
@@ -56,8 +90,9 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
         )
     source, justification = deepcopy(row.fonte), row.justificativa
     appeal_id = row.recurso_guia or uuid4().hex[:20]
+    codes = appeal_codes(db, config, [source])
     preflight = PetrobrasClient(config, dry_run=True)
-    preflight.appeal(source, justification, appeal_id)
+    preflight.appeal(source, justification, appeal_id, codes)
     for a in files:
         preflight.document(source, a)
     row.recurso_guia = appeal_id
@@ -94,7 +129,7 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
                 raise TissError('Documento sem recibo correspondente.')
             a.estado, a.protocolo = 'protocolado', receipt
             db.commit()
-        answer = client.appeal(source, justification, appeal_id)
+        answer = client.appeal(source, justification, appeal_id, codes)
         node = answer.find(
             '{%s}recebimentoRecurso/{%s}protocoloRecebimento' % (NS, NS)
         )

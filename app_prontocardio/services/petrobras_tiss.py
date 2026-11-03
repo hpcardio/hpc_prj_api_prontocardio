@@ -7,7 +7,6 @@ import base64
 import hashlib
 import hmac
 import json
-import re
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -163,8 +162,12 @@ def operator_codes(source):
     })
 
 
-def appeal_block(source, operator_codes_allowed=False):
-    """Why this source cannot be appealed through the webservice, if so."""
+def appeal_block(source, table_codes=frozenset()):
+    """Why this source cannot be appealed through the webservice, if so.
+
+    table_codes: reasons valid today in the ANS TISS table 38 that the
+    published dm_tipoGlosa still lacks.
+    """
     if source.get('divergencia_totais'):
         return (
             'Totais divergentes na fonte; revisar o demonstrativo '
@@ -172,23 +175,18 @@ def appeal_block(source, operator_codes_allowed=False):
         )
     if source.get('escopo') != 'item' or not source.get('motivos'):
         return 'Recurso automático disponível apenas para itens discriminados.'
-    unknown = operator_codes(source)
-    if unknown and not (
-        operator_codes_allowed
-        and all(re.fullmatch(r'[0-9]{4}', c) for c in unknown)
-    ):
-        # Not in the dm_tipoGlosa domain the payer publishes: the appeal XML
-        # would not match the contract.
+    unknown = [c for c in operator_codes(source) if c not in table_codes]
+    if unknown:
         return (
-            f'Motivo de glosa {", ".join(unknown)} fora do padrão '
-            'TISS publicado pela Petrobras; recurso deste item pelo portal.'
+            f'Motivo de glosa {", ".join(unknown)} fora da Tabela 38 TISS '
+            'vigente; recurso deste item pelo portal.'
         )
     return None
 
 
-def validate(root, operator_codes_allowed=False):
+def validate(root, table_codes=False):
     # The relaxed schema differs only in dm_tipoGlosa (4 numeric digits).
-    checker = receipt_schema() if operator_codes_allowed else schema()
+    checker = receipt_schema() if table_codes else schema()
     if not checker.validate(root):
         raise TissError('Mensagem incompatível com o contrato TISS 4.01.00.')
 
@@ -250,7 +248,7 @@ class PetrobrasClient:
         self.dry_run = dry_run
         self.opener = opener or build_opener(NoRedirect())
 
-    def call(self, operation, root, operator_codes_allowed=False):  # noqa: PLR0912 - validate all SOAP trust boundaries
+    def call(self, operation, root, table_codes=False):  # noqa: PLR0912 - validate all SOAP trust boundaries
         if (
             operation in {'recurso', 'documento'}
             and not self.config.transmission_enabled
@@ -262,7 +260,7 @@ class PetrobrasClient:
                 )
             )
         element(root, 'hash', text_hash(root))
-        validate(root, operator_codes_allowed)
+        validate(root, table_codes)
         if self.dry_run:
             return root
         envelope = ET.Element('{%s}Envelope' % SOAP, nsmap={'soap': SOAP})
@@ -421,9 +419,10 @@ class PetrobrasClient:
         element(body, 'numeroProtocolo', protocol)
         return self.call('status', root)
 
-    def appeal(self, source, justification, appeal_id):
-        relaxed = self.config.appeal_operator_codes
-        blocked = appeal_block(source, relaxed)
+    def appeal(
+        self, source, justification, appeal_id, table_codes=frozenset()
+    ):
+        blocked = appeal_block(source, table_codes)
         if blocked:
             raise TissError(blocked)
         root = message(self.config, 'recurso')
@@ -457,9 +456,8 @@ class PetrobrasClient:
             'dataRecurso',
             datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat(),
         )
-        return self.call(
-            'recurso', root, relaxed and bool(operator_codes(source))
-        )
+        # Remaining off-domain reasons are table 38 codes: relax that field.
+        return self.call('recurso', root, bool(operator_codes(source)))
 
     def document(self, source, attachment):
         root = message(self.config, 'documento')
