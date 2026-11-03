@@ -26,6 +26,7 @@ from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services import petrobras_oracle
 from app_prontocardio.services.petrobras_appeals import (
     appeal_codes,
+    appeal_readiness,
     poll_appeal,
     send_appeal,
 )
@@ -878,6 +879,92 @@ def send(item_id: int, body: SendInput, db: DB, config: Config, user: Writer):
         return public(send_appeal(db, config, row, body.versao, user.id))
     except (TissError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from None
+
+
+MAX_BATCH_SEND = 50
+
+
+@router.get('/glosas/prontos')
+def ready_appeals(db: DB, config: Config, user: User):
+    """Saved drafts ready to transmit, and drafts still missing something."""
+    rows = db.scalars(
+        select(PetrobrasGlosa)
+        .join(PetrobrasProtocolo)
+        .where(
+            PetrobrasProtocolo.prestador == config.prestador_cnpj,
+            PetrobrasGlosa.recurso_estado == 'rascunho',
+            func.coalesce(PetrobrasGlosa.justificativa, '') != '',
+        )
+        .order_by(PetrobrasGlosa.id)
+        .limit(500)
+    ).all()
+    codes = appeal_codes(db, config, [r.fonte for r in rows])
+    ready, pending = [], []
+    for row in rows:
+        source = row.fonte or {}
+        data = {
+            'id': row.id,
+            'versao': row.versao,
+            'protocolo': source.get('protocolo'),
+            'guia': row.guia_prestador,
+            'senha': source.get('senha'),
+            'tuss': row.tuss,
+            'descricao': source.get('descricao'),
+            'valor_glosa': row.valor_glosa,
+        }
+        issue = appeal_readiness(row, codes)
+        (pending if issue else ready).append(
+            {**data, 'pendencia': issue} if issue else data
+        )
+    return {
+        'prontos': ready,
+        'pendencias': pending,
+        'usuario_liberado': config.can_transmit(getattr(user, 'email', None)),
+        'limite': MAX_BATCH_SEND,
+    }
+
+
+class BatchItem(BaseModel):
+    id: int = Field(ge=1)
+    versao: int = Field(ge=1)
+
+
+class BatchSendInput(BaseModel):
+    itens: list[BatchItem] = Field(min_length=1, max_length=MAX_BATCH_SEND)
+    confirmar_envio: Literal[True]
+
+
+@router.post('/glosas/enviar-lote')
+def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):
+    """Each appeal is its own explicit transmission; no retry on failure."""
+    if not config.can_transmit(getattr(user, 'email', None)):
+        raise HTTPException(
+            403, 'Envio de recurso em piloto; usuário ainda não liberado.'
+        )
+    results = []
+    for entry in {i.id: i for i in body.itens}.values():
+        try:
+            row = item(db, config, entry.id, lock=True)
+            row = send_appeal(db, config, row, entry.versao, user.id)
+            results.append({
+                'id': entry.id,
+                'situacao': row.recurso_estado,
+                'protocolo': row.recurso_protocolo,
+            })
+        except (TissError, ValueError, HTTPException) as exc:
+            db.rollback()
+            current = db.get(PetrobrasGlosa, entry.id)
+            results.append({
+                'id': entry.id,
+                'situacao': current.recurso_estado if current else None,
+                'erro': exc.detail
+                if isinstance(exc, HTTPException)
+                else str(exc),
+            })
+    return {
+        'protocolados': sum(r['situacao'] == 'protocolado' for r in results),
+        'resultados': results,
+    }
 
 
 @router.post('/glosas/{item_id}/consultar-recurso')

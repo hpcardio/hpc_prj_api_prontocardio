@@ -19,6 +19,7 @@ from app_prontocardio.services.petrobras_tiss import (
     NS,
     PetrobrasClient,
     TissError,
+    appeal_block,
     operator_codes,
     value,
 )
@@ -54,6 +55,20 @@ def appeal_codes(db, config, sources):
     return table38_codes(
         db, {c for source in sources for c in operator_codes(source or {})}
     )
+
+
+def appeal_readiness(row, table_codes=frozenset(), today=None):
+    """Why a saved draft cannot be transmitted yet; None when ready."""
+    today = today or datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+    if row.recurso_estado != 'rascunho':
+        return 'Recurso já transmitido ou com envio incerto.'
+    if not row.presente_na_fonte or Decimal(row.valor_glosa or 0) <= 0:
+        return 'Glosa ausente do demonstrativo ou sem valor.'
+    if not (row.justificativa or '').strip():
+        return 'Justificativa não preenchida.'
+    if row.prazo is None or row.prazo < today or not row.origem_prazo:
+        return 'Confirme o prazo vigente e sua origem.'
+    return appeal_block(row.fonte or {}, table_codes)
 
 
 def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR0913, PLR0915 - durable transmission state transitions
@@ -149,7 +164,13 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
         event(db, row, 'protocolado', {'protocolo': protocol}, user_id)
         db.commit()
         return row
-    except Exception:
+    except Exception as exc:
+        # Safe cause for diagnosis: TissError text never carries credentials.
+        cause = (
+            str(exc)[:300]
+            if isinstance(exc, TissError)
+            else type(exc).__name__
+        )
         db.rollback()
         row = db.scalar(
             select(PetrobrasGlosa)
@@ -171,16 +192,15 @@ def send_appeal(db, config, row, version, user_id, client=None):  # noqa: PLR091
             {
                 'orientacao': (
                     'Conferir protocolo no portal antes de qualquer reenvio.'
-                )
+                ),
+                'causa': cause,
             },
             user_id,
         )
         db.commit()
         raise TissError(
-            (
-                'Envio não confirmado. Consulte o '
-                'portal; não haverá reenvio automático.'
-            )
+            'Envio não confirmado. Consulte o portal; não haverá reenvio '
+            f'automático. Motivo: {cause}'
         ) from None
 
 
