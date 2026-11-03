@@ -22,6 +22,9 @@ class PetrobrasConfig(BaseSettings):
     # Deprecated and ignored: the Oracle key is fixed to senha in
     # petrobras_match. Kept so existing environments still load.
     oracle_guia: str = 'guia_prestador'
+    # Read-only portal login: account analysis XML the webservice omits.
+    portal_login: str = ''
+    portal_password: SecretStr = SecretStr('')
 
     @property
     def identificador_prestador(self):
@@ -45,3 +48,11 @@ class PetrobrasConfig(BaseSettings):
             or not self.registro_ans.isdigit()
         ):
             raise ValueError('Registro ANS inválido.')
+
+    def require_portal(self):
+        self.require_connection()
+        if (
+            not self.portal_login
+            or not self.portal_password.get_secret_value()
+        ):
+            raise ValueError('Acesso ao portal Petrobras não configurado.')

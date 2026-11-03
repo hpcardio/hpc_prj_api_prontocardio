@@ -35,6 +35,7 @@ from app_prontocardio.services.petrobras_match import (
     provider_guide,
     reconcile,
 )
+from app_prontocardio.services.petrobras_portal_pipeline import detail_guides
 from app_prontocardio.services.petrobras_sync import (
     event,
     guide_senhas,
@@ -510,6 +511,15 @@ def discover(body: CompetenciaInput, db: DB, config: Config, user: Writer):
         return synchronize_competencia(
             db, config, body.competencia, petrobras_oracle.candidates, user.id
         )
+    except (TissError, ValueError) as exc:
+        raise HTTPException(502, str(exc)) from None
+
+
+@router.post('/portal/detalhar')
+def portal_detail(db: DB, config: Config, user: Writer):
+    """Item detail of guide-only glosas from the portal analysis XML."""
+    try:
+        return detail_guides(db, config, petrobras_oracle.candidates, user.id)
     except (TissError, ValueError) as exc:
         raise HTTPException(502, str(exc)) from None
 
