@@ -5,6 +5,7 @@ import binascii
 import hashlib
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import PurePath
 from typing import Annotated, Literal
 
@@ -120,7 +121,17 @@ def public(row):
             'recurso_resultado',
             'ultima_consulta_recurso',
         )
-    } | {'bloqueio_envio': appeal_block(row.fonte or {})}
+    } | {
+        'bloqueio_envio': appeal_block(
+            row.fonte or {}, operator_codes_allowed()
+        )
+    }
+
+
+@lru_cache(maxsize=1)
+def operator_codes_allowed():
+    # Environment is read once per process; changing it needs a restart.
+    return PetrobrasConfig().appeal_operator_codes
 
 
 @router.get('/status')

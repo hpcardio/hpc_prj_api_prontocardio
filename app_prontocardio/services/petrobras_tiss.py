@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -153,7 +154,16 @@ def known_denial_codes():
     )
 
 
-def appeal_block(source):
+def operator_codes(source):
+    """Denial codes outside the dm_tipoGlosa domain the payer publishes."""
+    return sorted({
+        str(m.get('codigo'))
+        for m in source.get('motivos') or []
+        if m.get('codigo') not in known_denial_codes()
+    })
+
+
+def appeal_block(source, operator_codes_allowed=False):
     """Why this source cannot be appealed through the webservice, if so."""
     if source.get('divergencia_totais'):
         return (
@@ -162,23 +172,24 @@ def appeal_block(source):
         )
     if source.get('escopo') != 'item' or not source.get('motivos'):
         return 'Recurso automático disponível apenas para itens discriminados.'
-    unknown = sorted({
-        m.get('codigo')
-        for m in source['motivos']
-        if m.get('codigo') not in known_denial_codes()
-    })
-    if unknown:
+    unknown = operator_codes(source)
+    if unknown and not (
+        operator_codes_allowed
+        and all(re.fullmatch(r'[0-9]{4}', c) for c in unknown)
+    ):
         # Not in the dm_tipoGlosa domain the payer publishes: the appeal XML
-        # would not match the contract. Send it through the portal instead.
+        # would not match the contract.
         return (
-            f'Motivo de glosa {", ".join(map(str, unknown))} fora do padrão '
+            f'Motivo de glosa {", ".join(unknown)} fora do padrão '
             'TISS publicado pela Petrobras; recurso deste item pelo portal.'
         )
     return None
 
 
-def validate(root):
-    if not schema().validate(root):
+def validate(root, operator_codes_allowed=False):
+    # The relaxed schema differs only in dm_tipoGlosa (4 numeric digits).
+    checker = receipt_schema() if operator_codes_allowed else schema()
+    if not checker.validate(root):
         raise TissError('Mensagem incompatível com o contrato TISS 4.01.00.')
 
 
@@ -239,7 +250,7 @@ class PetrobrasClient:
         self.dry_run = dry_run
         self.opener = opener or build_opener(NoRedirect())
 
-    def call(self, operation, root):  # noqa: PLR0912 - validate all SOAP trust boundaries
+    def call(self, operation, root, operator_codes_allowed=False):  # noqa: PLR0912 - validate all SOAP trust boundaries
         if (
             operation in {'recurso', 'documento'}
             and not self.config.transmission_enabled
@@ -251,7 +262,7 @@ class PetrobrasClient:
                 )
             )
         element(root, 'hash', text_hash(root))
-        validate(root)
+        validate(root, operator_codes_allowed)
         if self.dry_run:
             return root
         envelope = ET.Element('{%s}Envelope' % SOAP, nsmap={'soap': SOAP})
@@ -411,7 +422,8 @@ class PetrobrasClient:
         return self.call('status', root)
 
     def appeal(self, source, justification, appeal_id):
-        blocked = appeal_block(source)
+        relaxed = self.config.appeal_operator_codes
+        blocked = appeal_block(source, relaxed)
         if blocked:
             raise TissError(blocked)
         root = message(self.config, 'recurso')
@@ -445,7 +457,9 @@ class PetrobrasClient:
             'dataRecurso',
             datetime.now(ZoneInfo('America/Sao_Paulo')).date().isoformat(),
         )
-        return self.call('recurso', root)
+        return self.call(
+            'recurso', root, relaxed and bool(operator_codes(source))
+        )
 
     def document(self, source, attachment):
         root = message(self.config, 'documento')
