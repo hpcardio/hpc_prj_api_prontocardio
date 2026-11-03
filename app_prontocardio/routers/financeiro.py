@@ -8790,6 +8790,10 @@ def _sincronizar_itens_follow_up(  # noqa: PLR0912
     return total_alteracoes
 
 
+
+FOLLOW_UP_DETAIL_LIMIT = 100
+FOLLOW_UP_SUMMARY_LIMIT = 1000
+
 @router.get(
     '/conciliacao-faturamento/glosas-pendentes',
     status_code=HTTPStatus.OK,
@@ -8809,7 +8813,9 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     paciente: Annotated[str | None, Query(max_length=150)] = None,
     cd_atendimento: Annotated[int | None, Query(ge=1)] = None,
     tipo_atendimento: Annotated[str | None, Query(max_length=50)] = None,
-    limit: int = Query(default=20, ge=1, le=100),
+    # Summary pages (incluir_detalhes=false) may take up to 1000 groups: the
+    # preparation is global, so one large page avoids repeating it per page.
+    limit: int = Query(default=20, ge=1, le=FOLLOW_UP_SUMMARY_LIMIT),
     offset: int = Query(default=0, ge=0),
     conciliacao_remessa_id: Annotated[int | None, Query(ge=1)] = None,
     incluir_detalhes: bool = True,
@@ -8819,6 +8825,14 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     nr_guia: Annotated[str | None, Query(max_length=100)] = None,
     numero_lote: Annotated[str | None, Query(max_length=100)] = None,
 ):
+    if incluir_detalhes and limit > FOLLOW_UP_DETAIL_LIMIT:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                f'Com detalhes, o limite é de {FOLLOW_UP_DETAIL_LIMIT} '
+                'processos por página.'
+            ),
+        )
     if str(nr_guia or '').strip() or str(numero_lote or '').strip():
         from app_prontocardio.services.filtros_guia_lote import (
             consultar_filtrado,

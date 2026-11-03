@@ -5605,3 +5605,38 @@ def test_recebimento_posterior_permite_parcelas_ate_quitacao(  # noqa: PLR0915
         )
     assert duplicate_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
     assert 'excede o saldo em aberto' in duplicate_info.value.detail
+
+
+def test_follow_up_resumo_aceita_pagina_grande_e_detalhe_continua_limitado(
+    cliente, token_teste
+):
+    url = '/app_glosas/financeiro/conciliacao-faturamento/glosas-pendentes'
+    headers = {'Authorization': f'Bearer {token_teste}'}
+    detalhe = cliente.get(
+        url, params={'limit': 101, 'incluir_detalhes': 'true'}, headers=headers
+    )
+    assert detalhe.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert 'limite' in detalhe.json()['detail']
+    acima = cliente.get(
+        url,
+        params={
+            'limit': financeiro.FOLLOW_UP_SUMMARY_LIMIT + 1,
+            'incluir_detalhes': 'false',
+        },
+        headers=headers,
+    )
+    assert acima.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def test_follow_up_resumo_em_pagina_unica(session, usuario_teste):
+    resumo = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=financeiro.FOLLOW_UP_SUMMARY_LIMIT,
+        offset=0,
+        conciliacao_remessa_id=None,
+        incluir_detalhes=False,
+    )
+    assert resumo['limit'] == financeiro.FOLLOW_UP_SUMMARY_LIMIT
