@@ -1,6 +1,6 @@
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
 from app_prontocardio.settings import Settings
@@ -21,6 +21,19 @@ oracle_engine = create_engine(
     pool_timeout=5,
     pool_use_lifo=True,
 )
+
+# Larger Oracle fetch batch only for statements that opt in (accounts payable
+# titles); every other query keeps the driver default.
+FETCH_ROWS_OPTION = 'prontoglosa_fetch_rows'
+
+
+@event.listens_for(oracle_engine, 'before_cursor_execute')
+def configurar_lote_prontoglosa(  # noqa: PLR0913, PLR0917 - SQLAlchemy event signature
+    conn, cursor, statement, parameters, context, executemany
+):
+    if context.execution_options.get(FETCH_ROWS_OPTION) == 1000:  # noqa: PLR2004 - tested batch size
+        cursor.arraysize = 1000
+
 
 oracle_readonly_engine = create_engine(
     settings.ORACLE_READONLY_DATABASE_URL or settings.ORACLE_DATABASE_URL,

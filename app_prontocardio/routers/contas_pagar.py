@@ -353,7 +353,9 @@ def _consultar_titulos_oracle(
             rows.extend(
                 session
                 .execute(
-                    ORACLE_TITULOS_QUERY,
+                    ORACLE_TITULOS_QUERY.execution_options(
+                        prontoglosa_fetch_rows=1000
+                    ),
                     {
                         'codigos_fornecedor': codigos,
                         'referencias_sem_cadastro': referencias,
