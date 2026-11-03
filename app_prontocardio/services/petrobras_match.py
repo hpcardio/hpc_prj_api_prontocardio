@@ -65,6 +65,18 @@ ACCOUNT_FIELDS = (
     'dt_atendimento',
     'dt_alta',
 )
+# MV items of the guide, shown only as reference: the payer does not say
+# which of them was glosed.
+ITEM_FIELDS = (
+    'cd_lancamento',
+    'cd_pro_fat',
+    'cd_tuss',
+    'descricao',
+    'ds_gru_fat',
+    'data_realizacao',
+    'quantidade',
+    'valor',
+)
 
 
 def reconcile_guide(source, candidates, convenio_id):
@@ -102,6 +114,7 @@ def reconcile_guide(source, candidates, convenio_id):
         if len({norm(r.get(f)) for r in rows}) == 1
     }
     oracle['itens_mv'] = len(rows)
+    oracle['itens'] = [{f: r.get(f) for f in ITEM_FIELDS} for r in rows]
     oracle['valor_mv'] = str(
         sum(
             (Decimal(str(r['valor'])) for r in rows if r.get('valor')),
