@@ -1309,3 +1309,219 @@ def test_list_brings_glosa_reason_description(db, protocol, config, source):
             'descricao': 'COBRANÇA FORA DO PRAZO DE VALIDADE',
         }
     ]
+
+
+def payment_xml(config, guides):
+    """Payment demonstrativo: guides as (protocol, guide, senha, glosa)."""
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    demo = element(
+        element(root, 'demonstrativoRetorno'), 'demonstrativoPagamento'
+    )
+    head = element(demo, 'cabecalhoDemonstrativo')
+    element(head, 'registroANS', config.registro_ans)
+    element(head, 'numeroDemonstrativo', 'P1')
+    element(head, 'dataEmissao', '2026-09-28')
+    element(
+        element(element(demo, 'dadosContratado'), 'dadosPrestador'),
+        'codigoPrestadorNaOperadora',
+        config.identificador_prestador,
+    )
+    by_date = element(element(demo, 'pagamentos'), 'pagamentosPorData')
+    element(element(by_date, 'dadosPagamento'), 'dataPagamento', '2026-09-30')
+    summary = element(by_date, 'dadosResumo')
+    groups = {}
+    for number, guide, senha, glosa in guides:
+        if number not in groups:
+            groups[number] = element(summary, 'relacaoProtocolos')
+            element(groups[number], 'numeroProtocolo', number)
+            element(groups[number], 'numeroLote', f'L{number}')
+        lote = element(groups[number], 'guiasDoLote')
+        element(lote, 'numeroGuiaPrestador', guide)
+        element(lote, 'numeroGuiaOperadora', f'O{guide}')
+        if senha:
+            element(lote, 'senha', senha)
+        element(lote, 'tipoPagamento', '1')
+        element(lote, 'valorProcessadoGuia', '100.00')
+        element(lote, 'valorLiberadoGuia', str(Decimal(100) - Decimal(glosa)))
+        element(lote, 'valorGlosaGuia', glosa)
+    return root
+
+
+def test_payment_guides_keep_only_glosed_guides(config):
+    root = payment_xml(
+        config,
+        [
+            ('123', 'B507714', 'B507714', '81.36'),
+            ('123', 'B000001', 'B000001', '0.00'),
+            ('0', 'B000002', 'B000002', '9.00'),
+        ],
+    )
+    rows = tiss.payment_guides(root, config)
+    assert len(rows) == 1
+    row = rows[0]
+    assert {
+        k: row[k]
+        for k in (
+            'demonstrativo',
+            'data_emissao',
+            'data_pagamento',
+            'protocolo',
+            'lote',
+            'guia_prestador',
+            'guia_operadora',
+            'senha',
+            'escopo',
+            'valor_glosa',
+            'valor_processado',
+            'valor_liberado',
+            'motivos',
+        )
+    } == {
+        'demonstrativo': 'P1',
+        'data_emissao': '2026-09-28',
+        'data_pagamento': '2026-09-30',
+        'protocolo': '123',
+        'lote': 'L123',
+        'guia_prestador': 'B507714',
+        'guia_operadora': 'OB507714',
+        'senha': 'B507714',
+        'escopo': 'guia_pagamento',
+        'valor_glosa': '81.36',
+        'valor_processado': '100.00',
+        'valor_liberado': '18.64',
+        'motivos': [],
+    }
+    assert row['tuss'] is None
+    assert row['avisos'] == [tiss.GUIDE_ONLY_NOTICE]
+    assert len(row['chave']) == 64
+
+
+def test_guide_only_glosa_never_goes_to_automatic_appeal(config):
+    row = tiss.payment_guides(
+        payment_xml(config, [('123', 'B507714', 'B507714', '81.36')]),
+        config,
+    )[0]
+    with pytest.raises(TissError, match='itens discriminados'):
+        PetrobrasClient(config, dry_run=True).appeal(row, 'Justificativa', 1)
+
+
+def mv_row(**extra):
+    return {
+        'cd_convenio': 37,
+        'nm_convenio': 'PETROBRAS',
+        'cd_atendimento': 339183,
+        'cd_paciente': 7,
+        'nm_paciente': 'PACIENTE SINTETICO',
+        'cd_remessa': 19197,
+        'tp_atendimento': 'Externo',
+        'nr_guia': 'B507714',
+        'nr_carteira': '00000001',
+        'cd_pro_fat': '10101012',
+        'valor': '500.00',
+        **extra,
+    }
+
+
+def test_guide_only_match_uses_senha_and_one_mv_account():
+    source = {'escopo': 'guia_pagamento', 'senha': 'B507714'}
+    rows = [mv_row(), mv_row(cd_pro_fat='40301630', valor='29.50')]
+    match = reconcile(source, rows, 37)
+    assert match['status'] == 'conciliado'
+    assert match['oracle']['cd_atendimento'] == 339183
+    assert match['oracle']['cd_remessa'] == 19197
+    assert match['oracle']['nr_carteira'] == '00000001'
+    assert match['oracle']['itens_mv'] == 2
+    assert match['oracle']['valor_mv'] == '529.50'
+    # Item data never chosen for a guide without items.
+    assert 'cd_pro_fat' not in match['oracle']
+
+    other_account = [mv_row(), mv_row(cd_atendimento=1)]
+    assert reconcile(source, other_account, 37)['status'] == 'ambiguo'
+    assert reconcile(source, [mv_row(cd_convenio=1)], 37)['status'] == (
+        'nao_localizado'
+    )
+    assert (
+        reconcile({'escopo': 'guia_pagamento'}, rows, 37)['status']
+        == 'dados_insuficientes'
+    )
+    padded = reconcile({**source, 'senha': '00B507714'}, rows, 37)
+    assert padded['status'] == 'conciliado'
+    assert padded['divergencias'] == ['Senha conferida sem zeros à esquerda.']
+
+
+def test_discovery_imports_guides_without_analysis(
+    db, protocol, config, source, candidate
+):
+    # Guide X9999 of protocol 123 was detailed by the account analysis.
+    import_rows(db, protocol, [source], set(), [candidate], config)
+    db.commit()
+    root = payment_xml(
+        config,
+        [
+            ('123', '000X9999', 'P0123', '20.00'),
+            ('123', 'B507714', 'B507714', '81.36'),
+            ('456', 'B392968', 'B392968', '89.93'),
+        ],
+    )
+    client = Mock()
+    client.pagamentos.return_value = root
+    client.response_warnings = []
+    loaded = []
+
+    def loader(sources, _config):
+        loaded.extend(s['senha'] for s in sources)
+        return [mv_row()]
+
+    result = discover_competencia(db, config, '202609', None, client, loader)
+    assert result['protocolos_localizados'] == 2
+    assert result['glosas_por_guia'] == 2
+    assert sorted(loaded) == ['B392968', 'B507714']
+    guides = {
+        g.guia_prestador: g
+        for g in db.scalars(
+            select(PetrobrasGlosa).where(
+                PetrobrasGlosa.fonte['escopo'].as_string() == 'guia_pagamento'
+            )
+        )
+    }
+    assert set(guides) == {'B507714', 'B392968'}
+    assert guides['B507714'].cruzamento == 'conciliado'
+    assert guides['B507714'].oracle['cd_atendimento'] == 339183
+    assert guides['B392968'].cruzamento == 'nao_localizado'
+    assert Decimal(str(guides['B507714'].valor_glosa)) == Decimal('81.36')
+
+    # Rerun is idempotent and without Oracle loader nothing is imported.
+    discover_competencia(db, config, '202609', None, client, loader)
+    assert (
+        discover_competencia(db, config, '202609', None, client)[
+            'glosas_por_guia'
+        ]
+        == 0
+    )
+    assert len(list(db.scalars(select(PetrobrasGlosa)))) == 3
+
+    with petrobras_client(db, config) as api:
+        data = api.get(
+            '/app_glosas/petrobras/demonstrativos', params={'guia': 'B507714'}
+        ).json()
+    assert data['quantidade_glosas'] == 1
+    assert data['items'][0]['fonte']['escopo'] == 'guia_pagamento'
+    assert data['demonstrativos'] == ['P1']
+
+
+def test_guide_detailed_later_by_analysis_is_listed_once(
+    db, protocol, config, source, candidate
+):
+    guide = tiss.payment_guides(
+        payment_xml(config, [('123', '000X9999', 'P0123', '20.00')]), config
+    )
+    import_rows(db, protocol, guide, set(), [candidate], config)
+    db.commit()
+    with petrobras_client(db, config) as api:
+        before = api.get('/app_glosas/petrobras/demonstrativos').json()
+        assert before['quantidade_glosas'] == 1
+        import_rows(db, protocol, [source], set(), [candidate], config)
+        db.commit()
+        after = api.get('/app_glosas/petrobras/demonstrativos').json()
+    assert after['quantidade_glosas'] == 1
+    assert after['items'][0]['fonte']['escopo'] == 'item'

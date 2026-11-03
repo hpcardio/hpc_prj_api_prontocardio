@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo
 
 from lxml import etree as ET
 
+from app_prontocardio.services.petrobras_match import GUIDE_ONLY_SCOPE
+
 NS = 'http://www.ans.gov.br/padroes/tiss/schemas'
 SOAP = 'http://schemas.xmlsoap.org/soap/envelope/'
 CONTRACTS = Path(__file__).with_name('petrobras_contracts')
@@ -659,6 +661,83 @@ def payment_protocols(root, config):
             'Demonstrativo sem protocolos; dados anteriores preservados.'
         )
     return sorted(n for n in numbers if set(n) != {'0'})
+
+
+GUIDE_ONLY_NOTICE = (
+    'Operadora não detalhou itens nem motivos desta glosa; valor informado '
+    'por guia no demonstrativo de pagamento.'
+)
+
+
+def payment_guides(root, config):
+    """Glosed guides of the payment demonstrativo, without items.
+
+    The payer omits the account analysis of some lots (SADT); the payment
+    demonstrativo is then the only source of their glosa, per guide.
+    """
+    payment_protocols(root, config)  # Same operator and provider checks.
+    demo = root.find('.//{%s}demonstrativoPagamento' % NS)
+    demo_id = value(demo, 'cabecalhoDemonstrativo/numeroDemonstrativo')
+    issued = value(demo, 'cabecalhoDemonstrativo/dataEmissao')
+    rows = []
+    for protocol in demo.findall('.//{%s}relacaoProtocolos' % NS):
+        number = value(protocol, 'numeroProtocolo')
+        if set(number) == {'0'}:
+            continue
+        by_date = next(
+            protocol.iterancestors('{%s}pagamentosPorData' % NS), None
+        )
+        for guide in children(protocol, 'guiasDoLote'):
+            glosa = Decimal(value(guide, 'valorGlosaGuia') or 0)
+            if glosa <= 0:
+                continue
+            rows.append({
+                'prestador': config.prestador_cnpj,
+                'demonstrativo': demo_id,
+                'data_emissao': issued,
+                'data_pagamento': (
+                    value(by_date, 'dadosPagamento/dataPagamento')
+                    if by_date is not None
+                    else None
+                ),
+                'protocolo': number,
+                'data_protocolo': value(protocol, 'dataProtocolo'),
+                'lote': value(protocol, 'numeroLote'),
+                'guia_prestador': value(guide, 'numeroGuiaPrestador'),
+                'guia_operadora': value(guide, 'numeroGuiaOperadora'),
+                'senha': value(guide, 'senha'),
+                'tipo_pagamento': value(guide, 'tipoPagamento'),
+                'escopo': GUIDE_ONLY_SCOPE,
+                'sequencial': '',
+                'tuss': None,
+                'descricao': 'Glosa da guia (itens não detalhados)',
+                'valor_processado': value(guide, 'valorProcessadoGuia'),
+                'valor_liberado': value(guide, 'valorLiberadoGuia'),
+                'valor_glosa': str(glosa),
+                'motivos': [],
+                'cobertura': 'guia_sem_itens',
+                'avisos': [GUIDE_ONLY_NOTICE],
+            })
+    for row in rows:
+        identity = [
+            row.get(k)
+            for k in (
+                'prestador',
+                'demonstrativo',
+                'protocolo',
+                'guia_prestador',
+                'escopo',
+                'guia_operadora',
+            )
+        ]
+        row['chave'] = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=True).encode()
+        ).hexdigest()
+    if len({row['chave'] for row in rows}) != len(rows):
+        raise TissError(
+            'Guia duplicada no demonstrativo de pagamento; revisão necessária.'
+        )
+    return rows
 
 
 def validate_provider(root, path, config):
