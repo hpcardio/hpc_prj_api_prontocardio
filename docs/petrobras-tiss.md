@@ -65,6 +65,31 @@ detalhes é sinalizada como parcial; protocolos ausentes permanecem pendentes,
 e registros importados anteriormente não são removidos por ausência no retorno.
 A interface apresenta essas limitações e os avisos por registro.
 
+### Glosa por guia detalhada pelo portal (dlt)
+
+Para lotes SADT/urgência o webservice responde "Nenhuma informação" à análise
+de conta, e o demonstrativo de pagamento só traz a glosa por guia ("Glosa da
+guia (itens não detalhados)"). O portal Saúde Petrobras gera o mesmo XML TISS
+4.01 `DEMONSTRATIVO_ANALISE_CONTA` para o protocolo `<lote>L`
+(`demonstrativo/downloadXMLDemonstrativoAnaliseConta.htm`).
+
+`POST /app_glosas/petrobras/portal/detalhar` (botão "Detalhar itens pelo
+portal"), só por acionamento manual:
+
+1. Seleciona até 20 lotes com glosa por guia presente e sem itens detalhados.
+2. Faz login no portal (`PETROBRAS_PORTAL_LOGIN`/`PETROBRAS_PORTAL_PASSWORD`),
+   escolhe a operadora 44 e baixa o XML de cada lote. Redirecionamento só no
+   próprio portal por HTTPS; nada é enviado à operadora.
+3. Remove `loginSenhaPrestador` (o portal inclui a senha em texto) e grava o XML
+   via dlt em `petrobras_portal.analise_conta_lote` (merge por lote).
+4. Lê o XML gravado e importa com o mesmo `parse_demonstrativos`; o protocolo
+   retornado deve ser o do lote. Itens com glosa escondem a linha da guia ainda
+   não tratada; guias com acato/recurso permanecem.
+
+O hash do epílogo do XML do portal não confere com o cálculo TISS; a origem é
+garantida pela sessão HTTPS do portal e pelas checagens de ANS, CNPJ e
+protocolo. Recursos continuam pelo webservice `tissRecursoGlosa`.
+
 ## Cruzamento Oracle
 
 A escolha confirmada pelo usuário é `numeroGuiaPrestador` → `NR_GUIA` da
