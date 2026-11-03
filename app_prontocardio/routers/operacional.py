@@ -12,6 +12,7 @@ from app_prontocardio.database import get_session_oracle
 from app_prontocardio.models import Usuario
 from app_prontocardio.routers.agendamentos import ValidaUsuarioAtual
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.unidades import nome_unidade_publica
 
 router = APIRouter(prefix='/operacional', tags=['operacional'])
 SessionOracle = Annotated[Session, Depends(get_session_oracle)]
@@ -31,16 +32,6 @@ STATUS_ASSUNTO = {
     'reagendamento_solicitado': 'REAGENDAMENTO SOLICITADO VIA WHATSAPP',
 }
 INTERVALO_MAXIMO_CONFIRMACOES_DIAS = 31
-UNIDADES_CONFIRMACAO = {
-    '1': (
-        'Unidade Diagnóstica 01 - Endereço: Avenida Barão de Studart '
-        '- Nº 560 - Meireles'
-    ),
-    '2': (
-        'Unidade Diagnóstica 02 - Endereço: Avenida Barão de Studart '
-        '- Nº 600 - Meireles'
-    ),
-}
 
 
 class ConfirmacaoContatoInput(BaseModel):
@@ -67,18 +58,10 @@ def _validar_periodo_confirmacoes(data_inicio: date, data_fim: date) -> None:
         )
 
 
-def _nome_unidade_confirmacao(
-    codigo: object,
-    nome: str | None,
-) -> str | None:
-    codigo_normalizado = None if codigo is None else str(codigo).strip()
-    return UNIDADES_CONFIRMACAO.get(codigo_normalizado, nome)
-
-
 def montar_resposta_confirmacoes(rows):
     agendamentos = [dict(row) for row in rows]
     for agendamento in agendamentos:
-        agendamento['ds_unidade_atendimento'] = _nome_unidade_confirmacao(
+        agendamento['ds_unidade_atendimento'] = nome_unidade_publica(
             agendamento.get('cd_unidade_atendimento'),
             agendamento.get('ds_unidade_atendimento'),
         )

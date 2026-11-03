@@ -98,6 +98,7 @@ from app_prontocardio.services.agendamento_origens import (
     origem_do_principal,
 )
 from app_prontocardio.settings import Settings
+from app_prontocardio.unidades import nome_unidade_publica
 from app_prontocardio.whatsapp_service import enviar_template_whatsapp
 
 router = APIRouter(prefix='/agendamentos', tags=['agendamentos'])
@@ -2201,6 +2202,7 @@ CONSULTA_AGENDAMENTOS_PACIENTE = text(
            i.HR_AGENDA AS horario,
            ac.CD_PRESTADOR AS cd_prestador,
            p.NM_PRESTADOR AS nm_prestador,
+           ac.CD_UNIDADE_ATENDIMENTO AS cd_unidade_atendimento,
            ua.DS_UNIDADE_ATENDIMENTO AS ds_unidade_atendimento,
            im.TP_STATUS AS status,
            i.CD_TIP_MAR AS cd_tip_mar,
@@ -4049,6 +4051,24 @@ def atualizar_paciente(
     }
 
 
+def montar_resposta_agendamentos_paciente(rows) -> dict[str, object]:
+    unicos = {}
+    for row in rows:
+        registro = dict(row)
+        registro['ds_unidade_atendimento'] = nome_unidade_publica(
+            registro.pop('cd_unidade_atendimento', None),
+            registro.get('ds_unidade_atendimento'),
+        )
+        chave = registro['cd_it_agenda_central']
+        anterior = unicos.get(chave)
+        if anterior is None or (
+            registro.get('item_movimento_id') or 0
+        ) > (anterior.get('item_movimento_id') or 0):
+            unicos[chave] = registro
+    agendamentos = list(unicos.values())
+    return {'agendamentos': agendamentos, 'total': len(agendamentos)}
+
+
 @router.get(
     '/pacientes/{cd_paciente}/agendamentos',
     status_code=HTTPStatus.OK,
@@ -4075,17 +4095,7 @@ def consultar_agendamentos_paciente(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail='Nao foi possivel consultar os agendamentos no MV.',
         ) from exc
-    unicos = {}
-    for row in rows:
-        registro = dict(row)
-        chave = registro['cd_it_agenda_central']
-        anterior = unicos.get(chave)
-        if anterior is None or (
-            registro.get('item_movimento_id') or 0
-        ) > (anterior.get('item_movimento_id') or 0):
-            unicos[chave] = registro
-    agendamentos = list(unicos.values())
-    return {'agendamentos': agendamentos, 'total': len(agendamentos)}
+    return montar_resposta_agendamentos_paciente(rows)
 
 
 @router.get(
