@@ -163,7 +163,12 @@ copiar senhas para Git, fixtures ou PRs. Instalar pelo `poetry.lock` (inclui lxm
 Antes de ativar, verificar o head Alembic e aplicar a migração aditiva
 `20261029_063`, descendente de `20261027_062`, no PostgreSQL da aplicação.
 Habilitar `PETROBRAS_ENABLED=true` na API e frontend somente com tabelas/API
-disponíveis. Manter `PETROBRAS_TRANSMISSION_ENABLED=false`.
+disponíveis. A transmissão de recursos fica desligada até o piloto:
+`PETROBRAS_TRANSMISSION_ENABLED=true` com `PETROBRAS_TRANSMISSION_USERS`
+(e-mails separados por vírgula) libera o envio só para esses usuários; os
+demais recebem 403 e a tela mostra "Envio de recurso em piloto". Cada item
+expõe `bloqueio_envio` (totais divergentes, glosa sem itens ou motivo fora do
+`dm_tipoGlosa` publicado, como 3209/3253) e não é transmitido pelo webservice.
 
 Worker periódico: `python -m scripts.sync_petrobras`. Usa trava PostgreSQL,
 intervalo padrão de 360 minutos e descoberta dos últimos três meses, ajustável

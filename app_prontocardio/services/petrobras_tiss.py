@@ -153,6 +153,30 @@ def known_denial_codes():
     )
 
 
+def appeal_block(source):
+    """Why this source cannot be appealed through the webservice, if so."""
+    if source.get('divergencia_totais'):
+        return (
+            'Totais divergentes na fonte; revisar o demonstrativo '
+            'antes de transmitir recurso.'
+        )
+    if source.get('escopo') != 'item' or not source.get('motivos'):
+        return 'Recurso automático disponível apenas para itens discriminados.'
+    unknown = sorted({
+        m.get('codigo')
+        for m in source['motivos']
+        if m.get('codigo') not in known_denial_codes()
+    })
+    if unknown:
+        # Not in the dm_tipoGlosa domain the payer publishes: the appeal XML
+        # would not match the contract. Send it through the portal instead.
+        return (
+            f'Motivo de glosa {", ".join(map(str, unknown))} fora do padrão '
+            'TISS publicado pela Petrobras; recurso deste item pelo portal.'
+        )
+    return None
+
+
 def validate(root):
     if not schema().validate(root):
         raise TissError('Mensagem incompatível com o contrato TISS 4.01.00.')
@@ -387,18 +411,9 @@ class PetrobrasClient:
         return self.call('status', root)
 
     def appeal(self, source, justification, appeal_id):
-        if source.get('divergencia_totais'):
-            raise TissError(
-                'Totais divergentes na fonte; revisar o demonstrativo '
-                'antes de transmitir recurso.'
-            )
-        if source.get('escopo') != 'item' or not source.get('motivos'):
-            raise TissError(
-                (
-                    'Recurso automático disponível '
-                    'apenas para itens discriminados.'
-                )
-            )
+        blocked = appeal_block(source)
+        if blocked:
+            raise TissError(blocked)
         root = message(self.config, 'recurso')
         guide = element(element(root, 'loteRecurso'), 'guiaRecursoGlosa')
         element(guide, 'registroANS', self.config.registro_ans)

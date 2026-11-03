@@ -43,7 +43,7 @@ from app_prontocardio.services.petrobras_sync import (
     synchronize,
     synchronize_competencia,
 )
-from app_prontocardio.services.petrobras_tiss import TissError
+from app_prontocardio.services.petrobras_tiss import TissError, appeal_block
 
 router = APIRouter(prefix='/app_glosas/petrobras', tags=['Petrobras'])
 MAX_ATTACHMENTS = 20
@@ -120,7 +120,7 @@ def public(row):
             'recurso_resultado',
             'ultima_consulta_recurso',
         )
-    }
+    } | {'bloqueio_envio': appeal_block(row.fonte or {})}
 
 
 @router.get('/status')
@@ -128,6 +128,9 @@ def status(config: Config, user: User):
     return {
         'habilitado': config.enabled,
         'transmissao_habilitada': config.transmission_enabled,
+        'transmissao_usuario': config.can_transmit(
+            getattr(user, 'email', None)
+        ),
         'mapeamento_guia': GUIDE_FIELD,
         'convenio_id': config.convenio_id,
         'registro_ans': config.registro_ans,
@@ -857,7 +860,12 @@ class SendInput(BaseModel):
 
 @router.post('/glosas/{item_id}/enviar')
 def send(item_id: int, body: SendInput, db: DB, config: Config, user: Writer):
-
+    if config.transmission_enabled and not config.can_transmit(
+        getattr(user, 'email', None)
+    ):
+        raise HTTPException(
+            403, 'Envio de recurso em piloto; usuário ainda não liberado.'
+        )
     row = item(db, config, item_id, lock=True)
     try:
         return public(send_appeal(db, config, row, body.versao, user.id))

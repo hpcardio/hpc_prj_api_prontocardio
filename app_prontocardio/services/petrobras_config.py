@@ -25,6 +25,9 @@ class PetrobrasConfig(BaseSettings):
     # Read-only portal login: account analysis XML the webservice omits.
     portal_login: str = ''
     portal_password: SecretStr = SecretStr('')
+    # Pilot: comma-separated e-mails allowed to transmit appeals. Empty keeps
+    # every writer allowed once transmission is enabled.
+    transmission_users: str = ''
 
     @property
     def identificador_prestador(self):
@@ -56,3 +59,13 @@ class PetrobrasConfig(BaseSettings):
             or not self.portal_password.get_secret_value()
         ):
             raise ValueError('Acesso ao portal Petrobras não configurado.')
+
+    def can_transmit(self, email):
+        if not self.transmission_enabled:
+            return False
+        allowed = {
+            e.strip().lower()
+            for e in self.transmission_users.split(',')
+            if e.strip()
+        }
+        return not allowed or (email or '').strip().lower() in allowed
