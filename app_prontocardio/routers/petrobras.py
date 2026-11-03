@@ -31,6 +31,7 @@ from app_prontocardio.services.petrobras_appeals import (
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import (
     GUIDE_FIELD,
+    GUIDE_ONLY_SCOPE,
     provider_guide,
     reconcile,
 )
@@ -231,6 +232,33 @@ def treated(valor_glosa, recurso_estado, acato):
     return min(glosa, Decimal(str((acato or {}).get('valor') or 0)))
 
 
+def untouched():
+    """No acato, appeal, justification, deadline or attachment."""
+    return and_(
+        ~acato_ativo(),
+        PetrobrasGlosa.recurso_estado == 'rascunho',
+        func.coalesce(PetrobrasGlosa.justificativa, '') == '',
+        PetrobrasGlosa.prazo.is_(None),
+        ~exists().where(PetrobrasAnexo.glosa_id == PetrobrasGlosa.id),
+    )
+
+
+def detailed_by_analysis():
+    """Untouched payment guide whose items an analysis already detailed."""
+    detailed = aliased(PetrobrasGlosa)
+    return and_(
+        PetrobrasGlosa.fonte['escopo'].as_string() == GUIDE_ONLY_SCOPE,
+        untouched(),
+        exists().where(
+            detailed.protocolo_id == PetrobrasGlosa.protocolo_id,
+            detailed.presente_na_fonte.is_(True),
+            detailed.fonte['escopo'].as_string() != GUIDE_ONLY_SCOPE,
+            func.ltrim(detailed.guia_prestador, '0')
+            == func.ltrim(PetrobrasGlosa.guia_prestador, '0'),
+        ),
+    )
+
+
 def superseded_by_reissue():
     """Untouched item also returned by a more recent demonstrativo.
 
@@ -259,14 +287,7 @@ def superseded_by_reissue():
             and_(newer_emitted == emitted, newer.id > PetrobrasGlosa.id),
         ),
     )
-    untouched = and_(
-        ~acato_ativo(),
-        PetrobrasGlosa.recurso_estado == 'rascunho',
-        func.coalesce(PetrobrasGlosa.justificativa, '') == '',
-        PetrobrasGlosa.prazo.is_(None),
-        ~exists().where(PetrobrasAnexo.glosa_id == PetrobrasGlosa.id),
-    )
-    return and_(untouched, reissued)
+    return and_(untouched(), reissued)
 
 
 @router.get('/demonstrativos')
@@ -291,6 +312,7 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
         PetrobrasProtocolo.prestador == config.prestador_cnpj,
         PetrobrasGlosa.presente_na_fonte.is_(True),
         ~superseded_by_reissue(),
+        ~detailed_by_analysis(),
     ]
     if protocolo.strip():
         filters.append(PetrobrasProtocolo.numero == protocolo.strip())

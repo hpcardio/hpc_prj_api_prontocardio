@@ -51,7 +51,72 @@ def _refine(rows, source):
     return rows
 
 
+GUIDE_ONLY_SCOPE = 'guia_pagamento'
+ACCOUNT_FIELDS = (
+    'cd_convenio',
+    'nm_convenio',
+    'cd_atendimento',
+    'cd_paciente',
+    'nm_paciente',
+    'cd_remessa',
+    'tp_atendimento',
+    'nr_guia',
+    'nr_carteira',
+    'dt_atendimento',
+    'dt_alta',
+)
+
+
+def reconcile_guide(source, candidates, convenio_id):
+    """Guide without items: senha = NR_GUIA identifies the MV account.
+
+    No item is chosen; only the account data shared by every MV row of the
+    guide is kept, and a senha in more than one account is never linked.
+    """
+    guia = provider_guide(source.get(GUIDE_FIELD))
+    if not guia:
+        return _result(
+            'dados_insuficientes',
+            divergencias=['Vínculo da guia exige a senha.'],
+        )
+    rows = [
+        r
+        for r in candidates
+        if r.get('cd_convenio') == convenio_id
+        and provider_guide(r.get('nr_guia')) == guia
+    ]
+    accounts = {r.get('cd_atendimento') for r in rows}
+    if len(accounts) != 1:
+        return _result(
+            'ambiguo' if rows else 'nao_localizado',
+            count=len(accounts),
+            divergencias=(
+                ['Senha encontrada em mais de um atendimento do MV.']
+                if rows
+                else []
+            ),
+        )
+    oracle = {
+        f: rows[0].get(f)
+        for f in ACCOUNT_FIELDS
+        if len({norm(r.get(f)) for r in rows}) == 1
+    }
+    oracle['itens_mv'] = len(rows)
+    oracle['valor_mv'] = str(
+        sum(
+            (Decimal(str(r['valor'])) for r in rows if r.get('valor')),
+            Decimal(0),
+        )
+    )
+    diffs = []
+    if norm(source.get(GUIDE_FIELD)) != norm(rows[0].get('nr_guia')):
+        diffs.append('Senha conferida sem zeros à esquerda.')
+    return _result('conciliado', oracle, len(rows), diffs)
+
+
 def reconcile(source, candidates, convenio_id):  # noqa: PLR0911 - explicit conservative matching decisions
+    if source.get('escopo') == GUIDE_ONLY_SCOPE:
+        return reconcile_guide(source, candidates, convenio_id)
     guia = provider_guide(source.get(GUIDE_FIELD))
     procedure = norm(source.get('tuss'))
     wallet = norm(source.get('carteira'))

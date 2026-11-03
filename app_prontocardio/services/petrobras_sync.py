@@ -12,11 +12,16 @@ from app_prontocardio.petrobras_models import (
     PetrobrasProtocolo,
     utcnow,
 )
-from app_prontocardio.services.petrobras_match import reconcile
+from app_prontocardio.services.petrobras_match import (
+    GUIDE_ONLY_SCOPE,
+    provider_guide,
+    reconcile,
+)
 from app_prontocardio.services.petrobras_tiss import (
     PetrobrasClient,
     TissError,
     parse_demonstrativos,
+    payment_guides,
     payment_protocols,
 )
 
@@ -299,7 +304,7 @@ def synchronize_competencia(  # noqa: PLR0913 - injected sources and audit conte
 ):
     transport = client or PetrobrasClient(config)
     result = discover_competencia(
-        session, config, competencia, user_id, transport
+        session, config, competencia, user_id, transport, oracle_loader
     )
     numbers = result.pop('numeros_protocolos')
     if not numbers:
@@ -347,10 +352,19 @@ def synchronize_competencia(  # noqa: PLR0913 - injected sources and audit conte
     }
 
 
-def discover_competencia(
-    session, config, competencia, user_id=None, client=None
+def discover_competencia(  # noqa: PLR0913 - injected sources and audit context
+    session,
+    config,
+    competencia,
+    user_id=None,
+    client=None,
+    oracle_loader=None,
 ):
-    """Discover payer protocols at Petrobras, never from Oracle."""
+    """Discover payer protocols at Petrobras, never from Oracle.
+
+    With an Oracle loader, glosed guides of the payment demonstrativo whose
+    items the payer never detailed are imported per guide.
+    """
     config.require_connection()
     run = PetrobrasExecucao(usuario_id=user_id, competencia=competencia)
     session.add(run)
@@ -376,6 +390,13 @@ def discover_competencia(
                         prestador=config.prestador_cnpj, numero=number
                     )
                 )
+        guides = 0
+        if oracle_loader is not None:
+            session.flush()
+            guides, guide_warnings = import_payment_guides(
+                session, config, response, oracle_loader, user_id
+            )
+            warnings = [*warnings, *guide_warnings]
         run.erro = '; '.join(warnings)[:200] or None
         run.situacao, run.quantidade, run.fim = (
             'concluida',
@@ -385,6 +406,7 @@ def discover_competencia(
         session.commit()
         return {
             'protocolos_localizados': len(numbers),
+            'glosas_por_guia': guides,
             'numeros_protocolos': numbers,
             'avisos': warnings,
             'competencia': competencia,
@@ -404,3 +426,68 @@ def discover_competencia(
         )
         session.commit()
         raise TissError(run.erro) from None
+
+
+def import_payment_guides(session, config, response, oracle_loader, user_id):
+    """Guide-level glosas of lots whose account analysis the payer omits.
+
+    A guide already detailed by an analysis of the same protocol is skipped.
+    """
+    try:
+        rows = payment_guides(response, config)
+    except TissError as exc:
+        return 0, [str(exc)]
+    protocols = {
+        p.numero: p
+        for p in session.scalars(
+            select(PetrobrasProtocolo).where(
+                PetrobrasProtocolo.prestador == config.prestador_cnpj,
+                PetrobrasProtocolo.numero.in_({r['protocolo'] for r in rows}),
+            )
+        )
+    }
+    detailed = {
+        (numero, provider_guide(guia))
+        for numero, guia in session.execute(
+            select(PetrobrasProtocolo.numero, PetrobrasGlosa.guia_prestador)
+            .join(PetrobrasProtocolo)
+            .where(
+                PetrobrasProtocolo.id.in_([p.id for p in protocols.values()]),
+                PetrobrasGlosa.fonte['escopo'].as_string() != GUIDE_ONLY_SCOPE,
+            )
+        )
+    }
+    rows = [
+        r
+        for r in rows
+        if r['protocolo'] in protocols
+        and (r['protocolo'], provider_guide(r['guia_prestador']))
+        not in detailed
+    ]
+    if not rows:
+        return 0, []
+    senhas = guide_senhas(session, [p.id for p in protocols.values()], rows)
+    warnings, oracle_error = [], None
+    try:
+        oracle_rows = oracle_loader(
+            [matching_source(r, senhas) for r in rows], config
+        )
+    except (SQLAlchemyError, ValueError):
+        oracle_rows = []
+        oracle_error = 'Oracle indisponível; último cruzamento preservado.'
+        warnings.append(oracle_error)
+    count = sum(
+        import_rows(
+            session,
+            protocols[numero],
+            rows,
+            set(),
+            oracle_rows,
+            config,
+            user_id,
+            oracle_error,
+            senhas,
+        )
+        for numero in sorted({r['protocolo'] for r in rows})
+    )
+    return count, warnings
