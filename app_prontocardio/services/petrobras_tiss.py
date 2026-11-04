@@ -569,7 +569,10 @@ class PetrobrasClient:
             ('guia_operadora', 'numeroGuiaOperadora'),
         ]:
             if source.get(key):
-                element(body, tag, source[key])
+                text = source[key]
+                if key == 'guia_prestador':
+                    text = original_guide(text)
+                element(body, tag, text)
         element(body, 'numeroDocumento', str(attachment.id))
         element(body, 'naturezaGuia', attachment.natureza_guia)
         element(body, 'formatoDocumento', attachment.formato)
