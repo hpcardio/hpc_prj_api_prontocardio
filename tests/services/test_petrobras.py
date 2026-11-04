@@ -331,18 +331,19 @@ def test_wire_contracts_and_no_real_transmission(config, source):
     validate(consulta)
     validate(client.status('123'))
     validate(client.appeal(source, 'Justificativa sintética', 'R001'))
-    validate(
-        client.document(
-            source,
-            SimpleNamespace(
-                id=1,
-                natureza_guia='2',
-                formato='02',
-                conteudo=b'%PDF-test',
-                tipo_documento='02',
-            ),
-        )
+    document = client.document(
+        source,
+        SimpleNamespace(
+            id=1,
+            natureza_guia='2',
+            formato='02',
+            conteudo=b'%PDF-test',
+            tipo_documento='02',
+        ),
     )
+    validate(document)
+    # The document cites the guide as sent, not the operator's padding.
+    assert value(document, 'envioDOcumento/numeroGuiaPrestador') == 'X9999'
     with pytest.raises(TissError):
         client.appeal(source, 'x' * 501, 'R002')
 
