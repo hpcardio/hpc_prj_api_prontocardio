@@ -2,6 +2,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from functools import wraps
 from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -77,6 +78,7 @@ from app_prontocardio.schema import (
     RemessasFaturamentoList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services import followup_cache
 from app_prontocardio.services.importacao_glosas_ipm import (
     indexar_itens_oracle,
     resolver_correspondencia_item_oracle,
@@ -8794,11 +8796,6 @@ def _sincronizar_itens_follow_up(  # noqa: PLR0912
 FOLLOW_UP_DETAIL_LIMIT = 100
 FOLLOW_UP_SUMMARY_LIMIT = 1000
 
-@router.get(
-    '/conciliacao-faturamento/glosas-pendentes',
-    status_code=HTTPStatus.OK,
-    response_model=FollowUpGlosasList,
-)
 def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
@@ -9679,6 +9676,29 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         'limit': limit,
         'offset': offset,
     }
+
+
+@router.get(
+    '/conciliacao-faturamento/glosas-pendentes',
+    status_code=HTTPStatus.OK,
+    response_model=FollowUpGlosasList,
+)
+@wraps(consultar_follow_up_glosas)
+def listar_follow_up_glosas(**params):
+    """Listing pages come from the generation cache; details stay live."""
+    if params.get('incluir_detalhes', True):
+        return consultar_follow_up_glosas(**params)
+
+    def carregar(session, session_oracle):
+        resultado = consultar_follow_up_glosas(
+            **{**params, 'session': session, 'session_oracle': session_oracle}
+        )
+        # Plain JSON data: nothing bound to a database session.
+        return FollowUpGlosasList.model_validate(resultado).model_dump(
+            mode='json'
+        )
+
+    return followup_cache.cached(params, carregar)
 
 
 def _chave_processo_recurso(numero_processo: str | None) -> str:
