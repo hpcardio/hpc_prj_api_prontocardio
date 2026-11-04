@@ -2002,10 +2002,10 @@ def test_protocol_appeal_groups_guides_and_items(config, source):
     assert len(guide.findall('.//{%s}guiaRecursoGlosa' % NS)) == 0
     origins = guide.findall('{%s}opcaoRecurso/{%s}recursoGuia' % (NS, NS))
     assert [value(o, 'senha') for o in origins] == ['P0123', 'P0123']
-    # Operator pads the provider guide; the appeal cites the original.
+    # The guide as the operator returned it (padded), not the unpadded one.
     assert [value(o, 'numeroGuiaOrigem') for o in origins] == [
-        'X9999',
-        'X8888',
+        '000000000000000X9999',
+        '000000000000000X8888',
     ]
     assert len(origins[0].findall('.//{%s}itensGuia' % NS)) == 2
     assert value(guide, 'valorTotalRecursado') == '45.00'
