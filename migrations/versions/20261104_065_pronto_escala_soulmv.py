@@ -1,16 +1,16 @@
 """pronto escala: sincronizacao idempotente com agendas do SoulMV
 
-Revision ID: 20261029_063
-Revises: 20261027_062
-Create Date: 2026-10-29 10:00:00.000000
+Revision ID: 20261104_065
+Revises: 20261104_064
+Create Date: 2026-11-04 10:05:00.000000
 """
 
 from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = '20261029_063'
-down_revision: Union[str, Sequence[str], None] = '20261027_062'
+revision: str = '20261104_065'
+down_revision: Union[str, Sequence[str], None] = '20261104_064'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 SCHEMA = 'api_prontocardio'

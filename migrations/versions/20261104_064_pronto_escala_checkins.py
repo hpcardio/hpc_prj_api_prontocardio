@@ -1,8 +1,8 @@
 """pronto escala: plantoes, registros, justificativas e auditoria
 
-Revision ID: 20261027_062
-Revises: 20261026_061
-Create Date: 2026-10-27 10:00:00.000000
+Revision ID: 20261104_064
+Revises: 20261029_063
+Create Date: 2026-11-04 10:00:00.000000
 """
 
 from typing import Sequence, Union
@@ -10,8 +10,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '20261027_062'
-down_revision: Union[str, Sequence[str], None] = '20261026_061'
+revision: str = '20261104_064'
+down_revision: Union[str, Sequence[str], None] = '20261029_063'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 SCHEMA = 'api_prontocardio'
