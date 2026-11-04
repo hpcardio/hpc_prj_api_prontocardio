@@ -62,6 +62,32 @@ class TissError(ValueError):
     """Safe message only; never include an HTTP body or credentials."""
 
 
+class TissRejected(TissError):
+    """Operator answered with a SOAP fault: the message was not accepted."""
+
+
+FAULT_TEXT_LIMIT = 200
+FAULT_PARTS = {'faultcode', 'faultstring', 'detail', 'Code', 'Reason', 'Text'}
+
+
+def fault_text(fault, secrets):
+    """Operator fault reason, flattened, without our credentials."""
+    parts = []
+    for node in fault.iter():
+        if (
+            isinstance(node.tag, str)
+            and node.tag.split('}')[-1] in FAULT_PARTS
+        ):
+            text = ' '.join(''.join(node.itertext()).split())
+            if text and text not in parts:
+                parts.append(text)
+    text = ' | '.join(parts)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, '***')
+    return ''.join(c for c in text if c.isprintable())[:FAULT_TEXT_LIMIT]
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: PLR0913 - urllib override signature
         raise TissError('Redirecionamento do serviço recusado.')
@@ -285,26 +311,39 @@ class PetrobrasClient:
             ) as response:
                 raw = response.read(MAX_RESPONSE + 1)
         except HTTPError as exc:
-            # SOAP faults can use HTTP 500. Expose only known safe fault codes.
+            # SOAP faults use HTTP 500: the operator refused the message.
             try:
                 fault = parse_xml(exc.read(32768))
-                code = next(
-                    (
-                        n.text
-                        for n in fault.iter()
-                        if n.tag.split('}')[-1] == 'faultstring'
-                    ),
-                    '',
+                names = {
+                    n.tag.split('}')[-1]: n
+                    for n in fault.iter()
+                    if isinstance(n.tag, str)
+                }
+                faults = (
+                    [names.get('Fault', fault)]
+                    if {'Fault', 'faultstring'} & names.keys()
+                    else []
                 )
             except TissError:
-                code = ''
-            if code in {
-                'DESTINATARIO_INVALIDO',
-                'LOGIN_INVALIDO',
-                'SENHA_INVALIDA',
-                'HASH_INVALIDO',
-            }:
-                raise TissError('Petrobras: ' + code) from None
+                faults = []
+            if faults:
+                login = self.config.login.get_secret_value()
+                password = self.config.password.get_secret_value()
+                reason = fault_text(
+                    faults[0],
+                    [
+                        login,
+                        password,
+                        hashlib.md5(
+                            password.encode('iso-8859-1'),
+                            usedforsecurity=False,
+                        ).hexdigest(),
+                    ],
+                )
+                raise TissRejected(
+                    f'Petrobras recusou a mensagem (HTTP {exc.code}): '
+                    f'{reason or "sem motivo informado"}.'
+                ) from None
             raise TissError(
                 (
                     f'Serviço Petrobras retornou HTTP '

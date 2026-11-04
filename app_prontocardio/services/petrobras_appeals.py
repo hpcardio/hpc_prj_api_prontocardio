@@ -19,10 +19,13 @@ from app_prontocardio.services.petrobras_tiss import (
     NS,
     PetrobrasClient,
     TissError,
+    TissRejected,
     appeal_block,
     operator_codes,
     value,
 )
+
+APPEAL_ID_DIGITS = 20  # numeroGuiaRecGlosaPrestador: st_texto20.
 
 
 def table38_codes(db, codes, today=None):
@@ -130,8 +133,10 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
         )
     entries = [(deepcopy(r.fonte), r.justificativa) for r in rows]
     protocolo = entries[0][0].get('protocolo')
+    # Numeric guide number: operator systems may not accept letters here.
     appeal_id = next(
-        (r.recurso_guia for r in rows if r.recurso_guia), uuid4().hex[:20]
+        (r.recurso_guia for r in rows if (r.recurso_guia or '').isdigit()),
+        str(uuid4().int % 10**APPEAL_ID_DIGITS).zfill(APPEAL_ID_DIGITS),
     )
     codes = appeal_codes(db, config, [s for s, _ in entries])
     preflight = PetrobrasClient(config, dry_run=True)
@@ -212,6 +217,12 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
                 .with_for_update()
             )
         )
+        if isinstance(exc, TissRejected):
+            rejected(db, rows, ids, cause, appeal_id, user_id)
+            raise TissError(
+                f'Recurso não aceito pela Petrobras. Motivo: {cause} '
+                'Corrija e transmita novamente.'
+            ) from None
         for row in rows:
             row.recurso_estado = 'envio_incerto'
             event(
@@ -240,6 +251,27 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
             'Envio não confirmado. Consulte o portal; não haverá reenvio '
             f'automático. Motivo: {cause}'
         ) from None
+
+
+def rejected(db, rows, ids, cause, appeal_id, user_id):  # noqa: PLR0913, PLR0917 - audit context
+    """SOAP fault: the operator refused it, so the draft can be fixed."""
+    for row in rows:
+        row.recurso_estado, row.recurso_guia = 'rascunho', None
+        event(
+            db,
+            row,
+            'recusado_operadora',
+            {'causa': cause, 'guia_recurso': appeal_id},
+            user_id,
+        )
+    for a in db.scalars(
+        select(PetrobrasAnexo).where(
+            PetrobrasAnexo.glosa_id.in_(ids),
+            PetrobrasAnexo.estado == 'transmitindo',
+        )
+    ):
+        a.estado = 'rascunho'
+    db.commit()
 
 
 def poll_appeal(db, config, row, user_id=None, client=None):
