@@ -1910,6 +1910,23 @@ def test_refused_appeal_returns_to_draft(
     assert client.appeal_protocol.call_count == 2
 
 
+def test_business_refusal_is_a_rejection(config):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    error = element(root, 'mensagemErro')
+    element(error, 'codigoGlosa', '1307')
+    element(error, 'descricaoGlosa', 'Guia não encontrada')
+    envelope = ET.Element(
+        '{http://schemas.xmlsoap.org/soap/envelope/}Envelope'
+    )
+    ET.SubElement(
+        envelope, '{http://schemas.xmlsoap.org/soap/envelope/}Body'
+    ).append(root)
+    opener = Mock()
+    opener.open.return_value = BytesIO(ET.tostring(envelope))
+    with pytest.raises(TissRejected, match='Guia não encontrada'):
+        PetrobrasClient(config, opener).demonstrativos(['123'])
+
+
 def test_protocol_appeal_groups_guides_and_items(config, source):
     second_item = {
         **source,
@@ -1929,9 +1946,10 @@ def test_protocol_appeal_groups_guides_and_items(config, source):
     guide = root.find('.//{%s}guiaRecursoGlosa' % NS)
     assert len(guide.findall('.//{%s}guiaRecursoGlosa' % NS)) == 0
     origins = guide.findall('{%s}opcaoRecurso/{%s}recursoGuia' % (NS, NS))
+    # Operator pads the provider guide; the appeal cites the original.
     assert [value(o, 'numeroGuiaOrigem') for o in origins] == [
-        '000000000000000X9999',
-        '000000000000000X8888',
+        'X9999',
+        'X8888',
     ]
     assert len(origins[0].findall('.//{%s}itensGuia' % NS)) == 2
     assert value(guide, 'valorTotalRecursado') == '45.00'
