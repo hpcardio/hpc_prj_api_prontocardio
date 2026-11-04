@@ -143,7 +143,7 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
     preflight.appeal_protocol(entries, appeal_id, codes)
     for row, (source, _) in zip(rows, entries):
         for a in files[row.id]:
-            preflight.document(source, a)
+            preflight.document(source, a, (appeal_id, '0'))
     ids = [row.id for row in rows]
     for row, (source, justification) in zip(rows, entries):
         row.recurso_guia = appeal_id
@@ -164,25 +164,6 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
     db.commit()  # before network: a crash cannot trigger a blind resend
     client = client or PetrobrasClient(config)
     try:
-        for row, (source, _) in zip(rows, entries):
-            for a in files[row.id]:
-                if a.estado == 'protocolado':
-                    continue
-                a.estado = 'transmitindo'
-                db.commit()
-                answer = client.document(source, a)
-                receipt = value(
-                    answer,
-                    'recebimentoDocumento/reciboDocumentos/protocoloDoc',
-                )
-                doc_id = value(
-                    answer,
-                    'recebimentoDocumento/reciboDocumentos/numeroDocumento',
-                )
-                if not receipt or doc_id != str(a.id):
-                    raise TissError('Documento sem recibo correspondente.')
-                a.estado, a.protocolo = 'protocolado', receipt
-                db.commit()
         answer = client.appeal_protocol(entries, appeal_id, codes)
         node = answer.find(
             '{%s}recebimentoRecurso/{%s}protocoloRecebimento' % (NS, NS)
@@ -200,57 +181,103 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
             row.recurso_estado, row.recurso_protocolo = 'protocolado', protocol
             event(db, row, 'protocolado', {'protocolo': protocol}, user_id)
         db.commit()
-        return rows
     except Exception as exc:
-        # Safe cause for diagnosis: TissError text never carries credentials.
+        failed(db, exc, ids, appeal_id, user_id)
+    # Proofs cite the appeal received above; a failure never undoes it.
+    for row, (source, _) in zip(rows, entries):
+        for a in files[row.id]:
+            if a.estado != 'protocolado':
+                send_document(db, client, row, source, a, user_id)
+    return rows
+
+
+def send_document(db, client, row, source, attachment, user_id):  # noqa: PLR0913, PLR0917 - audit context
+    """Send one proof of a protocolled appeal; record, never raise."""
+    attachment.estado = 'transmitindo'
+    db.commit()
+    try:
+        answer = client.document(
+            source, attachment, (row.recurso_guia, row.recurso_protocolo)
+        )
+        receipt = value(
+            answer, 'recebimentoDocumento/reciboDocumentos/protocoloDoc'
+        )
+        doc_id = value(
+            answer, 'recebimentoDocumento/reciboDocumentos/numeroDocumento'
+        )
+        if not receipt or doc_id != str(attachment.id):
+            raise TissError('Documento sem recibo correspondente.')
+    except Exception as exc:  # noqa: BLE001 - recorded on the attachment
+        db.rollback()
         cause = (
             str(exc)[:300]
             if isinstance(exc, TissError)
             else type(exc).__name__
         )
-        db.rollback()
-        rows = list(
-            db.scalars(
-                select(PetrobrasGlosa)
-                .where(PetrobrasGlosa.id.in_(ids))
-                .order_by(PetrobrasGlosa.id)
-                .with_for_update()
-            )
+        attachment.estado = (
+            'rascunho' if isinstance(exc, TissRejected) else 'envio_incerto'
         )
-        if isinstance(exc, TissRejected):
-            rejected(db, rows, ids, cause, appeal_id, user_id)
-            raise TissError(
-                f'Recurso não aceito pela Petrobras. Motivo: {cause} '
-                'Corrija e transmita novamente.'
-            ) from None
-        for row in rows:
-            row.recurso_estado = 'envio_incerto'
-            event(
-                db,
-                row,
-                'envio_incerto',
-                {
-                    'orientacao': (
-                        'Conferir protocolo no portal antes de qualquer '
-                        'reenvio.'
-                    ),
-                    'causa': cause,
-                    'guia_recurso': appeal_id,
-                },
-                user_id,
-            )
-        for a in db.scalars(
-            select(PetrobrasAnexo).where(
-                PetrobrasAnexo.glosa_id.in_(ids),
-                PetrobrasAnexo.estado == 'transmitindo',
-            )
-        ):
-            a.estado = 'envio_incerto'
+        event(
+            db,
+            row,
+            'documento_nao_enviado',
+            {'anexo_id': attachment.id, 'causa': cause},
+            user_id,
+        )
         db.commit()
+        return
+    attachment.estado, attachment.protocolo = 'protocolado', receipt
+    event(
+        db,
+        row,
+        'documento_protocolado',
+        {'anexo_id': attachment.id, 'protocolo': receipt},
+        user_id,
+    )
+    db.commit()
+
+
+def failed(db, exc, ids, appeal_id, user_id):
+    """Appeal not confirmed: refused back to draft, otherwise uncertain."""
+    # Safe cause for diagnosis: TissError text never carries credentials.
+    cause = (
+        str(exc)[:300] if isinstance(exc, TissError) else type(exc).__name__
+    )
+    db.rollback()
+    rows = list(
+        db.scalars(
+            select(PetrobrasGlosa)
+            .where(PetrobrasGlosa.id.in_(ids))
+            .order_by(PetrobrasGlosa.id)
+            .with_for_update()
+        )
+    )
+    if isinstance(exc, TissRejected):
+        rejected(db, rows, ids, cause, appeal_id, user_id)
         raise TissError(
-            'Envio não confirmado. Consulte o portal; não haverá reenvio '
-            f'automático. Motivo: {cause}'
+            f'Recurso não aceito pela Petrobras. Motivo: {cause} '
+            'Corrija e transmita novamente.'
         ) from None
+    for row in rows:
+        row.recurso_estado = 'envio_incerto'
+        event(
+            db,
+            row,
+            'envio_incerto',
+            {
+                'orientacao': (
+                    'Conferir protocolo no portal antes de qualquer reenvio.'
+                ),
+                'causa': cause,
+                'guia_recurso': appeal_id,
+            },
+            user_id,
+        )
+    db.commit()
+    raise TissError(
+        'Envio não confirmado. Consulte o portal; não haverá reenvio '
+        f'automático. Motivo: {cause}'
+    ) from None
 
 
 def rejected(db, rows, ids, cause, appeal_id, user_id):  # noqa: PLR0913, PLR0917 - audit context
