@@ -191,15 +191,6 @@ def operator_codes(source):
     })
 
 
-def original_guide(number):
-    """Guide number as the provider sent it.
-
-    The operator left-pads it with zeros to 20 positions in its answers
-    (0000000000000A007176 for A007176); the appeal must cite the original.
-    """
-    return str(number).lstrip('0') or '0'
-
-
 def appeal_block(source, table_codes=frozenset()):
     """Why this source cannot be appealed through the webservice, if so.
 
@@ -534,7 +525,9 @@ class PetrobrasClient:
         option = element(guide, 'opcaoRecurso')
         for (origin_guide, operator_guide, senha), items in guides.items():
             origin = element(option, 'recursoGuia')
-            element(origin, 'numeroGuiaOrigem', original_guide(origin_guide))
+            # As the operator stores it (left-padded to 20, as the portal
+            # shows); the unpadded number fails with ORA-01403 there.
+            element(origin, 'numeroGuiaOrigem', origin_guide)
             if operator_guide:
                 element(origin, 'numeroGuiaOperadora', operator_guide)
             # Authorization of the original guide, as the operator returned.
