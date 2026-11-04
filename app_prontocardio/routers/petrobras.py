@@ -974,6 +974,17 @@ def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):  # n
                 'situacao': 'protocolado',
                 'protocolo': rows[0].recurso_protocolo,
             }
+            pending = db.scalar(
+                select(func.count(PetrobrasAnexo.id)).where(
+                    PetrobrasAnexo.glosa_id.in_(ids),
+                    PetrobrasAnexo.estado != 'protocolado',
+                )
+            )
+            if pending:
+                outcome['aviso'] = (
+                    f'Recurso protocolado; {pending} comprovante(s) não '
+                    'enviado(s). Veja o histórico do item.'
+                )
         except (TissError, ValueError) as exc:
             db.rollback()
             current = db.get(PetrobrasGlosa, ids[0])

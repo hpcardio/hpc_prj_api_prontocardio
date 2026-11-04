@@ -24,6 +24,7 @@ from sqlalchemy.pool import StaticPool
 
 from app_prontocardio.models import Tiss, table_registry
 from app_prontocardio.petrobras_models import (
+    PetrobrasAnexo,
     PetrobrasEvento,
     PetrobrasExecucao,
     PetrobrasGlosa,
@@ -340,10 +341,15 @@ def test_wire_contracts_and_no_real_transmission(config, source):
             conteudo=b'%PDF-test',
             tipo_documento='02',
         ),
+        ('12345678901234567890', 'RG1'),
     )
     validate(document)
-    # The document cites the guide as sent, not the operator's padding.
-    assert value(document, 'envioDOcumento/numeroGuiaPrestador') == 'X9999'
+    # Proof of the appeal: cites the appeal guide/protocol, nature 3.
+    assert value(document, 'envioDOcumento/numeroGuiaPrestador') == (
+        '12345678901234567890'
+    )
+    assert value(document, 'envioDOcumento/numeroProtocolo') == 'RG1'
+    assert value(document, 'envioDOcumento/naturezaGuia') == '3'
     with pytest.raises(TissError):
         client.appeal(source, 'x' * 501, 'R002')
 
@@ -1926,6 +1932,54 @@ def test_business_refusal_is_a_rejection(config):
     opener.open.return_value = BytesIO(ET.tostring(envelope))
     with pytest.raises(TissRejected, match='Guia não encontrada'):
         PetrobrasClient(config, opener).demonstrativos(['123'])
+
+
+def test_proof_is_sent_after_the_appeal_and_never_undoes_it(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    proof = PetrobrasAnexo(
+        glosa_id=row.id,
+        nome='formulario.pdf',
+        mime='application/pdf',
+        conteudo=b'%PDF-test',
+        sha256='a' * 64,
+        tipo_documento='01',
+        natureza_guia='2',
+        formato='02',
+    )
+    db.add(proof)
+    db.commit()
+    calls = []
+
+    def appeal(entries, appeal_id, codes):
+        calls.append('recurso')
+        answer = ET.Element('{%s}protocoloRecebimentoRecursoWS' % NS)
+        node = element(
+            element(answer, 'recebimentoRecurso'), 'protocoloRecebimento'
+        )
+        element(node, 'nrProtocoloRecursoGlosa', 'RG9')
+        element(node, 'nrProtocoloRecursado', entries[0][0]['protocolo'])
+        return answer
+
+    def document(source, attachment, cited):
+        calls.append(('documento', cited))
+        raise TissRejected('Petrobras recusou: documento invalido.')
+
+    client = Mock()
+    client.appeal_protocol.side_effect = appeal
+    client.document.side_effect = document
+    send_appeal(db, config, row, row.versao, 1, client)
+    assert calls == ['recurso', ('documento', (row.recurso_guia, 'RG9'))]
+    assert row.recurso_estado == 'protocolado'
+    assert proof.estado == 'rascunho'
+    data = db.scalars(
+        select(PetrobrasEvento.dados).where(
+            PetrobrasEvento.tipo == 'documento_nao_enviado'
+        )
+    ).one()
+    assert 'documento invalido' in data['causa']
 
 
 def test_protocol_appeal_groups_guides_and_items(config, source):
