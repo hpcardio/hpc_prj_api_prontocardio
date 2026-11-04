@@ -2001,6 +2001,7 @@ def test_protocol_appeal_groups_guides_and_items(config, source):
     guide = root.find('.//{%s}guiaRecursoGlosa' % NS)
     assert len(guide.findall('.//{%s}guiaRecursoGlosa' % NS)) == 0
     origins = guide.findall('{%s}opcaoRecurso/{%s}recursoGuia' % (NS, NS))
+    assert [value(o, 'senha') for o in origins] == ['P0123', 'P0123']
     # Operator pads the provider guide; the appeal cites the original.
     assert [value(o, 'numeroGuiaOrigem') for o in origins] == [
         'X9999',
