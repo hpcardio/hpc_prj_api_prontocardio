@@ -51,6 +51,7 @@ from app_prontocardio.services.petrobras_tiss import (
     NS,
     PetrobrasClient,
     TissError,
+    TissRejected,
     element,
     parse_demonstrativos,
     parse_xml,
@@ -1854,6 +1855,59 @@ def test_uncertain_send_records_safe_cause(
         )
     ).one()
     assert '5001 - X' in data['causa']
+
+
+def test_soap_fault_reason_is_kept_without_credentials(config):
+    opener = Mock()
+    opener.open.side_effect = HTTPError(
+        'https://example.test',
+        500,
+        'Failure',
+        {},
+        BytesIO(
+            b'<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/'
+            b'envelope/"><soap:Body><soap:Fault><faultcode>soap:Server'
+            b'</faultcode><faultstring>Guia synthetic invalida</faultstring>'
+            b'<detail>numeroGuiaRecGlosaPrestador\n deve ser numerico'
+            b'</detail></soap:Fault></soap:Body></soap:Envelope>'
+        ),
+    )
+    with pytest.raises(TissRejected) as error:
+        PetrobrasClient(config, opener).demonstrativos(['123'])
+    message = str(error.value)
+    assert 'HTTP 500' in message
+    assert 'Guia *** invalida' in message
+    assert 'numeroGuiaRecGlosaPrestador deve ser numerico' in message
+    assert 'synthetic' not in message
+
+
+def test_refused_appeal_returns_to_draft(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    client = Mock()
+    client.appeal_protocol.side_effect = TissRejected(
+        'Petrobras recusou a mensagem (HTTP 500): campo invalido.'
+    )
+    with pytest.raises(TissError, match='não aceito.*campo invalido'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    sent_id = client.appeal_protocol.call_args.args[1]
+    assert sent_id.isdigit()
+    assert len(sent_id) == 20
+    assert row.recurso_estado == 'rascunho'
+    assert row.recurso_guia is None
+    data = db.scalars(
+        select(PetrobrasEvento.dados).where(
+            PetrobrasEvento.tipo == 'recusado_operadora'
+        )
+    ).one()
+    assert 'campo invalido' in data['causa']
+    assert data['guia_recurso'] == sent_id
+    client.appeal_protocol.side_effect = TimeoutError()
+    with pytest.raises(TissError, match='não confirmado'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    assert client.appeal_protocol.call_count == 2
 
 
 def test_protocol_appeal_groups_guides_and_items(config, source):
