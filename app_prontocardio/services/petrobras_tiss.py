@@ -67,6 +67,8 @@ class TissRejected(TissError):
 
 
 FAULT_TEXT_LIMIT = 200
+# dm_tipoGuia: 1 solicitação, 2 faturamento, 3 recurso de glosa.
+APPEAL_DOCUMENT_NATURE = '3'
 FAULT_PARTS = {'faultcode', 'faultstring', 'detail', 'Code', 'Reason', 'Text'}
 
 
@@ -557,24 +559,22 @@ class PetrobrasClient:
         relaxed = any(operator_codes(s) for s, _ in entries)
         return self.call('recurso', root, relaxed)
 
-    def document(self, source, attachment):
+    def document(self, source, attachment, appeal):
+        """Proof of an appeal: TISS naturezaGuia 3 (Recurso de Glosa).
+
+        appeal: (numeroGuiaRecGlosaPrestador, nrProtocoloRecursoGlosa) of
+        the appeal already received by the operator; the document cites the
+        appeal guide, not the closed billing guide (naturezaGuia 2).
+        """
+        appeal_guide, appeal_protocol = appeal
         root = message(self.config, 'documento')
         body = element(
             root, 'envioDOcumento'
         )  # Exact spelling from published XSD.
-        for key, tag in [
-            ('lote', 'numeroLote'),
-            ('protocolo', 'numeroProtocolo'),
-            ('guia_prestador', 'numeroGuiaPrestador'),
-            ('guia_operadora', 'numeroGuiaOperadora'),
-        ]:
-            if source.get(key):
-                text = source[key]
-                if key == 'guia_prestador':
-                    text = original_guide(text)
-                element(body, tag, text)
+        element(body, 'numeroProtocolo', appeal_protocol)
+        element(body, 'numeroGuiaPrestador', appeal_guide)
         element(body, 'numeroDocumento', str(attachment.id))
-        element(body, 'naturezaGuia', attachment.natureza_guia)
+        element(body, 'naturezaGuia', APPEAL_DOCUMENT_NATURE)
         element(body, 'formatoDocumento', attachment.formato)
         if source.get('sequencial'):
             element(body, 'seqReferenciaItem', source['sequencial'])
