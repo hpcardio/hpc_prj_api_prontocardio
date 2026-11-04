@@ -282,6 +282,12 @@ SELECT rc.cd_repasse_consolidado,
        NVL(rc.ds_procedimento, rc.ds_pro_fat) AS ds_procedimento,
        rc.cd_convenio,
        rc.nm_convenio,
+       rc.ds_ati_med AS tp_atividade,
+       CASE
+           WHEN rc.cd_reg_fat IS NOT NULL THEN 'HOSPITALAR'
+           WHEN rc.cd_reg_amb IS NOT NULL THEN 'AMBULATORIAL'
+           ELSE 'NÃO INFORMADO'
+       END AS tp_conta,
        rc.cd_remessa,
        rf.nr_remessa_convenio,
        NVL(rc.qt_lancamento, 1) AS quantidade,
@@ -666,6 +672,8 @@ def montar_preview(  # noqa: PLR0912
             ),
             'codigo_convenio': item.get('cd_convenio'),
             'convenio': item.get('nm_convenio'),
+            'atividade': item.get('tp_atividade'),
+            'tipo_conta': item.get('tp_conta'),
             'codigo_remessa': item.get('cd_remessa'),
             'numero_remessa': item.get('nr_remessa_convenio'),
             'situacao_remessa': (
