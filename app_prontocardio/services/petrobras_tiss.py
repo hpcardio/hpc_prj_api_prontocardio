@@ -512,7 +512,11 @@ class PetrobrasClient:
             raise TissError('Recurso reúne itens de um único lote/protocolo.')
         guides = {}
         for source, justification in entries:
-            key = (source['guia_prestador'], source.get('guia_operadora'))
+            key = (
+                source['guia_prestador'],
+                source.get('guia_operadora'),
+                source.get('senha'),
+            )
             guides.setdefault(key, []).append((source, justification))
         if len(guides) > MAX_APPEAL_GUIDES:
             raise TissError(
@@ -528,11 +532,14 @@ class PetrobrasClient:
         element(guide, 'numeroLote', first['lote'])
         element(guide, 'numeroProtocolo', first['protocolo'])
         option = element(guide, 'opcaoRecurso')
-        for (origin_guide, operator_guide), items in guides.items():
+        for (origin_guide, operator_guide, senha), items in guides.items():
             origin = element(option, 'recursoGuia')
             element(origin, 'numeroGuiaOrigem', original_guide(origin_guide))
             if operator_guide:
                 element(origin, 'numeroGuiaOperadora', operator_guide)
+            # Authorization of the original guide, as the operator returned.
+            if senha:
+                element(origin, 'senha', senha)
             listed = element(origin, 'opcaoRecursoGuia')
             for source, justification in items:
                 for reason in source['motivos']:
