@@ -22,6 +22,7 @@ from app_prontocardio.services.petrobras_tiss import (
     TissError,
     parse_demonstrativos,
     payment_guides,
+    payment_lots,
     payment_protocols,
 )
 
@@ -193,6 +194,66 @@ def synchronize(  # noqa: PLR0913 - explicit source and audit context
     )
 
 
+def with_payer_lot(source, lot):
+    """Keep the number the MV generated; `lote` becomes the payer's."""
+    return {
+        **source,
+        'lote_prestador': source.get('lote_prestador', source.get('lote')),
+        'lote': lot,
+    }
+
+
+def apply_payer_lots(session, config, lots, user_id=None):
+    """Store the payer's lot number on rows already imported."""
+    changed = 0
+    if not lots:
+        return changed
+    query = (
+        select(PetrobrasGlosa, PetrobrasProtocolo.numero)
+        .join(PetrobrasProtocolo)
+        .where(
+            PetrobrasProtocolo.prestador == config.prestador_cnpj,
+            PetrobrasProtocolo.numero.in_(lots),
+        )
+    )
+    for row, number in session.execute(query):
+        source = with_payer_lot(row.fonte, lots[number])
+        if source != row.fonte:
+            event(
+                session,
+                row,
+                'lote_operadora',
+                {'antes': row.fonte.get('lote'), 'depois': lots[number]},
+                user_id,
+            )
+            row.fonte = source
+            changed += 1
+    return changed
+
+
+def rows_with_payer_lots(rows, lots):
+    return [
+        with_payer_lot(r, lots[r['protocolo']])
+        if r['protocolo'] in lots
+        else r
+        for r in rows
+    ]
+
+
+def known_payer_lots(session, protocol_ids):
+    """{protocol: payer's lot} already stored, for protocol-only syncs."""
+    rows = session.execute(
+        select(PetrobrasProtocolo.numero, PetrobrasGlosa.fonte)
+        .join(PetrobrasGlosa)
+        .where(PetrobrasProtocolo.id.in_(protocol_ids))
+    )
+    return {
+        number: source['lote']
+        for number, source in rows
+        if 'lote_prestador' in source and source.get('lote')
+    }
+
+
 def synchronize_many(  # noqa: PLR0913 - injected sources and audit context
     session,
     config,
@@ -201,6 +262,7 @@ def synchronize_many(  # noqa: PLR0913 - injected sources and audit context
     user_id=None,
     client=None,
     competencia=None,
+    lots=None,
 ):
     """Import explicit returned details; missing protocols stay pending."""
     config.require_connection()
@@ -227,6 +289,9 @@ def synchronize_many(  # noqa: PLR0913 - injected sources and audit context
         response = transport.demonstrativos(sorted(requested))
         rows, returned_scopes = parse_demonstrativos(
             response, config.prestador_cnpj, config.registro_ans
+        )
+        rows = rows_with_payer_lots(
+            rows, {**known_payer_lots(session, protocol_ids), **(lots or {})}
         )
         returned = {number for number, _ in returned_scopes}
         if returned - requested:
@@ -307,6 +372,7 @@ def synchronize_competencia(  # noqa: PLR0913 - injected sources and audit conte
         session, config, competencia, user_id, transport, oracle_loader
     )
     numbers = result.pop('numeros_protocolos')
+    lots = result.pop('lotes', {})
     if not numbers:
         return {
             **result,
@@ -334,6 +400,7 @@ def synchronize_competencia(  # noqa: PLR0913 - injected sources and audit conte
                 user_id,
                 transport,
                 competencia,
+                lots,
             )
             count += batch['quantidade']
             returned += batch['protocolos_retornados']
@@ -390,6 +457,8 @@ def discover_competencia(  # noqa: PLR0913 - injected sources and audit context
                         prestador=config.prestador_cnpj, numero=number
                     )
                 )
+        lots = payment_lots(response)
+        apply_payer_lots(session, config, lots, user_id)
         guides = 0
         if oracle_loader is not None:
             session.flush()
@@ -408,6 +477,7 @@ def discover_competencia(  # noqa: PLR0913 - injected sources and audit context
             'protocolos_localizados': len(numbers),
             'glosas_por_guia': guides,
             'numeros_protocolos': numbers,
+            'lotes': lots,
             'avisos': warnings,
             'competencia': competencia,
             'orientacao': (
