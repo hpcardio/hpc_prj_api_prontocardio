@@ -1888,6 +1888,39 @@ def test_soap_fault_reason_is_kept_without_credentials(config):
     assert 'synthetic' not in message
 
 
+def test_lost_connection_fault_is_not_a_refusal(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    opener = Mock()
+    opener.open.side_effect = HTTPError(
+        'https://example.test',
+        500,
+        'Failure',
+        {},
+        BytesIO(
+            b'<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/'
+            b'envelope/"><soap:Body><soap:Fault><faultcode>SOAP-ENV:Client'
+            b'</faultcode><faultstring>org.springframework.dao.'
+            b'RecoverableDataAccessException: Error updating database. Cause: '
+            b'java.sql.SQLRecoverableException: No more data to read from '
+            b'socket</faultstring></soap:Fault></soap:Body></soap:Envelope>'
+        ),
+    )
+    with pytest.raises(TissError, match='não confirmado.*perdeu a conexão'):
+        send_appeal(
+            db, config, row, row.versao, 1, PetrobrasClient(config, opener)
+        )
+    assert row.recurso_estado == 'envio_incerto'
+    assert row.recurso_guia
+    with pytest.raises(TissError, match='iniciada'):
+        send_appeal(
+            db, config, row, row.versao, 1, PetrobrasClient(config, opener)
+        )
+    assert opener.open.call_count == 1
+
+
 def test_refused_appeal_returns_to_draft(
     db, protocol, config, source, candidate
 ):
