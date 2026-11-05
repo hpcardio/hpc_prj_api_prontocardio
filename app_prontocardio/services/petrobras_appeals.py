@@ -130,6 +130,37 @@ def check_draft(row, version, today):
         )
 
 
+def petrobras_lot(config, sources, portal=None):
+    """Payer's lot number (capa de lote), never the one the MV generated.
+
+    A protocol can carry the provider's own number (1928) while the payer
+    knows the lot as another one (36022538); the guide links them.
+    """
+    guides = {
+        (s.get('guia_prestador'), s.get('guia_operadora')) for s in sources
+    }
+    client = portal or PortalAppeal(config)
+    found = {}
+    try:
+        for lot in client.lots(sources[0]['demonstrativo']):
+            for account in client.accounts(lot):
+                guide = (
+                    account.get('numeroContaPrestador'),
+                    account.get('numeroContaOperadora'),
+                )
+                if guide in guides:
+                    found[guide] = str(account['numeroCapaLotePrestador'])
+    finally:
+        client.close()
+    numbers = set(found.values())
+    if found.keys() != guides or len(numbers) != 1:
+        raise TissError(
+            'Número do lote na Petrobras não localizado no extrato do portal; '
+            'recurso não enviado.'
+        )
+    return numbers.pop()
+
+
 def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0912, PLR0914, PLR0915 - durable transmission state transitions
     """One TISS appeal for items of one lot/protocol; never retried.
 
@@ -170,6 +201,10 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
         (r.recurso_guia for r in rows if (r.recurso_guia or '').isdigit()),
         str(uuid4().int % 10**APPEAL_ID_DIGITS).zfill(APPEAL_ID_DIGITS),
     )
+    # Before any state change: an unknown lot number blocks the transmission.
+    lot_number = petrobras_lot(config, [s for s, _ in entries])
+    for source, _ in entries:
+        source['lote_mv'], source['lote'] = source.get('lote'), lot_number
     codes = appeal_codes(db, config, [s for s, _ in entries])
     preflight = PetrobrasClient(config, dry_run=True)
     preflight.appeal_protocol(entries, appeal_id, codes)
