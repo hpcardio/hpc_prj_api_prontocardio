@@ -74,7 +74,7 @@ REAL_PETROBRAS_LOT = petrobras_appeals.petrobras_lot
 
 @pytest.fixture(autouse=True)
 def payer_lot(monkeypatch):
-    # No portal in unit tests; each test sets the payer's number it expects.
+    # No webservice in unit tests.
     monkeypatch.setattr(
         petrobras_appeals, 'petrobras_lot', lambda *_a, **_k: 'CAPA1'
     )
@@ -2313,10 +2313,6 @@ def test_portal_screen_parsers():
     assert b'filename="n__me.pdf"' in body
 
 
-def lot_sources(rows):
-    return [{**r.fonte, 'demonstrativo': 'D1'} for r in rows]
-
-
 def test_appeal_sends_the_payers_lot_number(
     db, protocol, config, source, candidate
 ):
@@ -2352,16 +2348,46 @@ def test_unknown_payer_lot_blocks_before_any_change(  # noqa: PLR0913, PLR0917 -
     assert row.versao == version
 
 
-def test_payer_lot_comes_from_the_account_of_the_guide(
-    db, protocol, config, source, candidate
-):
-    rows = ready_rows(db, protocol, config, source, candidate)
-    row = rows['1']
-    portal = FakePortal([row])
-    assert (
-        REAL_PETROBRAS_LOT(config, lot_sources([row]), portal) == '36022538'
+def payment_demo(*protocols):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    for protocol, lot in protocols:
+        node = element(root, 'relacaoProtocolos')
+        element(node, 'numeroProtocolo', protocol)
+        element(node, 'numeroLote', lot)
+    return root
+
+
+def test_payer_lot_comes_from_the_payment_demonstrativo(config):
+    source = {'protocolo': '13869619', 'data_emissao': '2026-10-28'}
+    client = Mock()
+    client.pagamentos.return_value = payment_demo(
+        ('0', '999'), ('13869619', '36022538'), ('13871696', '36025378')
     )
-    assert portal.closed
-    portal.account['numeroContaPrestador'] = 'outra guia'
+    assert REAL_PETROBRAS_LOT(config, [source], client) == '36022538'
+    assert [c.args[0] for c in client.pagamentos.call_args_list] == [
+        '202610',
+        '202611',
+    ]
+
+
+def test_payer_lot_crosses_the_year_and_tolerates_an_empty_month(config):
+    source = {'protocolo': '1', 'data_emissao': '2026-12-28'}
+    client = Mock()
+    client.pagamentos.side_effect = [
+        TissError('Nenhuma informação'),
+        payment_demo(('1', '55')),
+    ]
+    assert REAL_PETROBRAS_LOT(config, [source], client) == '55'
+    assert client.pagamentos.call_args.args[0] == '202701'
+
+
+@pytest.mark.parametrize(
+    'protocols',
+    [[('2', '55')], [('1', '55'), ('1', '66')]],
+)
+def test_missing_or_conflicting_payer_lot_blocks(config, protocols):
+    client = Mock()
+    client.pagamentos.return_value = payment_demo(*protocols)
+    source = {'protocolo': '1', 'data_emissao': '2026-10-28'}
     with pytest.raises(TissError, match='recurso não enviado'):
-        REAL_PETROBRAS_LOT(config, lot_sources([row]), portal)
+        REAL_PETROBRAS_LOT(config, [source], client)
