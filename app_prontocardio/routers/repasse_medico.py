@@ -289,7 +289,8 @@ SELECT rc.cd_repasse_consolidado,
            ELSE 'NÃO INFORMADO'
        END AS tp_conta,
        rc.cd_remessa,
-       NVL(rf.nr_remessa_convenio, TO_CHAR(rc.cd_remessa)) AS nr_remessa_convenio,
+       NVL(rf.nr_remessa_convenio, TO_CHAR(rc.cd_remessa))
+           AS nr_remessa_convenio,
        NVL(rc.qt_lancamento, 1) AS quantidade,
        NVL(rc.vl_total_conta, 0) AS valor_bruto,
        NVL(rc.vl_glosa, 0) AS valor_desconto,
