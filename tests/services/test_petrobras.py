@@ -69,6 +69,16 @@ from app_prontocardio.services.petrobras_tiss import (
 )
 from scripts.sync_petrobras import competencias
 
+REAL_PETROBRAS_LOT = petrobras_appeals.petrobras_lot
+
+
+@pytest.fixture(autouse=True)
+def payer_lot(monkeypatch):
+    # No portal in unit tests; each test sets the payer's number it expects.
+    monkeypatch.setattr(
+        petrobras_appeals, 'petrobras_lot', lambda *_a, **_k: 'CAPA1'
+    )
+
 
 @pytest.fixture
 def config():
@@ -2301,3 +2311,57 @@ def test_portal_screen_parsers():
     assert 'boundary=' in kind
     assert 'name="campo"'.encode() in body
     assert b'filename="n__me.pdf"' in body
+
+
+def lot_sources(rows):
+    return [{**r.fonte, 'demonstrativo': 'D1'} for r in rows]
+
+
+def test_appeal_sends_the_payers_lot_number(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    original = row.fonte['lote']
+    client = Mock()
+    client.appeal_protocol.side_effect = TimeoutError()
+    with pytest.raises(TissError, match='não confirmado'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    sent = client.appeal_protocol.call_args.args[0][0][0]
+    assert sent['lote'] == 'CAPA1'
+    assert sent['lote_mv'] == original
+    assert row.fonte['lote'] == original
+
+
+def test_unknown_payer_lot_blocks_before_any_change(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    version = row.versao
+
+    def unknown(*_args, **_kwargs):
+        raise TissError('Número do lote na Petrobras não localizado.')
+
+    monkeypatch.setattr(petrobras_appeals, 'petrobras_lot', unknown)
+    client = Mock()
+    with pytest.raises(TissError, match='não localizado'):
+        send_appeal(db, config, row, version, 1, client)
+    client.appeal_protocol.assert_not_called()
+    assert row.recurso_estado == 'rascunho'
+    assert row.versao == version
+
+
+def test_payer_lot_comes_from_the_account_of_the_guide(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    portal = FakePortal([row])
+    assert (
+        REAL_PETROBRAS_LOT(config, lot_sources([row]), portal) == '36022538'
+    )
+    assert portal.closed
+    portal.account['numeroContaPrestador'] = 'outra guia'
+    with pytest.raises(TissError, match='recurso não enviado'):
+        REAL_PETROBRAS_LOT(config, lot_sources([row]), portal)
