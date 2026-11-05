@@ -2364,7 +2364,10 @@ def test_row_without_the_payer_lot_cannot_be_appealed(source):
 
 
 def test_new_rows_of_a_known_protocol_get_the_payer_lot():
-    rows = [{'protocolo': '1', 'lote': '1928'}, {'protocolo': '2', 'lote': '5'}]
+    rows = [
+        {'protocolo': '1', 'lote': '1928'},
+        {'protocolo': '2', 'lote': '5'},
+    ]
     assert rows_with_payer_lots(rows, {'1': '36022538'}) == [
         {'protocolo': '1', 'lote': '36022538', 'lote_prestador': '1928'},
         {'protocolo': '2', 'lote': '5'},

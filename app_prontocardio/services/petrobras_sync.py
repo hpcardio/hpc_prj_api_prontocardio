@@ -254,7 +254,7 @@ def known_payer_lots(session, protocol_ids):
     }
 
 
-def synchronize_many(  # noqa: PLR0913 - injected sources and audit context
+def synchronize_many(  # noqa: PLR0913, PLR0915 - injected sources and audit context
     session,
     config,
     protocol_ids,
