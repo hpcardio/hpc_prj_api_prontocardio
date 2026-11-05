@@ -35,6 +35,8 @@ from app_prontocardio.services.petrobras_tiss import (
 )
 
 APPEAL_ID_DIGITS = 20  # numeroGuiaRecGlosaPrestador: st_texto20.
+MONTHS_PER_YEAR = 12
+ISO_MONTH = 7  # AAAA-MM
 ACATO_EVENTS = ('acato', 'acato_removido')
 
 
@@ -130,33 +132,41 @@ def check_draft(row, version, today):
         )
 
 
-def petrobras_lot(config, sources, portal=None):
-    """Payer's lot number (capa de lote), never the one the MV generated.
+def payment_months(issued):
+    """Competence of the demonstrativo's date, then the next one."""
+    year, month = int(issued[:4]), int(issued[5:7])
+    following = (
+        (year + 1, 1) if month == MONTHS_PER_YEAR else (year, month + 1)
+    )
+    return [f'{year}{month:02d}', f'{following[0]}{following[1]:02d}']
 
-    A protocol can carry the provider's own number (1928) while the payer
-    knows the lot as another one (36022538); the guide links them.
+
+def petrobras_lot(config, sources, client=None):
+    """Payer's lot number, from its payment demonstrativo (webservice).
+
+    The account analysis returns numeroLotePrestador, the number the MV
+    generated (1928). The payment demonstrativo lists each protocol with the
+    number the payer knows the lot by (36022538).
     """
-    guides = {
-        (s.get('guia_prestador'), s.get('guia_operadora')) for s in sources
-    }
-    client = portal or PortalAppeal(config)
-    found = {}
-    try:
-        for lot in client.lots(sources[0]['demonstrativo']):
-            for account in client.accounts(lot):
-                guide = (
-                    account.get('numeroContaPrestador'),
-                    account.get('numeroContaOperadora'),
-                )
-                if guide in guides:
-                    found[guide] = str(account['numeroCapaLotePrestador'])
-    finally:
-        client.close()
-    numbers = set(found.values())
-    if found.keys() != guides or len(numbers) != 1:
+    protocol = sources[0].get('protocolo')
+    issued = str(sources[0].get('data_emissao') or '')
+    client = client or PetrobrasClient(config)
+    numbers = set()
+    for month in payment_months(issued) if len(issued) >= ISO_MONTH else []:
+        try:
+            root = client.pagamentos(month)
+        except TissError:
+            continue
+        numbers |= {
+            value(node, 'numeroLote')
+            for node in root.iter('{%s}relacaoProtocolos' % NS)
+            if value(node, 'numeroProtocolo') == protocol
+        }
+    numbers.discard(None)
+    if len(numbers) != 1:
         raise TissError(
-            'Número do lote na Petrobras não localizado no extrato do portal; '
-            'recurso não enviado.'
+            'Número do lote na Petrobras não localizado no demonstrativo de '
+            'pagamento; recurso não enviado.'
         )
     return numbers.pop()
 
