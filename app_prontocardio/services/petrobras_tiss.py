@@ -70,6 +70,13 @@ FAULT_TEXT_LIMIT = 200
 # dm_tipoGuia: 1 solicitação, 2 faturamento, 3 recurso de glosa.
 APPEAL_DOCUMENT_NATURE = '3'
 FAULT_PARTS = {'faultcode', 'faultstring', 'detail', 'Code', 'Reason', 'Text'}
+# The operator lost its connection mid-write: the outcome is unknown, so these
+# faults must not unlock a resend the way an explicit refusal does.
+UNCERTAIN_FAULTS = (
+    'RecoverableDataAccessException',
+    'SQLRecoverableException',
+    'No more data to read from socket',
+)
 
 
 def fault_text(fault, secrets):
@@ -88,6 +95,31 @@ def fault_text(fault, secrets):
         if secret:
             text = text.replace(secret, '***')
     return ''.join(c for c in text if c.isprintable())[:FAULT_TEXT_LIMIT]
+
+
+def raise_fault(fault, http_code, config):
+    """Explicit refusal, or unknown outcome if the connection dropped."""
+    password = config.password.get_secret_value()
+    reason = fault_text(
+        fault,
+        [
+            config.login.get_secret_value(),
+            password,
+            hashlib.md5(
+                password.encode('iso-8859-1'), usedforsecurity=False
+            ).hexdigest(),
+        ],
+    )
+    full_text = ' '.join(''.join(fault.itertext()).split())
+    if any(mark in full_text for mark in UNCERTAIN_FAULTS):
+        raise TissError(
+            f'Petrobras perdeu a conexão durante o envio (HTTP {http_code}): '
+            f'{reason}.'
+        ) from None
+    raise TissRejected(
+        f'Petrobras recusou a mensagem (HTTP {http_code}): '
+        f'{reason or "sem motivo informado"}.'
+    ) from None
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -329,23 +361,7 @@ class PetrobrasClient:
             except TissError:
                 faults = []
             if faults:
-                login = self.config.login.get_secret_value()
-                password = self.config.password.get_secret_value()
-                reason = fault_text(
-                    faults[0],
-                    [
-                        login,
-                        password,
-                        hashlib.md5(
-                            password.encode('iso-8859-1'),
-                            usedforsecurity=False,
-                        ).hexdigest(),
-                    ],
-                )
-                raise TissRejected(
-                    f'Petrobras recusou a mensagem (HTTP {exc.code}): '
-                    f'{reason or "sem motivo informado"}.'
-                ) from None
+                raise_fault(faults[0], exc.code, self.config)
             raise TissError(
                 (
                     f'Serviço Petrobras retornou HTTP '
