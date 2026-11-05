@@ -32,6 +32,9 @@ class PetrobrasConfig(BaseSettings):
     # missing from the outdated dm_tipoGlosa the payer publishes (3209,
     # 3253...). Only that field is relaxed; turn off if the payer rejects.
     appeal_table_codes: bool = False
+    # Off by default: when the webservice fails, appeal through the portal
+    # screen. Its Efetivar accepts every unappealed item of the lot.
+    portal_fallback: bool = False
 
     @property
     def identificador_prestador(self):

@@ -6,13 +6,22 @@ from decimal import Decimal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app_prontocardio.models import Tiss
 from app_prontocardio.petrobras_models import (
     PetrobrasAnexo,
+    PetrobrasEvento,
     PetrobrasGlosa,
     utcnow,
+)
+from app_prontocardio.services.petrobras_portal_appeal import (
+    DOCUMENT_TYPES,
+    MIN_JUSTIFICATION,
+    PortalAppeal,
+    is_denied,
+    is_saved,
+    same_value,
 )
 from app_prontocardio.services.petrobras_sync import event
 from app_prontocardio.services.petrobras_tiss import (
@@ -26,6 +35,29 @@ from app_prontocardio.services.petrobras_tiss import (
 )
 
 APPEAL_ID_DIGITS = 20  # numeroGuiaRecGlosaPrestador: st_texto20.
+ACATO_EVENTS = ('acato', 'acato_removido')
+
+
+def acatos(db, ids):
+    """Internal acato (never sent to the payer): latest event per item."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    last = (
+        select(func.max(PetrobrasEvento.id))
+        .where(
+            PetrobrasEvento.glosa_id.in_(ids),
+            PetrobrasEvento.tipo.in_(ACATO_EVENTS),
+        )
+        .group_by(PetrobrasEvento.glosa_id)
+    )
+    return {
+        e.glosa_id: e.dados
+        for e in db.scalars(
+            select(PetrobrasEvento).where(PetrobrasEvento.id.in_(last))
+        )
+        if e.tipo == 'acato'
+    }
 
 
 def table38_codes(db, codes, today=None):
@@ -181,7 +213,9 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
             row.recurso_estado, row.recurso_protocolo = 'protocolado', protocol
             event(db, row, 'protocolado', {'protocolo': protocol}, user_id)
         db.commit()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - every failure is recorded
+        if config.portal_fallback:
+            return appeal_by_portal(db, config, ids, exc, appeal_id, user_id)
         failed(db, exc, ids, appeal_id, user_id)
     # Proofs cite the appeal received above; a failure never undoes it.
     for row, (source, _) in zip(rows, entries):
@@ -189,6 +223,238 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
             if a.estado != 'protocolado':
                 send_document(db, client, row, source, a, user_id)
     return rows
+
+
+def locked_rows(db, ids):
+    return list(
+        db.scalars(
+            select(PetrobrasGlosa)
+            .where(PetrobrasGlosa.id.in_(ids))
+            .order_by(PetrobrasGlosa.id)
+            .with_for_update()
+        )
+    )
+
+
+def find_lot(portal, source):
+    """Default values and account holding this guide in the demonstrativo."""
+    for lot in portal.lots(source['demonstrativo']):
+        for account in portal.accounts(lot):
+            if account.get('numeroContaPrestador') == source.get(
+                'guia_prestador'
+            ) and account.get('numeroContaOperadora') == source.get(
+                'guia_operadora'
+            ):
+                return lot, account
+    raise TissError('Guia não localizada no extrato do portal.')
+
+
+def find_item(portal, lot, account, source):
+    matches = [
+        i
+        for i in portal.items(lot, account)
+        if is_denied(i)
+        and i.get('codigoItem') == source.get('tuss')
+        and same_value(i, source.get('valor_glosa'))
+    ]
+    if len(matches) != 1:
+        raise TissError(
+            f'Item {source.get("tuss")} sem correspondência única no portal.'
+        )
+    return matches[0]
+
+
+def untreated_items(db, portal, lot, demonstrativo):
+    """Denied items Efetivar would accept against the system's records."""
+    rows = list(
+        db.scalars(
+            select(PetrobrasGlosa).where(
+                PetrobrasGlosa.demonstrativo == demonstrativo,
+                PetrobrasGlosa.presente_na_fonte.is_(True),
+            )
+        )
+    )
+    accepted = acatos(db, (r.id for r in rows))
+    treated_keys = {
+        (r.guia_prestador, r.tuss, Decimal(str(r.valor_glosa or 0)))
+        for r in rows
+        if r.id in accepted
+    }
+    return [
+        item
+        for account in portal.accounts(lot)
+        for item in portal.items(lot, account)
+        if is_denied(item)
+        and not is_saved(item)
+        and (
+            item.get('numeroContaPrestador'),
+            item.get('codigoItem'),
+            Decimal(str(item.get('valorGlosado') or 0)),
+        )
+        not in treated_keys
+    ]
+
+
+def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR0917 - audit context
+    """Efetivar, then confirm in the portal; unconfirmed stays uncertain."""
+    try:
+        answer = portal.efetivar(lot)
+        refreshed = {a['numeroConta']: a for a in portal.accounts(lot)}.get(
+            account['numeroConta'], {}
+        )
+        sent = refreshed.get('quantidadeItensRecursado') or refreshed.get(
+            'qtdItemEfetivado'
+        )
+        if not sent:
+            raise TissError('Portal não confirmou a efetivação.')
+    except Exception as exc:  # noqa: BLE001 - Efetivar may have been applied
+        reason = str(exc)[:300] if isinstance(exc, TissError) else 'falha'
+        for row in rows:
+            row.recurso_estado = 'envio_incerto'
+            event(db, row, 'envio_incerto', {'causa': reason}, user_id)
+        db.commit()
+        raise TissError(
+            'Envio pelo portal não confirmado. Confira a capa de lote '
+            f'{account.get("numeroCapaLotePrestador")} no portal; não haverá '
+            f'reenvio automático. Motivo: {reason}'
+        ) from None
+    for row in rows:
+        row.recurso_estado = 'enviado_portal'
+        event(
+            db,
+            row,
+            'enviado_portal',
+            {
+                'capa_lote': account.get('numeroCapaLotePrestador'),
+                'retorno': str(answer.get('mensagemRetorno') or '')[:300],
+            },
+            user_id,
+        )
+    for attachment in db.scalars(
+        select(PetrobrasAnexo).where(
+            PetrobrasAnexo.glosa_id.in_([r.id for r in rows])
+        )
+    ):
+        attachment.estado = 'protocolado'
+    db.commit()
+
+
+def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  # noqa: PLR0912, PLR0913, PLR0917 - audit context
+    """Webservice failed: same appeal through the payer's own screen."""
+    db.rollback()
+    rows = locked_rows(db, ids)
+    files = {
+        r.id: list(
+            db.scalars(
+                select(PetrobrasAnexo).where(PetrobrasAnexo.glosa_id == r.id)
+            )
+        )
+        for r in rows
+    }
+    saved = []
+    client = portal or PortalAppeal(config)
+    try:
+        for row in rows:
+            if len((row.justificativa or '').strip()) < MIN_JUSTIFICATION:
+                raise TissError(
+                    'O portal exige justificativa com ao menos '
+                    f'{MIN_JUSTIFICATION} caracteres.'
+                )
+            if any(a.mime not in DOCUMENT_TYPES for a in files[row.id]):
+                raise TissError(
+                    'O portal aceita comprovantes PDF, JPG ou BMP.'
+                )
+        located = [(r, *find_lot(client, r.fonte)) for r in rows]
+        if any(
+            a.get('quantidadeItensRecursado') or a.get('qtdItemEfetivado')
+            for _, _, a in located
+        ):
+            # The failed webservice call or someone else may have sent it.
+            raise TissError('Conta já tem item enviado no portal; confira.')
+        targets = [
+            (r, lot, a, find_item(client, lot, a, r.fonte))
+            for r, lot, a in located
+        ]
+        for row, lot, account, item in targets:
+            if not is_saved(item):
+                client.save(lot, item, row.justificativa, files[row.id])
+                if not is_saved(find_item(client, lot, account, row.fonte)):
+                    raise TissError('Portal não confirmou o recurso salvo.')
+            row.recurso_estado, row.recurso_guia = 'salvo_portal', None
+            event(
+                db,
+                row,
+                'salvo_portal',
+                {
+                    'capa_lote': account.get('numeroCapaLotePrestador'),
+                    'numero_item': item.get('numeroItem'),
+                    'motivo_webservice': str(cause)[:300],
+                },
+                user_id,
+            )
+            db.commit()
+            saved.append(row.id)
+        by_lot = {}
+        for row, lot, account, _ in targets:
+            by_lot.setdefault(lot['numeroLote'], (lot, account, []))[2].append(
+                row
+            )
+        for lot, account, lot_rows in by_lot.values():
+            demonstrativo = lot_rows[0].demonstrativo
+            if not untreated_items(db, client, lot, demonstrativo):
+                submit_lot(db, client, lot, account, lot_rows, user_id)
+        return rows
+    except Exception as exc:  # noqa: BLE001 - recorded on the items
+        if any(
+            r.recurso_estado in {'envio_incerto', 'enviado_portal'}
+            for r in rows
+        ):
+            raise
+        pending = [i for i in ids if i not in saved]
+        detail = str(exc)[:300] if isinstance(exc, TissError) else 'falha'
+        if pending:
+            failed(
+                db,
+                cause,
+                pending,
+                appeal_id,
+                user_id,
+                f' Portal: {detail}',
+            )
+        raise TissError(f'Recurso salvo no portal; envio pendente: {detail}')
+    finally:
+        client.close()
+
+
+def efetivar_portal(db, config, row, user_id, portal=None):
+    """Send the lot's saved appeals once no denied item would be accepted."""
+    if row.recurso_estado != 'salvo_portal':
+        raise TissError('Recurso não está salvo no portal.')
+    client = portal or PortalAppeal(config)
+    try:
+        lot, account = find_lot(client, row.fonte)
+        missing = untreated_items(db, client, lot, row.demonstrativo)
+        if missing:
+            raise TissError(
+                f'{len(missing)} item(ns) glosado(s) do lote sem tratamento '
+                'seriam aceitos ao efetivar; registre recurso ou acato.'
+            )
+        lot_rows = [
+            r
+            for r in db.scalars(
+                select(PetrobrasGlosa)
+                .where(
+                    PetrobrasGlosa.demonstrativo == row.demonstrativo,
+                    PetrobrasGlosa.recurso_estado == 'salvo_portal',
+                )
+                .with_for_update()
+            )
+            if (r.fonte or {}).get('lote') == (row.fonte or {}).get('lote')
+        ]
+        submit_lot(db, client, lot, account, lot_rows, user_id)
+    finally:
+        client.close()
+    return row
 
 
 def send_document(db, client, row, source, attachment, user_id):  # noqa: PLR0913, PLR0917 - audit context
@@ -237,12 +503,12 @@ def send_document(db, client, row, source, attachment, user_id):  # noqa: PLR091
     db.commit()
 
 
-def failed(db, exc, ids, appeal_id, user_id):
+def failed(db, exc, ids, appeal_id, user_id, detail=''):  # noqa: PLR0913, PLR0917 - audit context
     """Appeal not confirmed: refused back to draft, otherwise uncertain."""
     # Safe cause for diagnosis: TissError text never carries credentials.
     cause = (
         str(exc)[:300] if isinstance(exc, TissError) else type(exc).__name__
-    )
+    ) + detail
     db.rollback()
     rows = list(
         db.scalars(

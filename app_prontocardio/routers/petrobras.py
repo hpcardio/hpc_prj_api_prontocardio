@@ -25,8 +25,11 @@ from app_prontocardio.petrobras_models import (
 from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services import petrobras_oracle
 from app_prontocardio.services.petrobras_appeals import (
+    ACATO_EVENTS,
+    acatos,
     appeal_codes,
     appeal_readiness,
+    efetivar_portal,
     poll_appeal,
     send_appeal,
     send_protocol_appeal,
@@ -193,9 +196,6 @@ def list_items(  # noqa: PLR0913 - independent HTTP query parameters
 MAX_DEMONSTRATIVO_ITEMS = 2000
 
 
-ACATO_EVENTS = ('acato', 'acato_removido')
-
-
 def acato_ativo():
     """Item whose latest acceptance event is an internal acato."""
     newer = aliased(PetrobrasEvento)
@@ -208,28 +208,6 @@ def acato_ativo():
             newer.id > PetrobrasEvento.id,
         ),
     )
-
-
-def acatos(db, ids):
-    """Internal acato (never sent to the payer): latest event per item."""
-    ids = list(ids)
-    if not ids:
-        return {}
-    last = (
-        select(func.max(PetrobrasEvento.id))
-        .where(
-            PetrobrasEvento.glosa_id.in_(ids),
-            PetrobrasEvento.tipo.in_(ACATO_EVENTS),
-        )
-        .group_by(PetrobrasEvento.glosa_id)
-    )
-    return {
-        e.glosa_id: e.dados
-        for e in db.scalars(
-            select(PetrobrasEvento).where(PetrobrasEvento.id.in_(last))
-        )
-        if e.tipo == 'acato'
-    }
 
 
 def treated(valor_glosa, recurso_estado, acato):
@@ -883,6 +861,12 @@ def send(item_id: int, body: SendInput, db: DB, config: Config, user: Writer):
 
 
 MAX_BATCH_SEND = 50
+SENT_STATES = {'protocolado', 'enviado_portal'}
+PORTAL_SAVED_NOTICE = (
+    'Recurso salvo no portal, ainda não enviado: há itens glosados sem '
+    'tratamento no lote, e efetivar agora os aceitaria. Trate-os e use '
+    'Efetivar no portal.'
+)
 
 
 @router.get('/glosas/prontos')
@@ -971,16 +955,18 @@ def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):  # n
         try:
             rows = send_protocol_appeal(db, config, pairs, user.id)
             outcome = {
-                'situacao': 'protocolado',
+                'situacao': rows[0].recurso_estado,
                 'protocolo': rows[0].recurso_protocolo,
             }
+            if rows[0].recurso_estado == 'salvo_portal':
+                outcome['aviso'] = PORTAL_SAVED_NOTICE
             pending = db.scalar(
                 select(func.count(PetrobrasAnexo.id)).where(
                     PetrobrasAnexo.glosa_id.in_(ids),
                     PetrobrasAnexo.estado != 'protocolado',
                 )
             )
-            if pending:
+            if pending and rows[0].recurso_estado == 'protocolado':
                 outcome['aviso'] = (
                     f'Recurso protocolado; {pending} comprovante(s) não '
                     'enviado(s). Veja o histórico do item.'
@@ -1002,11 +988,25 @@ def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):  # n
             results[item_id] = {'id': item_id, **outcome}
     return {
         'protocolados': sum(
-            r.get('situacao') == 'protocolado' for r in results.values()
+            r.get('situacao') in SENT_STATES for r in results.values()
         ),
         'recursos': appeals,
         'resultados': list(results.values()),
     }
+
+
+@router.post('/glosas/{item_id}/efetivar-portal')
+def portal_submit(item_id: int, db: DB, config: Config, user: Writer):
+    """Send the lot's saved appeals once every denied item is treated."""
+    if not config.can_transmit(getattr(user, 'email', None)):
+        raise HTTPException(
+            403, 'Envio de recurso em piloto; usuário ainda não liberado.'
+        )
+    row = item(db, config, item_id, lock=True)
+    try:
+        return public(efetivar_portal(db, config, row, user.id))
+    except (TissError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.post('/glosas/{item_id}/consultar-recurso')
