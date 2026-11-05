@@ -132,6 +132,9 @@ def import_lot(session, config, lote, protocolo, xml, oracle_loader, user_id):  
     ).one()
     for row in rows:
         row['origem'] = SOURCE
+        # The portal was asked for this lot: it is the payer's number.
+        row['lote_prestador'] = row.get('lote')
+        row['lote'] = lote
     senhas = guide_senhas(session, [protocol.id], rows)
     oracle_error = None
     try:

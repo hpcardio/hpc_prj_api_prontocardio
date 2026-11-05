@@ -236,6 +236,12 @@ def appeal_block(source, table_codes=frozenset()):
         )
     if source.get('escopo') != 'item' or not source.get('motivos'):
         return 'Recurso automático disponível apenas para itens discriminados.'
+    if 'lote_prestador' not in source:
+        # Only the payment demonstrativo has the payer's lot number.
+        return (
+            'Lote da Petrobras ainda não importado; importe a competência '
+            'deste demonstrativo.'
+        )
     unknown = [c for c in operator_codes(source) if c not in table_codes]
     if unknown:
         return (
@@ -805,6 +811,16 @@ def payment_protocols(root, config):
             'Demonstrativo sem protocolos; dados anteriores preservados.'
         )
     return sorted(n for n in numbers if set(n) != {'0'})
+
+
+def payment_lots(root):
+    """{protocol: payer's lot number}; conflicting protocols are left out."""
+    found = {}
+    for node in root.iter('{%s}relacaoProtocolos' % NS):
+        number, lot = value(node, 'numeroProtocolo'), value(node, 'numeroLote')
+        if number and lot and set(number) != {'0'}:
+            found.setdefault(number, set()).add(lot)
+    return {n: lots.pop() for n, lots in found.items() if len(lots) == 1}
 
 
 GUIDE_ONLY_NOTICE = (

@@ -46,9 +46,12 @@ from app_prontocardio.services.petrobras_portal_appeal import (
     multipart,
 )
 from app_prontocardio.services.petrobras_sync import (
+    apply_payer_lots,
     discover_competencia,
     event,
     import_rows,
+    known_payer_lots,
+    rows_with_payer_lots,
     synchronize,
     synchronize_competencia,
     synchronize_many,
@@ -58,9 +61,11 @@ from app_prontocardio.services.petrobras_tiss import (
     PetrobrasClient,
     TissError,
     TissRejected,
+    appeal_block,
     element,
     parse_demonstrativos,
     parse_xml,
+    payment_lots,
     payment_protocols,
     text_hash,
     validate,
@@ -68,16 +73,6 @@ from app_prontocardio.services.petrobras_tiss import (
     value,
 )
 from scripts.sync_petrobras import competencias
-
-REAL_PETROBRAS_LOT = petrobras_appeals.petrobras_lot
-
-
-@pytest.fixture(autouse=True)
-def payer_lot(monkeypatch):
-    # No webservice in unit tests.
-    monkeypatch.setattr(
-        petrobras_appeals, 'petrobras_lot', lambda *_a, **_k: 'CAPA1'
-    )
 
 
 @pytest.fixture
@@ -132,6 +127,7 @@ def source():
         'sequencial': '1',
         'guia_prestador': '000000000000000X9999',
         'senha': 'P0123',
+        'lote_prestador': '1',
         'guia_operadora': '000123',
         'tuss': '00123456',
         'tabela': '22',
@@ -2346,42 +2342,7 @@ def test_portal_screen_parsers():
     assert b'filename="n__me.pdf"' in body
 
 
-def test_appeal_sends_the_payers_lot_number(
-    db, protocol, config, source, candidate
-):
-    rows = ready_rows(db, protocol, config, source, candidate)
-    row = rows['1']
-    original = row.fonte['lote']
-    client = Mock()
-    client.appeal_protocol.side_effect = TimeoutError()
-    with pytest.raises(TissError, match='não confirmado'):
-        send_appeal(db, config, row, row.versao, 1, client)
-    sent = client.appeal_protocol.call_args.args[0][0][0]
-    assert sent['lote'] == 'CAPA1'
-    assert sent['lote_mv'] == original
-    assert row.fonte['lote'] == original
-
-
-def test_unknown_payer_lot_blocks_before_any_change(  # noqa: PLR0913, PLR0917 - fixtures
-    db, protocol, config, source, candidate, monkeypatch
-):
-    rows = ready_rows(db, protocol, config, source, candidate)
-    row = rows['1']
-    version = row.versao
-
-    def unknown(*_args, **_kwargs):
-        raise TissError('Número do lote na Petrobras não localizado.')
-
-    monkeypatch.setattr(petrobras_appeals, 'petrobras_lot', unknown)
-    client = Mock()
-    with pytest.raises(TissError, match='não localizado'):
-        send_appeal(db, config, row, version, 1, client)
-    client.appeal_protocol.assert_not_called()
-    assert row.recurso_estado == 'rascunho'
-    assert row.versao == version
-
-
-def payment_demo(*protocols):
+def lot_response(*protocols):
     root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
     for protocol, lot in protocols:
         node = element(root, 'relacaoProtocolos')
@@ -2390,37 +2351,57 @@ def payment_demo(*protocols):
     return root
 
 
-def test_payer_lot_comes_from_the_payment_demonstrativo(config):
-    source = {'protocolo': '13869619', 'data_emissao': '2026-10-28'}
-    client = Mock()
-    client.pagamentos.return_value = payment_demo(
-        ('0', '999'), ('13869619', '36022538'), ('13871696', '36025378')
+def test_payment_lots_ignores_blank_and_conflicting_protocols():
+    root = lot_response(
+        ('0', '9'), ('1', '36022538'), ('2', '5'), ('2', '6'), ('3', '7')
     )
-    assert REAL_PETROBRAS_LOT(config, [source], client) == '36022538'
-    assert [c.args[0] for c in client.pagamentos.call_args_list] == [
-        '202610',
-        '202611',
-    ]
+    assert payment_lots(root) == {'1': '36022538', '3': '7'}
 
 
-def test_payer_lot_crosses_the_year_and_tolerates_an_empty_month(config):
-    source = {'protocolo': '1', 'data_emissao': '2026-12-28'}
+def test_payer_lot_is_stored_and_the_appeal_sends_it(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    original = row.fonte['lote']
+    lots = {protocol.numero: '36022538'}
+    assert apply_payer_lots(db, config, lots) == len(rows)
+    db.commit()
+    assert row.fonte['lote'] == '36022538'
+    assert row.fonte['lote_prestador'] == original
+    assert apply_payer_lots(db, config, lots) == 0
     client = Mock()
-    client.pagamentos.side_effect = [
-        TissError('Nenhuma informação'),
-        payment_demo(('1', '55')),
+    client.appeal_protocol.side_effect = TimeoutError()
+    with pytest.raises(TissError, match='não confirmado'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    sent = client.appeal_protocol.call_args.args[0][0][0]
+    assert sent['lote'] == '36022538'
+    client.pagamentos.assert_not_called()
+
+
+def test_protocol_sync_keeps_the_stored_payer_lot(
+    db, protocol, config, source, candidate
+):
+    ready_rows(db, protocol, config, source, candidate)
+    apply_payer_lots(db, config, {protocol.numero: '36022538'})
+    db.commit()
+    assert known_payer_lots(db, [protocol.id]) == {
+        protocol.numero: '36022538'
+    }
+
+
+def test_row_without_the_payer_lot_cannot_be_appealed(source):
+    unknown = {k: v for k, v in source.items() if k != 'lote_prestador'}
+    assert 'Lote da Petrobras' in appeal_block(unknown)
+    assert appeal_block(source) is None
+
+
+def test_new_rows_of_a_known_protocol_get_the_payer_lot():
+    rows = [
+        {'protocolo': '1', 'lote': '1928'},
+        {'protocolo': '2', 'lote': '5'},
     ]
-    assert REAL_PETROBRAS_LOT(config, [source], client) == '55'
-    assert client.pagamentos.call_args.args[0] == '202701'
-
-
-@pytest.mark.parametrize(
-    'protocols',
-    [[('2', '55')], [('1', '55'), ('1', '66')]],
-)
-def test_missing_or_conflicting_payer_lot_blocks(config, protocols):
-    client = Mock()
-    client.pagamentos.return_value = payment_demo(*protocols)
-    source = {'protocolo': '1', 'data_emissao': '2026-10-28'}
-    with pytest.raises(TissError, match='recurso não enviado'):
-        REAL_PETROBRAS_LOT(config, [source], client)
+    assert rows_with_payer_lots(rows, {'1': '36022538'}) == [
+        {'protocolo': '1', 'lote': '36022538', 'lote_prestador': '1928'},
+        {'protocolo': '2', 'lote': '5'},
+    ]
