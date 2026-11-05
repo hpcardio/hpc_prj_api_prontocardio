@@ -41,8 +41,13 @@ from app_prontocardio.services.petrobras_appeals import (
 )
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import reconcile
+from app_prontocardio.services.petrobras_portal_appeal import (
+    lot_forms,
+    multipart,
+)
 from app_prontocardio.services.petrobras_sync import (
     discover_competencia,
+    event,
     import_rows,
     synchronize,
     synchronize_competencia,
@@ -2073,3 +2078,226 @@ def test_batch_sends_one_appeal_per_protocol(  # noqa: PLR0913 - pytest fixtures
     for r in db.scalars(select(PetrobrasGlosa)):
         guides[r.fonte['protocolo']].add(r.recurso_guia)
     assert all(len(v) == 1 for v in guides.values())
+
+
+class FakePortal:
+    """Screen state: denied items of one lot, no network."""
+
+    def __init__(self, rows, account_extra=None):
+        self.lot = {'numeroLote': '77', 'numeroCapaLote': '77'}
+        self.denied = [
+            {
+                'numeroItem': row.id,
+                'numeroConta': 1,
+                'numeroCapaLote': 77,
+                'numeroContaPrestador': row.guia_prestador,
+                'codigoItem': row.fonte['tuss'],
+                'valorGlosado': float(row.fonte['valor_glosa']),
+                'flagDenyItem': 'S',
+            }
+            for row in rows
+        ]
+        self.account = {
+            'numeroConta': 1,
+            'numeroCapaLote': 77,
+            'numeroCapaLotePrestador': 36022538,
+            'numeroContaPrestador': rows[0].fonte['guia_prestador'],
+            'numeroContaOperadora': rows[0].fonte['guia_operadora'],
+            **(account_extra or {}),
+        }
+        self.saved, self.efetivados, self.closed = [], 0, False
+        self.efetivar_error = None
+
+    def lots(self, _demonstrativo):
+        yield self.lot
+
+    def accounts(self, _lot):
+        return [self.account]
+
+    def items(self, _lot, _account):
+        return [dict(i) for i in self.denied]
+
+    def save(self, _lot, item, justification, attachments):
+        self.saved.append((item['numeroItem'], justification, attachments))
+        for row in self.denied:
+            if row['numeroItem'] == item['numeroItem']:
+                row['situacaoRecursadoAceito'] = 'R'
+
+    def efetivar(self, _lot):
+        if self.efetivar_error:
+            raise self.efetivar_error
+        self.efetivados += 1
+        self.account['quantidadeItensRecursado'] = 1
+        return {'mensagemRetorno': 'ok'}
+
+    def close(self):
+        self.closed = True
+
+
+def portal_rows(db, protocol, config, source, candidate):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    for sequence, row in rows.items():
+        row.justificativa = 'Justificativa com mais de vinte caracteres'
+        row.tuss = f'1000000{sequence}'
+        row.fonte = {**row.fonte, 'tuss': row.tuss}
+    config.portal_fallback = True
+    db.commit()
+    return rows
+
+
+def run_portal(db, config, row, portal):
+    return petrobras_appeals.appeal_by_portal(
+        db, config, [row.id], TissRejected('ORA-01403'), 'G1', 1, portal
+    )
+
+
+def acato_row(db, row):
+    event(db, row, 'acato', {'valor': str(row.valor_glosa)}, 1)
+    db.commit()
+
+
+def test_webservice_failure_uses_portal_only_when_enabled(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    client = Mock()
+    client.appeal_protocol.side_effect = TissRejected('ORA-01403')
+    calls = []
+    monkeypatch.setattr(
+        petrobras_appeals,
+        'appeal_by_portal',
+        lambda *args, **_kw: calls.append(args[2]) or [row],
+    )
+    send_appeal(db, config, row, row.versao, 1, client)
+    assert calls == [[row.id]]
+    config.portal_fallback = False
+    row.recurso_estado = 'rascunho'
+    db.commit()
+    with pytest.raises(TissError, match='não aceito'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    assert calls == [[row.id]]
+
+
+def test_portal_efetiva_only_when_every_denied_item_is_treated(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    portal = FakePortal([target, other])
+    run_portal(db, config, target, portal)
+    assert [s[0] for s in portal.saved] == [target.id]
+    assert portal.efetivados == 0
+    assert target.recurso_estado == 'salvo_portal'
+    assert portal.closed
+    with pytest.raises(TissError, match=r'1 item\(ns\).*seriam aceitos'):
+        petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+    assert portal.efetivados == 0
+    acato_row(db, other)
+    petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+    assert portal.efetivados == 1
+    assert target.recurso_estado == 'enviado_portal'
+
+
+def test_portal_sends_at_once_when_the_rest_of_the_lot_is_accepted(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    acato_row(db, other)
+    proof = PetrobrasAnexo(
+        glosa_id=target.id,
+        nome='formulario.pdf',
+        mime='application/pdf',
+        conteudo=b'%PDF-test',
+        sha256='b' * 64,
+        tipo_documento='01',
+        natureza_guia='3',
+        formato='02',
+    )
+    db.add(proof)
+    db.commit()
+    portal = FakePortal([target, other])
+    run_portal(db, config, target, portal)
+    assert portal.efetivados == 1
+    assert target.recurso_estado == 'enviado_portal'
+    assert portal.saved[0][2][0].nome == 'formulario.pdf'
+    assert proof.estado == 'protocolado'
+
+
+def test_portal_never_touches_an_account_already_sent(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    portal = FakePortal([target], {'quantidadeItensRecursado': 1})
+    with pytest.raises(TissError, match='já tem item enviado'):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+    assert portal.efetivados == 0
+    assert target.recurso_estado == 'rascunho'
+
+
+def test_failed_efetivar_is_uncertain_and_blocks_resend(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    portal = FakePortal([target])
+    portal.efetivar_error = TissError('Portal Petrobras: HTTP 500.')
+    with pytest.raises(TissError, match='não confirmado'):
+        run_portal(db, config, target, portal)
+    assert target.recurso_estado == 'envio_incerto'
+    with pytest.raises(TissError, match='iniciada'):
+        send_appeal(db, config, target, target.versao, 1, Mock())
+
+
+@pytest.mark.parametrize(
+    ('justification', 'mime', 'message'),
+    [
+        ('curta', 'application/pdf', 'ao menos 20'),
+        ('Justificativa com mais de vinte', 'image/png', 'PDF, JPG ou BMP'),
+    ],
+)
+def test_portal_rules_are_checked_before_any_write(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, justification, mime, message
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    target.justificativa = justification
+    db.add(
+        PetrobrasAnexo(
+            glosa_id=target.id,
+            nome='a',
+            mime=mime,
+            conteudo=b'x',
+            sha256='c' * 64,
+            tipo_documento='01',
+            natureza_guia='3',
+            formato='02',
+        )
+    )
+    db.commit()
+    portal = FakePortal([target])
+    with pytest.raises(TissError, match=message):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+    assert target.recurso_estado == 'rascunho'
+
+
+def test_portal_screen_parsers():
+    html = (
+        '<form id="formularioBuscarLote_36022538" action="x"><input '
+        'name="lote" value="12241103" type="hidden" value=""/><input '
+        "name='periodo' value='60'/></form>"
+    )
+    assert lot_forms(html) == {
+        '36022538': {'lote': '12241103', 'periodo': '60'}
+    }
+    body, kind = multipart(
+        [('campo', 'é')],
+        [('arq[0].file', 'nó me.pdf', 'application/pdf', b'P')],
+    )
+    assert 'boundary=' in kind
+    assert 'name="campo"'.encode() in body
+    assert b'filename="n__me.pdf"' in body
