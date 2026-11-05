@@ -35,6 +35,8 @@ from app_prontocardio.services.petrobras_tiss import (
 )
 
 APPEAL_ID_DIGITS = 20  # numeroGuiaRecGlosaPrestador: st_texto20.
+MONTHS_PER_YEAR = 12
+ISO_MONTH = 7  # AAAA-MM
 ACATO_EVENTS = ('acato', 'acato_removido')
 
 
@@ -130,6 +132,45 @@ def check_draft(row, version, today):
         )
 
 
+def payment_months(issued):
+    """Competence of the demonstrativo's date, then the next one."""
+    year, month = int(issued[:4]), int(issued[5:7])
+    following = (
+        (year + 1, 1) if month == MONTHS_PER_YEAR else (year, month + 1)
+    )
+    return [f'{year}{month:02d}', f'{following[0]}{following[1]:02d}']
+
+
+def petrobras_lot(config, sources, client=None):
+    """Payer's lot number, from its payment demonstrativo (webservice).
+
+    The account analysis returns numeroLotePrestador, the number the MV
+    generated (1928). The payment demonstrativo lists each protocol with the
+    number the payer knows the lot by (36022538).
+    """
+    protocol = sources[0].get('protocolo')
+    issued = str(sources[0].get('data_emissao') or '')
+    client = client or PetrobrasClient(config)
+    numbers = set()
+    for month in payment_months(issued) if len(issued) >= ISO_MONTH else []:
+        try:
+            root = client.pagamentos(month)
+        except TissError:
+            continue
+        numbers |= {
+            value(node, 'numeroLote')
+            for node in root.iter('{%s}relacaoProtocolos' % NS)
+            if value(node, 'numeroProtocolo') == protocol
+        }
+    numbers.discard(None)
+    if len(numbers) != 1:
+        raise TissError(
+            'Número do lote na Petrobras não localizado no demonstrativo de '
+            'pagamento; recurso não enviado.'
+        )
+    return numbers.pop()
+
+
 def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0912, PLR0914, PLR0915 - durable transmission state transitions
     """One TISS appeal for items of one lot/protocol; never retried.
 
@@ -170,6 +211,10 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
         (r.recurso_guia for r in rows if (r.recurso_guia or '').isdigit()),
         str(uuid4().int % 10**APPEAL_ID_DIGITS).zfill(APPEAL_ID_DIGITS),
     )
+    # Before any state change: an unknown lot number blocks the transmission.
+    lot_number = petrobras_lot(config, [s for s, _ in entries])
+    for source, _ in entries:
+        source['lote_mv'], source['lote'] = source.get('lote'), lot_number
     codes = appeal_codes(db, config, [s for s, _ in entries])
     preflight = PetrobrasClient(config, dry_run=True)
     preflight.appeal_protocol(entries, appeal_id, codes)

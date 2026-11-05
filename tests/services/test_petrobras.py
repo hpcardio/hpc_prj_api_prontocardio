@@ -69,6 +69,16 @@ from app_prontocardio.services.petrobras_tiss import (
 )
 from scripts.sync_petrobras import competencias
 
+REAL_PETROBRAS_LOT = petrobras_appeals.petrobras_lot
+
+
+@pytest.fixture(autouse=True)
+def payer_lot(monkeypatch):
+    # No webservice in unit tests.
+    monkeypatch.setattr(
+        petrobras_appeals, 'petrobras_lot', lambda *_a, **_k: 'CAPA1'
+    )
+
 
 @pytest.fixture
 def config():
@@ -2334,3 +2344,83 @@ def test_portal_screen_parsers():
     assert 'boundary=' in kind
     assert 'name="campo"'.encode() in body
     assert b'filename="n__me.pdf"' in body
+
+
+def test_appeal_sends_the_payers_lot_number(
+    db, protocol, config, source, candidate
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    original = row.fonte['lote']
+    client = Mock()
+    client.appeal_protocol.side_effect = TimeoutError()
+    with pytest.raises(TissError, match='não confirmado'):
+        send_appeal(db, config, row, row.versao, 1, client)
+    sent = client.appeal_protocol.call_args.args[0][0][0]
+    assert sent['lote'] == 'CAPA1'
+    assert sent['lote_mv'] == original
+    assert row.fonte['lote'] == original
+
+
+def test_unknown_payer_lot_blocks_before_any_change(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = ready_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    version = row.versao
+
+    def unknown(*_args, **_kwargs):
+        raise TissError('Número do lote na Petrobras não localizado.')
+
+    monkeypatch.setattr(petrobras_appeals, 'petrobras_lot', unknown)
+    client = Mock()
+    with pytest.raises(TissError, match='não localizado'):
+        send_appeal(db, config, row, version, 1, client)
+    client.appeal_protocol.assert_not_called()
+    assert row.recurso_estado == 'rascunho'
+    assert row.versao == version
+
+
+def payment_demo(*protocols):
+    root = ET.Element('{%s}demonstrativoRetornoWS' % NS)
+    for protocol, lot in protocols:
+        node = element(root, 'relacaoProtocolos')
+        element(node, 'numeroProtocolo', protocol)
+        element(node, 'numeroLote', lot)
+    return root
+
+
+def test_payer_lot_comes_from_the_payment_demonstrativo(config):
+    source = {'protocolo': '13869619', 'data_emissao': '2026-10-28'}
+    client = Mock()
+    client.pagamentos.return_value = payment_demo(
+        ('0', '999'), ('13869619', '36022538'), ('13871696', '36025378')
+    )
+    assert REAL_PETROBRAS_LOT(config, [source], client) == '36022538'
+    assert [c.args[0] for c in client.pagamentos.call_args_list] == [
+        '202610',
+        '202611',
+    ]
+
+
+def test_payer_lot_crosses_the_year_and_tolerates_an_empty_month(config):
+    source = {'protocolo': '1', 'data_emissao': '2026-12-28'}
+    client = Mock()
+    client.pagamentos.side_effect = [
+        TissError('Nenhuma informação'),
+        payment_demo(('1', '55')),
+    ]
+    assert REAL_PETROBRAS_LOT(config, [source], client) == '55'
+    assert client.pagamentos.call_args.args[0] == '202701'
+
+
+@pytest.mark.parametrize(
+    'protocols',
+    [[('2', '55')], [('1', '55'), ('1', '66')]],
+)
+def test_missing_or_conflicting_payer_lot_blocks(config, protocols):
+    client = Mock()
+    client.pagamentos.return_value = payment_demo(*protocols)
+    source = {'protocolo': '1', 'data_emissao': '2026-10-28'}
+    with pytest.raises(TissError, match='recurso não enviado'):
+        REAL_PETROBRAS_LOT(config, [source], client)
