@@ -312,19 +312,6 @@ def lot_items(portal, lot):
     ]
 
 
-def untreated_items(db, portal, lot, demonstrativo):
-    """Denied items Efetivar would accept against the system's records."""
-    treated_keys = accepted_rows(db, demonstrativo)
-    return [
-        item
-        for item in lot_items(portal, lot)
-        if is_denied(item)
-        and not is_saved(item)
-        and not is_accepted(item)
-        and item_key(item) not in treated_keys
-    ]
-
-
 def accept_treated(db, portal, lot, demonstrativo, user_id, appealing=()):  # noqa: PLR0913, PLR0917 - audit context
     """Aceitar Selecionados: items marked as acato, except those appealing."""
     by_key = accepted_rows(db, demonstrativo)
@@ -446,13 +433,11 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
             for r, lot, a in located
         ]
         by_lot = {}
-        for row, lot, account, _ in targets:
-            by_lot.setdefault(lot['numeroLote'], (lot, account, []))[2].append(
-                row
-            )
+        for row, lot, _, _ in targets:
+            by_lot.setdefault(lot['numeroLote'], (lot, []))[1].append(row)
         appealing = {item.get('numeroItem') for *_, item in targets}
         # The screen's order: Aceitar Selecionados, then Salvar Recurso.
-        for lot, _, lot_rows in by_lot.values():
+        for lot, lot_rows in by_lot.values():
             accept_treated(
                 db, client, lot, lot_rows[0].demonstrativo, user_id, appealing
             )
@@ -475,10 +460,6 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
             )
             db.commit()
             saved.append(row.id)
-        for lot, account, lot_rows in by_lot.values():
-            demonstrativo = lot_rows[0].demonstrativo
-            if not untreated_items(db, client, lot, demonstrativo):
-                submit_lot(db, client, lot, account, lot_rows, user_id)
         return rows
     except Exception as exc:  # noqa: BLE001 - recorded on the items
         if any(
@@ -528,19 +509,85 @@ def accept_on_screen(db, config, rows, user_id, portal=None):
             client.close()
 
 
+def efetivar_preview(db, config, row, portal=None):
+    """What Efetivar would do to the lot; asked of the user before it runs."""
+    if row.recurso_estado != 'salvo_portal':
+        raise TissError('Recurso não está salvo no portal.')
+    client = portal or PortalAppeal(config)
+    try:
+        lot, _ = find_lot(client, row.fonte)
+        denied = [i for i in lot_items(client, lot) if is_denied(i)]
+        marked = accepted_rows(db, row.demonstrativo)
+    finally:
+        client.close()
+    saved = [i for i in denied if is_saved(i)]
+    accepted = [
+        i
+        for i in denied
+        if not is_saved(i) and (is_accepted(i) or item_key(i) in marked)
+    ]
+    untreated = [i for i in denied if i not in saved and i not in accepted]
+    return {
+        'lote': (row.fonte or {}).get('lote'),
+        'recursos': len(saved),
+        'acatos': len(accepted),
+        'nao_recursados': [
+            {
+                'guia': i.get('numeroContaPrestador'),
+                'tuss': i.get('codigoItem'),
+                'descricao': i.get('descricaoItem'),
+                'valor_glosa': i.get('valorGlosado'),
+            }
+            for i in untreated
+        ],
+    }
+
+
+def record_accepted(db, row, keys, user_id):
+    """Rows of the lot Efetivar accepted can no longer be appealed here."""
+    rows = [
+        r
+        for r in db.scalars(
+            select(PetrobrasGlosa).where(
+                PetrobrasGlosa.demonstrativo == row.demonstrativo,
+                PetrobrasGlosa.presente_na_fonte.is_(True),
+                PetrobrasGlosa.recurso_estado == 'rascunho',
+            )
+        )
+        if (r.fonte or {}).get('lote') == (row.fonte or {}).get('lote')
+        and row_key(r) in keys
+    ]
+    current = acatos(db, (r.id for r in rows))
+    today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+    for accepted in rows:
+        if not fully_accepted(accepted, current.get(accepted.id)):
+            source = accepted.fonte or {}
+            event(
+                db,
+                accepted,
+                'acato',
+                {
+                    'data': today.isoformat(),
+                    'quantidade': str(source.get('quantidade') or 1),
+                    'valor': str(accepted.valor_glosa),
+                    'lote': source.get('lote'),
+                    'processo': None,
+                    'descricao': 'Aceito ao efetivar o lote no portal.',
+                },
+                user_id,
+            )
+        accepted.recurso_estado = 'aceito_portal'
+        event(db, accepted, 'aceito_efetivacao', {}, user_id)
+    db.commit()
+
+
 def efetivar_portal(db, config, row, user_id, portal=None):
-    """Send the lot's saved appeals once no denied item would be accepted."""
+    """Only on the user's request: every unappealed item becomes accepted."""
     if row.recurso_estado != 'salvo_portal':
         raise TissError('Recurso não está salvo no portal.')
     client = portal or PortalAppeal(config)
     try:
         lot, account = find_lot(client, row.fonte)
-        missing = untreated_items(db, client, lot, row.demonstrativo)
-        if missing:
-            raise TissError(
-                f'{len(missing)} item(ns) glosado(s) do lote sem tratamento '
-                'seriam aceitos ao efetivar; registre recurso ou acato.'
-            )
         lot_rows = [
             r
             for r in db.scalars(
@@ -554,7 +601,13 @@ def efetivar_portal(db, config, row, user_id, portal=None):
             if (r.fonte or {}).get('lote') == (row.fonte or {}).get('lote')
         ]
         accept_treated(db, client, lot, row.demonstrativo, user_id)
+        accepted_keys = {
+            item_key(i)
+            for i in lot_items(client, lot)
+            if is_denied(i) and not is_saved(i)
+        }
         submit_lot(db, client, lot, account, lot_rows, user_id)
+        record_accepted(db, row, accepted_keys, user_id)
     finally:
         client.close()
     return row
