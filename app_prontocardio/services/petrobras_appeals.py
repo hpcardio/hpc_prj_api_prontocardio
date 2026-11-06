@@ -19,6 +19,7 @@ from app_prontocardio.services.petrobras_portal_appeal import (
     DOCUMENT_TYPES,
     MIN_JUSTIFICATION,
     PortalAppeal,
+    is_accepted,
     is_denied,
     is_saved,
     same_value,
@@ -264,8 +265,20 @@ def find_item(portal, lot, account, source):
     return matches[0]
 
 
-def untreated_items(db, portal, lot, demonstrativo):
-    """Denied items Efetivar would accept against the system's records."""
+def item_key(item):
+    return (
+        item.get('numeroContaPrestador'),
+        item.get('codigoItem'),
+        Decimal(str(item.get('valorGlosado') or 0)),
+    )
+
+
+def row_key(row):
+    return (row.guia_prestador, row.tuss, Decimal(str(row.valor_glosa or 0)))
+
+
+def accepted_rows(db, demonstrativo):
+    """Rows of the demonstrativo the system marked as acato, by screen key."""
     rows = list(
         db.scalars(
             select(PetrobrasGlosa).where(
@@ -275,24 +288,63 @@ def untreated_items(db, portal, lot, demonstrativo):
         )
     )
     accepted = acatos(db, (r.id for r in rows))
-    treated_keys = {
-        (r.guia_prestador, r.tuss, Decimal(str(r.valor_glosa or 0)))
-        for r in rows
-        if r.id in accepted
-    }
+    by_key = {}
+    for row in rows:
+        if row.id in accepted:
+            by_key.setdefault(row_key(row), []).append(row)
+    return by_key
+
+
+def lot_items(portal, lot):
     return [
         item
         for account in portal.accounts(lot)
         for item in portal.items(lot, account)
+    ]
+
+
+def untreated_items(db, portal, lot, demonstrativo):
+    """Denied items Efetivar would accept against the system's records."""
+    treated_keys = accepted_rows(db, demonstrativo)
+    return [
+        item
+        for item in lot_items(portal, lot)
         if is_denied(item)
         and not is_saved(item)
-        and (
-            item.get('numeroContaPrestador'),
-            item.get('codigoItem'),
-            Decimal(str(item.get('valorGlosado') or 0)),
-        )
-        not in treated_keys
+        and not is_accepted(item)
+        and item_key(item) not in treated_keys
     ]
+
+
+def accept_treated(db, portal, lot, demonstrativo, user_id):
+    """Aceitar Selecionados: the items the system already marked as acato."""
+    by_key = accepted_rows(db, demonstrativo)
+    for item in lot_items(portal, lot):
+        if not is_denied(item) or is_saved(item) or is_accepted(item):
+            continue
+        rows = by_key.get(item_key(item))
+        if not rows:
+            continue
+        portal.accept(lot, item)
+        for row in rows:
+            event(
+                db,
+                row,
+                'aceito_portal',
+                {'numero_item': item.get('numeroItem')},
+                user_id,
+            )
+    db.commit()
+
+
+def appeal_protocols(portal, lot, rows):
+    """Protocolo de Recurso the portal assigned to each row, when listed."""
+    numbers = {
+        item_key(item): item.get('protocoloRecurso')
+        for item in lot_items(portal, lot)
+        if is_saved(item) and item.get('protocoloRecurso')
+    }
+    return {r.id: numbers.get(row_key(r)) for r in rows}
 
 
 def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR0917 - audit context
@@ -307,6 +359,7 @@ def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR09
         )
         if not sent:
             raise TissError('Portal não confirmou a efetivação.')
+        protocols = appeal_protocols(portal, lot, rows)
     except Exception as exc:  # noqa: BLE001 - Efetivar may have been applied
         reason = str(exc)[:300] if isinstance(exc, TissError) else 'falha'
         for row in rows:
@@ -320,12 +373,15 @@ def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR09
         ) from None
     for row in rows:
         row.recurso_estado = 'enviado_portal'
+        protocol = protocols.get(row.id)
+        row.recurso_protocolo = str(protocol) if protocol else None
         event(
             db,
             row,
             'enviado_portal',
             {
                 'capa_lote': account.get('numeroCapaLotePrestador'),
+                'protocolo': row.recurso_protocolo,
                 'retorno': str(answer.get('mensagemRetorno') or '')[:300],
             },
             user_id,
@@ -402,6 +458,7 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
         for lot, account, lot_rows in by_lot.values():
             demonstrativo = lot_rows[0].demonstrativo
             if not untreated_items(db, client, lot, demonstrativo):
+                accept_treated(db, client, lot, demonstrativo, user_id)
                 submit_lot(db, client, lot, account, lot_rows, user_id)
         return rows
     except Exception as exc:  # noqa: BLE001 - recorded on the items
@@ -451,6 +508,7 @@ def efetivar_portal(db, config, row, user_id, portal=None):
             )
             if (r.fonte or {}).get('lote') == (row.fonte or {}).get('lote')
         ]
+        accept_treated(db, client, lot, row.demonstrativo, user_id)
         submit_lot(db, client, lot, account, lot_rows, user_id)
     finally:
         client.close()

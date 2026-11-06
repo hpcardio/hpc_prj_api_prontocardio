@@ -2,6 +2,8 @@
 # Literal expected values make these protocol fixtures explicit.
 import base64
 import importlib.util
+import json
+import re
 from copy import deepcopy
 from datetime import date, timedelta
 from decimal import Decimal
@@ -42,6 +44,8 @@ from app_prontocardio.services.petrobras_appeals import (
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import reconcile
 from app_prontocardio.services.petrobras_portal_appeal import (
+    PortalAppeal,
+    error_text,
     lot_forms,
     multipart,
 )
@@ -2145,6 +2149,7 @@ class FakePortal:
             **(account_extra or {}),
         }
         self.saved, self.efetivados, self.closed = [], 0, False
+        self.accepted = []
         self.efetivar_error = None
 
     def lots(self, _demonstrativo):
@@ -2162,11 +2167,21 @@ class FakePortal:
             if row['numeroItem'] == item['numeroItem']:
                 row['situacaoRecursadoAceito'] = 'R'
 
+    def accept(self, _lot, item):
+        assert self.efetivados == 0, 'aceite vem antes de efetivar'
+        self.accepted.append(item['numeroItem'])
+        for row in self.denied:
+            if row['numeroItem'] == item['numeroItem']:
+                row['situacaoRecursadoAceito'] = 'A'
+
     def efetivar(self, _lot):
         if self.efetivar_error:
             raise self.efetivar_error
         self.efetivados += 1
         self.account['quantidadeItensRecursado'] = 1
+        for row in self.denied:
+            if row.get('situacaoRecursadoAceito') == 'R':
+                row['protocoloRecurso'] = 162723152
         return {'mensagemRetorno': 'ok'}
 
     def close(self):
@@ -2262,6 +2277,121 @@ def test_portal_sends_at_once_when_the_rest_of_the_lot_is_accepted(
     assert target.recurso_estado == 'enviado_portal'
     assert portal.saved[0][2][0].nome == 'formulario.pdf'
     assert proof.estado == 'protocolado'
+    assert portal.accepted == [other.id]
+    assert target.recurso_protocolo == '162723152'
+    assert other.recurso_estado == 'rascunho'
+
+
+def test_portal_does_not_accept_while_an_item_is_untreated(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    portal = FakePortal([target, rows['2']])
+    run_portal(db, config, target, portal)
+    assert portal.accepted == []
+    assert portal.efetivados == 0
+
+
+def test_portal_keeps_the_send_when_the_protocol_is_not_listed(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    acato_row(db, other)
+    portal = FakePortal([target, other])
+    original = portal.efetivar
+
+    def without_protocol(lot):
+        answer = original(lot)
+        for row in portal.denied:
+            row.pop('protocoloRecurso', None)
+        return answer
+
+    portal.efetivar = without_protocol
+    run_portal(db, config, target, portal)
+    assert target.recurso_estado == 'enviado_portal'
+    assert target.recurso_protocolo is None
+
+
+class CapturingAppeal(PortalAppeal):
+    def __init__(self):
+        self.calls = []
+
+    def _rest(self, path, query=None, data=None, content_type=None):
+        self.calls.append((path, data, content_type))
+        return b'{}'
+
+
+def posted(call):
+    """Fields of a captured multipart body, as the server would split them."""
+    _, data, content_type = call
+    boundary = content_type.split('boundary=')[1].encode()
+    fields = {}
+    for part in data.split(b'--' + boundary):
+        head, _, value = part.partition(b'\r\n\r\n')
+        name = re.search(rb'name="([^"]+)"', head)
+        if name:
+            fields[name.group(1).decode()] = (head, value[:-2])
+    return fields
+
+
+PORTAL_ITEM = {
+    'numeroItem': 731101237,
+    'numeroConta': 1,
+    'codigoItem': '60000384',
+    'valorGlosado': 40.19,
+    'valorAcerto': None,
+    'flagDenyItem': 'S',
+    'dataRealizacao': 1755561600000,
+    'situacaoRecursadoAceito': None,
+    'listaDocumentoAnexo': [],
+    'stringArrayDetalhesRecursoGlosa': None,
+    'justificativaRecurso': None,
+}
+PORTAL_LOT = {'numeroLote': '12241103', 'codigoUsuario': 'U'}
+
+
+def test_portal_save_posts_what_the_screen_posts():
+    client = CapturingAppeal()
+    proof = SimpleNamespace(
+        nome='formulario.pdf', mime='application/pdf', conteudo=b'%PDF'
+    )
+    client.save(PORTAL_LOT, PORTAL_ITEM, 'Justificativa', [proof])
+    fields = posted(client.calls[0])
+    row = json.loads(fields['listaItensSelecionadosRecursoGlosa'][1])
+    assert 'situacaoRecursadoAceito' not in fields
+    assert fields['codigosSelecionados'][1] == b'731101237;'
+    assert fields['listaDocumentoAnexo[0].file'][1] == b'%PDF'
+    assert row['situacaoRecursadoAceito'] == 'R'
+    assert row['valorRecursado'] == pytest.approx(40.19)
+    assert row['valorGlosado'] == '40.19'
+    assert row['dataRealizacao'] == '1755561600000'
+    assert row['listaDetalheRecursoGlosa'] is None
+    assert 'listaDocumentoAnexo' not in row
+    assert 'stringArrayDetalhesRecursoGlosa' not in row
+    assert row['mensagemRespostaPrestador'] == 'Justificativa'
+
+
+def test_portal_accept_posts_zero_value_and_an_empty_file():
+    client = CapturingAppeal()
+    client.accept(PORTAL_LOT, PORTAL_ITEM)
+    fields = posted(client.calls[0])
+    row = json.loads(fields['listaItensSelecionadosRecursoGlosa'][1])
+    assert row['situacaoRecursadoAceito'] == 'A'
+    assert row['valorRecursado'] == '0.0'
+    assert fields['mensagemRespostaPrestador'][1] == b''
+    assert fields['listaDocumentoAnexo[0].file'][1] == b''
+    assert b'filename=""' in fields['listaDocumentoAnexo[0].file'][0]
+
+
+def test_portal_http_error_reports_the_reason_of_the_server():
+    body = BytesIO(b'<html><b>Falha</b> ao gravar</html>')
+    exc = HTTPError('http://x', 500, 'erro', {}, body)
+    assert error_text(exc) == 'Falha ao gravar'
+    body = BytesIO(json.dumps({'errorMessage': 'x' * 900}).encode())
+    exc = HTTPError('http://x', 500, 'erro', {}, body)
+    assert error_text(exc) == 'x' * 200
 
 
 def test_portal_never_touches_an_account_already_sent(
