@@ -698,7 +698,7 @@ class AcatoInput(BaseModel):
 def save_acato(
     item_id: int, body: AcatoInput, db: DB, config: Config, user: Writer
 ):
-    """Internal control only, as for payers without integration."""
+    """Recorded here; sent on the payer's screen with the lot's appeal."""
     row = item(db, config, item_id, lock=True)
     if row.recurso_estado != 'rascunho':
         raise HTTPException(409, 'Recurso já transmitido; acato bloqueado.')

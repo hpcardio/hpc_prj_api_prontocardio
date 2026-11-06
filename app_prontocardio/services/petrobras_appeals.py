@@ -40,7 +40,7 @@ ACATO_EVENTS = ('acato', 'acato_removido')
 
 
 def acatos(db, ids):
-    """Internal acato (never sent to the payer): latest event per item."""
+    """Acato recorded here, sent on the payer's screen: latest per item."""
     ids = list(ids)
     if not ids:
         return {}
@@ -223,6 +223,8 @@ def send_protocol_appeal(db, config, pairs, user_id, client=None):  # noqa: PLR0
         for a in files[row.id]:
             if a.estado != 'protocolado':
                 send_document(db, client, row, source, a, user_id)
+    if config.portal_fallback:
+        accept_on_screen(db, config, rows, user_id)
     return rows
 
 
@@ -277,8 +279,15 @@ def row_key(row):
     return (row.guia_prestador, row.tuss, Decimal(str(row.valor_glosa or 0)))
 
 
+def fully_accepted(row, acato):
+    """The screen accepts a whole item; a partial acato cannot be sent."""
+    return Decimal(str((acato or {}).get('valor') or 0)) >= Decimal(
+        str(row.valor_glosa or 0)
+    )
+
+
 def accepted_rows(db, demonstrativo):
-    """Rows of the demonstrativo the system marked as acato, by screen key."""
+    """Rows fully marked as acato in the demonstrativo, by screen key."""
     rows = list(
         db.scalars(
             select(PetrobrasGlosa).where(
@@ -290,7 +299,7 @@ def accepted_rows(db, demonstrativo):
     accepted = acatos(db, (r.id for r in rows))
     by_key = {}
     for row in rows:
-        if row.id in accepted:
+        if row.id in accepted and fully_accepted(row, accepted[row.id]):
             by_key.setdefault(row_key(row), []).append(row)
     return by_key
 
@@ -457,8 +466,8 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
             )
         for lot, account, lot_rows in by_lot.values():
             demonstrativo = lot_rows[0].demonstrativo
+            accept_treated(db, client, lot, demonstrativo, user_id)
             if not untreated_items(db, client, lot, demonstrativo):
-                accept_treated(db, client, lot, demonstrativo, user_id)
                 submit_lot(db, client, lot, account, lot_rows, user_id)
         return rows
     except Exception as exc:  # noqa: BLE001 - recorded on the items
@@ -481,6 +490,32 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
         raise TissError(f'Recurso salvo no portal; envio pendente: {detail}')
     finally:
         client.close()
+
+
+def accept_on_screen(db, config, rows, user_id, portal=None):
+    """Webservice protocolled: the lot's acatos still go to the screen.
+
+    Never Efetivar here: the screen may not list what the webservice received
+    and would mark those items as accepted. A failure never undoes the appeal.
+    """
+    client = None
+    try:
+        client = portal or PortalAppeal(config)
+        seen = set()
+        for row in rows:
+            lot, _ = find_lot(client, row.fonte)
+            if lot['numeroLote'] not in seen:
+                seen.add(lot['numeroLote'])
+                accept_treated(db, client, lot, row.demonstrativo, user_id)
+    except Exception as exc:  # noqa: BLE001 - recorded on the items
+        db.rollback()
+        reason = str(exc)[:300] if isinstance(exc, TissError) else 'falha'
+        for row in rows:
+            event(db, row, 'aceite_portal_falhou', {'causa': reason}, user_id)
+        db.commit()
+    finally:
+        if client:
+            client.close()
 
 
 def efetivar_portal(db, config, row, user_id, portal=None):

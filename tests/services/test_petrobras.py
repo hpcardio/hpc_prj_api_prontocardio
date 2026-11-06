@@ -2249,15 +2249,91 @@ def test_portal_sends_at_once_when_the_rest_of_the_lot_is_accepted(
     assert other.recurso_estado == 'rascunho'
 
 
-def test_portal_does_not_accept_while_an_item_is_untreated(
+def test_portal_accepts_acatos_without_efetivar_while_one_is_untreated(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
-    target = rows['1']
-    portal = FakePortal([target, rows['2']])
+    target, accepted, untreated = rows['1'], rows['2'], rows['3']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted, untreated])
+    run_portal(db, config, target, portal)
+    assert portal.accepted == [accepted.id]
+    assert portal.efetivados == 0
+    assert target.recurso_estado == 'salvo_portal'
+
+
+def test_portal_never_sends_a_partial_acato_as_a_full_accept(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, partial = rows['1'], rows['2']
+    event(db, partial, 'acato', {'valor': '0.01'}, 1)
+    db.commit()
+    portal = FakePortal([target, partial])
     run_portal(db, config, target, portal)
     assert portal.accepted == []
     assert portal.efetivados == 0
+
+
+def test_webservice_protocol_sends_acatos_to_the_screen_without_efetivar(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted])
+    petrobras_appeals.accept_on_screen(db, config, [target], 1, portal)
+    assert portal.accepted == [accepted.id]
+    assert portal.efetivados == 0
+    assert portal.closed
+
+
+def test_webservice_success_calls_the_screen_only_when_enabled(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    client = Mock()
+    client.appeal_protocol.return_value = receipt(target.fonte['protocolo'])
+    calls = []
+    monkeypatch.setattr(
+        petrobras_appeals,
+        'accept_on_screen',
+        lambda _db, _config, sent, _user: calls.append(sent),
+    )
+    config.portal_fallback = False
+    send_appeal(db, config, target, target.versao, 1, client)
+    assert calls == []
+    assert target.recurso_estado == 'protocolado'
+    other = rows['2']
+    other.prazo = target.prazo
+    db.commit()
+    config.portal_fallback = True
+    client.appeal_protocol.return_value = receipt(other.fonte['protocolo'])
+    client.appeal_protocol.side_effect = None
+    send_appeal(db, config, other, other.versao, 1, client)
+    assert calls == [[other]]
+
+
+def test_screen_failure_never_undoes_the_webservice_protocol(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    target.recurso_estado = 'protocolado'
+    db.commit()
+    portal = FakePortal([target, accepted])
+    portal.accept = Mock(side_effect=TissError('Portal Petrobras: HTTP 500.'))
+    petrobras_appeals.accept_on_screen(db, config, [target], 1, portal)
+    assert target.recurso_estado == 'protocolado'
+    failure = db.scalar(
+        select(PetrobrasEvento).where(
+            PetrobrasEvento.glosa_id == target.id,
+            PetrobrasEvento.tipo == 'aceite_portal_falhou',
+        )
+    )
+    assert failure.dados['causa'] == 'Portal Petrobras: HTTP 500.'
 
 
 def test_portal_keeps_the_send_when_the_protocol_is_not_listed(
