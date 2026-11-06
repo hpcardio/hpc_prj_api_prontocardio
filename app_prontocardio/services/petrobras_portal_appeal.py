@@ -4,7 +4,7 @@ Mirrors Extrato > Visualizar > Detalhar > lote > Aceitar Selecionados >
 Salvar Recurso > Efetivar. Pages live on the portal; the grids and writes on
 the payer's REST host. `accept` and `save` are reversible in the portal;
 `efetivar` is not and marks every unappealed item of the whole lot as accepted,
-so the caller must check the lot first. No request or response logging.
+so it only runs at the user's explicit request. No request or response logging.
 """
 
 import json
