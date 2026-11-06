@@ -2262,6 +2262,48 @@ def test_portal_accepts_acatos_without_efetivar_while_one_is_untreated(
     assert target.recurso_estado == 'salvo_portal'
 
 
+def test_portal_accepts_before_saving_the_appeal(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted])
+    order = []
+    accept, save = portal.accept, portal.save
+    portal.accept = lambda *a: (order.append('aceite'), accept(*a))
+    portal.save = lambda *a: (order.append('recurso'), save(*a))
+    run_portal(db, config, target, portal)
+    assert order == ['aceite', 'recurso']
+    assert portal.efetivados == 1
+
+
+def test_portal_appeals_an_item_that_also_has_an_acato(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    acato_row(db, target)
+    portal = FakePortal([target, rows['2']])
+    run_portal(db, config, target, portal)
+    assert portal.accepted == []
+    assert [s[0] for s in portal.saved] == [target.id]
+
+
+def test_failed_accept_leaves_no_appeal_saved(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted])
+    portal.accept = Mock(side_effect=TissError('Portal Petrobras: HTTP 500.'))
+    with pytest.raises(TissError):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+    assert target.recurso_estado == 'rascunho'
+
+
 def test_portal_never_sends_a_partial_acato_as_a_full_accept(
     db, protocol, config, source, candidate
 ):

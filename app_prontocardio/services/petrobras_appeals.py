@@ -325,11 +325,16 @@ def untreated_items(db, portal, lot, demonstrativo):
     ]
 
 
-def accept_treated(db, portal, lot, demonstrativo, user_id):
-    """Aceitar Selecionados: the items the system already marked as acato."""
+def accept_treated(db, portal, lot, demonstrativo, user_id, appealing=()):  # noqa: PLR0913, PLR0917 - audit context
+    """Aceitar Selecionados: items marked as acato, except those appealing."""
     by_key = accepted_rows(db, demonstrativo)
     for item in lot_items(portal, lot):
-        if not is_denied(item) or is_saved(item) or is_accepted(item):
+        if (
+            not is_denied(item)
+            or is_saved(item)
+            or is_accepted(item)
+            or item.get('numeroItem') in appealing
+        ):
             continue
         rows = by_key.get(item_key(item))
         if not rows:
@@ -343,7 +348,7 @@ def accept_treated(db, portal, lot, demonstrativo, user_id):
                 {'numero_item': item.get('numeroItem')},
                 user_id,
             )
-    db.commit()
+        db.commit()  # Each accept stays recorded if a later one fails.
 
 
 def appeal_protocols(portal, lot, rows):
@@ -440,6 +445,17 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
             (r, lot, a, find_item(client, lot, a, r.fonte))
             for r, lot, a in located
         ]
+        by_lot = {}
+        for row, lot, account, _ in targets:
+            by_lot.setdefault(lot['numeroLote'], (lot, account, []))[2].append(
+                row
+            )
+        appealing = {item.get('numeroItem') for *_, item in targets}
+        # The screen's order: Aceitar Selecionados, then Salvar Recurso.
+        for lot, _, lot_rows in by_lot.values():
+            accept_treated(
+                db, client, lot, lot_rows[0].demonstrativo, user_id, appealing
+            )
         for row, lot, account, item in targets:
             if not is_saved(item):
                 client.save(lot, item, row.justificativa, files[row.id])
@@ -459,14 +475,8 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
             )
             db.commit()
             saved.append(row.id)
-        by_lot = {}
-        for row, lot, account, _ in targets:
-            by_lot.setdefault(lot['numeroLote'], (lot, account, []))[2].append(
-                row
-            )
         for lot, account, lot_rows in by_lot.values():
             demonstrativo = lot_rows[0].demonstrativo
-            accept_treated(db, client, lot, demonstrativo, user_id)
             if not untreated_items(db, client, lot, demonstrativo):
                 submit_lot(db, client, lot, account, lot_rows, user_id)
         return rows
