@@ -338,6 +338,11 @@ def accept_treated(db, portal, lot, demonstrativo, user_id, appealing=()):  # no
         db.commit()  # Each accept stays recorded if a later one fails.
 
 
+def was_sent(item):
+    """Efetivar assigns these; a saved item has neither."""
+    return bool(item.get('protocoloRecurso') or item.get('efetivado'))
+
+
 def appeal_protocols(portal, lot, rows):
     """Protocolo de Recurso the portal assigned to each row, when listed."""
     numbers = {
@@ -355,8 +360,8 @@ def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR09
         refreshed = {a['numeroConta']: a for a in portal.accounts(lot)}.get(
             account['numeroConta'], {}
         )
-        sent = refreshed.get('quantidadeItensRecursado') or refreshed.get(
-            'qtdItemEfetivado'
+        sent = refreshed.get('qtdItemEfetivado') or any(
+            was_sent(i) for i in lot_items(portal, lot)
         )
         if not sent:
             raise TissError('Portal não confirmou a efetivação.')
@@ -422,16 +427,16 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
                     'O portal aceita comprovantes PDF, JPG ou BMP.'
                 )
         located = [(r, *find_lot(client, r.fonte)) for r in rows]
-        if any(
-            a.get('quantidadeItensRecursado') or a.get('qtdItemEfetivado')
-            for _, _, a in located
-        ):
-            # The failed webservice call or someone else may have sent it.
-            raise TissError('Conta já tem item enviado no portal; confira.')
         targets = [
             (r, lot, a, find_item(client, lot, a, r.fonte))
             for r, lot, a in located
         ]
+        # The account counts saved items too, so one item at a time still
+        # works; only what Efetivar already sent blocks a new save.
+        if any(
+            a.get('qtdItemEfetivado') or was_sent(i) for *_, a, i in targets
+        ):
+            raise TissError('Conta já tem item enviado no portal; confira.')
         by_lot = {}
         for row, lot, _, _ in targets:
             by_lot.setdefault(lot['numeroLote'], (lot, []))[1].append(row)

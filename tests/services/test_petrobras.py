@@ -2145,7 +2145,7 @@ class FakePortal:
         if self.efetivar_error:
             raise self.efetivar_error
         self.efetivados += 1
-        self.account['quantidadeItensRecursado'] = 1
+        self.account['qtdItemEfetivado'] = 1
         for row in self.denied:
             if row.get('situacaoRecursadoAceito') == 'R':
                 row['protocoloRecurso'] = 162723152
@@ -2378,6 +2378,39 @@ def test_failed_accept_leaves_no_appeal_saved(
     assert target.recurso_estado == 'rascunho'
 
 
+def test_account_with_a_saved_item_still_takes_the_next_item(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    portal = FakePortal([target, other], {'quantidadeItensRecursado': 1})
+    run_portal(db, config, target, portal)
+    assert target.recurso_estado == 'salvo_portal'
+
+
+def test_saved_count_alone_does_not_confirm_efetivar(
+    db, protocol, config, source, candidate
+):
+    target, _, portal = efetivar_ready(db, protocol, config, source, candidate)
+    portal.account['quantidadeItensRecursado'] = 1
+    portal.efetivar = lambda _lot: {}
+    with pytest.raises(TissError, match='não confirmado'):
+        petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+    assert target.recurso_estado == 'envio_incerto'
+
+
+def test_item_with_appeal_protocol_is_never_saved_again(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    portal = FakePortal([target])
+    portal.denied[0]['protocoloRecurso'] = 162723152
+    with pytest.raises(TissError):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+
+
 def test_portal_never_sends_a_partial_acato_as_a_full_accept(
     db, protocol, config, source, candidate
 ):
@@ -2559,7 +2592,7 @@ def test_portal_never_touches_an_account_already_sent(
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
     target = rows['1']
-    portal = FakePortal([target], {'quantidadeItensRecursado': 1})
+    portal = FakePortal([target], {'qtdItemEfetivado': 1})
     with pytest.raises(TissError, match='já tem item enviado'):
         run_portal(db, config, target, portal)
     assert portal.saved == []
