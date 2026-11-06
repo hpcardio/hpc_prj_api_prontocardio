@@ -1,10 +1,10 @@
 """Appeal through the payer's own screen when the webservice fails.
 
-Mirrors Extrato > Visualizar > Detalhar > lote > Salvar Recurso > Efetivar.
-Pages live on the portal; the grids and writes on the payer's REST host. Only
-two calls write: `save` is reversible in the portal, `efetivar` is not and
-marks every unappealed item of the whole lot as accepted, so the caller must
-check the lot first. No request or response logging.
+Mirrors Extrato > Visualizar > Detalhar > lote > Aceitar Selecionados >
+Salvar Recurso > Efetivar. Pages live on the portal; the grids and writes on
+the payer's REST host. `accept` and `save` are reversible in the portal;
+`efetivar` is not and marks every unappealed item of the whole lot as accepted,
+so the caller must check the lot first. No request or response logging.
 """
 
 import json
@@ -32,6 +32,51 @@ MIN_JUSTIFICATION = 20  # Enforced by the portal screen.
 DOCUMENT_TYPES = {'application/pdf', 'image/jpeg', 'image/bmp'}
 DEFAULTS_ID = 'dadosLotesRecursoAberto_defaultValues'
 APPEALED = 'R'
+ACCEPTED = 'A'
+ERROR_TEXT_LIMIT = 200
+# Columns of the screen's procedure grid that come straight from the JSON.
+# getRowData posts them as text, and only these, whatever the JSON carries.
+GRID_COLUMNS = (
+    'statusItem',
+    'itemRecursado',
+    'aglutinador',
+    'idRecursoGlosaProvisorio',
+    'numeroConta',
+    'numeroContaPrestador',
+    'numeroContaOperadora',
+    'controle',
+    'numeroCapaLote',
+    'numeroCapaLotePrestador',
+    'valorTotalProcessado',
+    'valorTotalPago',
+    'valorTotalGlosado',
+    'valorTotalAcerto',
+    'numeroItemPrincipal',
+    'numeroItem',
+    'codigoItem',
+    'descricaoItem',
+    'qtdItem',
+    'qtdItemAglutinados',
+    'qtdItemAglutinadosGlosa',
+    'qtdItemAglutinadoSalvoR',
+    'qtdItemAglutinadoSalvoA',
+    'qtdItemAglutinadoDispSalvar',
+    'dataCronogramaLote',
+    'dataRealizacao',
+    'dataRealizacaoStr',
+    'codigoBeneficiario',
+    'carteirinhaBeneficiario',
+    'nomeBeneficiario',
+    'valorDeclarado',
+    'valorPago',
+    'valorGlosado',
+    'flagAcertoItem',
+    'flagDenyItem',
+    'protocoloRecurso',
+    'efetivado',
+    'flagDenyGlosa',
+    'flagDenyPCMSO',
+)
 DENIED = 'S'
 
 
@@ -53,6 +98,38 @@ def lot_forms(html):
         start = html.index(f'id="formularioBuscarLote_{capa}"')
         forms[capa] = form_fields(html[start : html.index('</form>', start)])
     return forms
+
+
+def grid_row(item):
+    """The row as the screen reads it from its grid: text, blank for null."""
+    return {
+        column: '' if item[column] is None else str(item[column])
+        for column in GRID_COLUMNS
+        if column in item
+    }
+
+
+def error_text(exc):
+    """Short reason from an error body, kept out of request logging."""
+    try:
+        raw = exc.read(MAX_RESPONSE).decode('utf-8', 'replace')
+    except (OSError, ValueError):
+        return ''
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        for key in (
+            'mensagemRetorno',
+            'errorMessageClean',
+            'errorMessage',
+            'message',
+        ):
+            if data.get(key):
+                return str(data[key])[:ERROR_TEXT_LIMIT]
+    text = re.sub(r'<(script|style).*?</\1>|<[^>]+>', ' ', raw, flags=re.S)
+    return ' '.join(text.split())[:ERROR_TEXT_LIMIT]
 
 
 def multipart(fields, files):
@@ -97,7 +174,11 @@ class PortalAppeal:
             ) as response:
                 raw = response.read(MAX_RESPONSE + 1)
         except HTTPError as exc:
-            raise TissError(f'Portal Petrobras: HTTP {exc.code}.') from None
+            detail = error_text(exc)
+            raise TissError(
+                f'Portal Petrobras: HTTP {exc.code}'
+                + (f' ({detail}).' if detail else '.')
+            ) from None
         except (URLError, TimeoutError, OSError):
             raise TissError('Falha de comunicação com o portal.') from None
         return raw
@@ -171,33 +252,41 @@ class PortalAppeal:
             numeroConta=account['numeroConta'],
         )
 
-    def save(self, lot, item, justification, attachments):
-        """Salvar Recurso of one item, as the screen posts it."""
-        code = f'{item["numeroItem"]};'
-        complement = {
+    def _respond(self, lot, item, situation, justification, attachments):  # noqa: PLR0913, PLR0917 - one screen action
+        """Post one item as the screen's responderRecursoComAnexo does."""
+        hidden = {
             'mensagemRespostaPrestador': justification,
-            'codigosSelecionados': code,
-            'situacaoRecursadoAceito': APPEALED,
+            'codigosSelecionados': f'{item["numeroItem"]};',
             **lot,
         }
         row = {
-            **item,
+            **grid_row(item),
             'listaDetalheRecursoGlosa': None,
             'valorAcerto': item.get('valorAcerto') or 0,
-            'valorRecursado': item['valorGlosado'],
-            **complement,
+            'valorRecursado': (
+                item['valorGlosado'] if situation == APPEALED else '0.0'
+            ),
+            'situacaoRecursadoAceito': situation,
+            **hidden,
         }
         fields = [
             ('acceptTypePersonalizado', ''),
             ('tipoPermitidoPersonalizado', ''),
             ('pathSaveFileDefault', 'a'),
             ('origem', 'a'),
-            *((k, v) for k, v in complement.items()),
+            *hidden.items(),
             ('listaItensSelecionadosRecursoGlosa', json.dumps(row)),
         ]
         files = [
             (f'listaDocumentoAnexo[{i}].file', a.nome, a.mime, a.conteudo)
             for i, a in enumerate(attachments)
+        ] or [
+            (
+                'listaDocumentoAnexo[0].file',
+                '',
+                'application/octet-stream',
+                b'',
+            )
         ]
         body, content_type = multipart(fields, files)
         self._rest(
@@ -205,6 +294,14 @@ class PortalAppeal:
             data=body,
             content_type=content_type,
         )
+
+    def accept(self, lot, item):
+        """Aceitar Selecionados of one item; reversible until Efetivar."""
+        self._respond(lot, item, ACCEPTED, '', [])
+
+    def save(self, lot, item, justification, attachments):
+        """Salvar Recurso of one item, as the screen posts it."""
+        self._respond(lot, item, APPEALED, justification, attachments)
 
     def efetivar(self, lot):
         """Irreversible: every unappealed item of the lot becomes accepted."""
@@ -231,3 +328,7 @@ def is_denied(item):
 
 def is_saved(item):
     return item.get('situacaoRecursadoAceito') == APPEALED
+
+
+def is_accepted(item):
+    return item.get('situacaoRecursadoAceito') == ACCEPTED
