@@ -18,7 +18,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_oracle, get_session_postgres
-from app_prontocardio.services.payables_mv import read_payables_rows
 from app_prontocardio.models import Usuario
 from app_prontocardio.payables_priority import (
     age_level,
@@ -26,6 +25,7 @@ from app_prontocardio.payables_priority import (
     classification,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.payables_mv import read_payables_rows
 
 router = APIRouter(
     prefix='/app_glosas/financeiro/contas-a-pagar', tags=['contas-a-pagar']
@@ -124,6 +124,13 @@ REFERENCIA_SEM_CADASTRO_SQL = """CASE WHEN v.codigo_do_fornecedor IS NULL THEN
     END
 END"""
 SEM_CADASTRO_PREFIX = 'sem-cadastro-'
+# MV account classification (CON_PAG.CD_CLASS_CONTA_FNFI); most are empty.
+SEM_CLASSIFICACAO = 'SEM_CLASSIFICACAO'
+FILTRO_CLASSIFICACAO_SQL = (
+    "(:classificacao IS NULL OR NVL(p.classificacao, '"
+    + SEM_CLASSIFICACAO
+    + "') = :classificacao)"
+)
 
 
 def _identidade_fornecedor(row):
@@ -157,7 +164,8 @@ parcelas AS (
            v.codigo_parcela_pk,
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
-           MAX(v.tipo_de_quitacao) AS tipo_quitacao
+           MAX(v.tipo_de_quitacao) AS tipo_quitacao,
+           MAX(v.classificacao) AS classificacao
       FROM dbamv.HPC_V_CONTAS_A_PAGAR v
      GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,
               {REFERENCIA_SEM_CADASTRO_SQL}
@@ -177,6 +185,7 @@ saldos AS (
      )
        AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
        AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
+       AND {FILTRO_CLASSIFICACAO_SQL}
 )
 SELECT codigo_fornecedor,
        referencia_sem_cadastro,
@@ -226,7 +235,8 @@ parcelas AS (
            MAX(v.valor_bruto) AS valor_nota_fiscal,
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
-           MAX(v.tipo_de_quitacao) AS tipo_quitacao
+           MAX(v.tipo_de_quitacao) AS tipo_quitacao,
+           MAX(v.classificacao) AS classificacao
      FROM dbamv.HPC_V_CONTAS_A_PAGAR v
      WHERE v.codigo_do_fornecedor IN :codigos_fornecedor
         OR ({REFERENCIA_SEM_CADASTRO_SQL}) IN :referencias_sem_cadastro
@@ -247,6 +257,7 @@ SELECT p.codigo_fornecedor,
        p.valor_nota_fiscal,
        p.data_vencimento,
        p.tipo_quitacao,
+       p.classificacao,
        NVL(pg.valor_pago, 0) AS valor_honrado_oracle
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
@@ -255,6 +266,7 @@ SELECT p.codigo_fornecedor,
  )
    AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
    AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
+   AND {FILTRO_CLASSIFICACAO_SQL}
  ORDER BY p.codigo_fornecedor, p.data_vencimento, p.codigo_parcela_pk
 """).bindparams(
     bindparam('codigos_fornecedor', expanding=True),
@@ -281,6 +293,7 @@ def _consultar_oracle(
     session: Session,
     data_inicio: date | None = None,
     data_fim: date | None = None,
+    classificacao: str | None = None,
 ) -> list[dict]:
     try:
         rows = read_payables_rows(
@@ -290,6 +303,7 @@ def _consultar_oracle(
                 'data_inicio': data_inicio,
                 'data_fim': data_fim,
                 'hoje': _hoje_hospital(),
+                'classificacao': classificacao,
             },
         )
     except SQLAlchemyError as exc:
@@ -330,6 +344,7 @@ def _consultar_titulos_oracle(
     codigos_fornecedor: list[int | str],
     data_inicio: date | None = None,
     data_fim: date | None = None,
+    classificacao: str | None = None,
 ) -> list[dict]:
     if not codigos_fornecedor:
         return []
@@ -357,6 +372,7 @@ def _consultar_titulos_oracle(
                     'referencias_sem_cadastro': referencias,
                     'data_inicio': data_inicio,
                     'data_fim': data_fim,
+                    'classificacao': classificacao,
                 },
             ))
     except SQLAlchemyError as exc:
@@ -387,9 +403,29 @@ def _consultar_titulos_oracle(
             else None,
             'data_vencimento': _normalizar_data(row['data_vencimento']),
             'tipo_quitacao': row['tipo_quitacao'],
+            'classificacao': row.get('classificacao'),
             'valor_honrado_oracle': _decimal(row['valor_honrado_oracle']),
         })
     return resultado
+
+
+def _opcoes_classificacao(session: Session) -> list[dict]:
+    """MV account classifications, plus the empty case used by most titles."""
+    try:
+        nomes = session.execute(
+            text("""
+            SELECT ds_class_conta_fnfi
+              FROM dbamv.classificacao_conta_fnfi
+             ORDER BY ds_class_conta_fnfi
+        """)
+        ).scalars()
+        opcoes = [{'valor': nome, 'nome': nome} for nome in nomes if nome]
+    except SQLAlchemyError:
+        opcoes = []
+    return [
+        {'valor': SEM_CLASSIFICACAO, 'nome': 'Sem classificação'},
+        *opcoes,
+    ]
 
 
 def _pagamentos_manuais(session: Session) -> dict[int, list[dict]]:
@@ -621,6 +657,7 @@ def _filtrar_prioridade(
     pagamentos_por_titulo,
     data_inicio,
     data_fim,
+    classificacao=None,
 ):
     if somente_vencidos:
         filtrados = [
@@ -643,6 +680,7 @@ def _filtrar_prioridade(
             [item['codigo_fornecedor'] for item in filtrados],
             data_inicio=data_inicio,
             data_fim=data_fim,
+            classificacao=classificacao,
         )
         detalhes_filtrados = {
             item['codigo_fornecedor']: [
@@ -782,7 +820,9 @@ def listar_contas_pagar(
     ordenar: Literal['prioridade', 'maior_valor_vencido'] = 'prioridade',
     incluir_opcoes: bool = False,
     incluir_titulos: bool = True,
+    classificacao: Annotated[str | None, Query(max_length=100)] = None,
 ):
+    classificacao = (classificacao or '').strip() or None
     if data_inicio and data_fim and data_inicio > data_fim:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -794,13 +834,16 @@ def listar_contas_pagar(
     )
     pagamentos_por_titulo = _pagamentos_manuais(session)
     fornecedores = _consultar_oracle(
-        oracle, data_inicio=data_inicio, data_fim=data_fim
+        oracle,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        classificacao=classificacao,
     )
     opcoes = []
     if incluir_opcoes:
         base_opcoes = (
             _consultar_oracle(oracle)
-            if data_inicio or data_fim
+            if data_inicio or data_fim or classificacao
             else fornecedores
         )
         opcoes = sorted(
@@ -825,6 +868,7 @@ def listar_contas_pagar(
             codigos_com_pagamento_manual,
             data_inicio=data_inicio,
             data_fim=data_fim,
+            classificacao=classificacao,
         )
         fornecedores_manuais = {
             item['codigo_fornecedor']: item
@@ -859,7 +903,8 @@ def listar_contas_pagar(
     _enriquecer_fornecedores(fornecedores, tratamentos)
 
     vencidos = [item for item in fornecedores if item['saldo_a_pagar'] > 0]
-    if not exportar and not data_inicio and not data_fim:
+    # The daily snapshot only records the whole base.
+    if not exportar and not data_inicio and not data_fim and not classificacao:
         _registrar_snapshot(session, fornecedores)
     resumo = {
         'valor_a_pagar_ate_hoje': sum(
@@ -917,6 +962,7 @@ def listar_contas_pagar(
         pagamentos_por_titulo,
         data_inicio,
         data_fim,
+        classificacao,
     )
     if ordenar == 'maior_valor_vencido':
         filtrados.sort(
@@ -940,6 +986,7 @@ def listar_contas_pagar(
             codigos_pagina,
             data_inicio=data_inicio,
             data_fim=data_fim,
+            classificacao=classificacao,
         )
         detalhes_pagina = {
             item['codigo_fornecedor']: item['titulos']
@@ -949,6 +996,10 @@ def listar_contas_pagar(
         }
     for item in pagina:
         item['titulos'] = detalhes_pagina.get(item['codigo_fornecedor'], [])
+        item['classificacoes'] = sorted({
+            titulo.get('classificacao') or 'Sem classificação'
+            for titulo in item['titulos']
+        })
 
     def serializar(item):
         titulos_serializados = []
@@ -1018,7 +1069,14 @@ def listar_contas_pagar(
 
     return {
         'fornecedores': [serializar(item) for item in pagina],
-        **({'opcoes_fornecedores': opcoes} if incluir_opcoes else {}),
+        **(
+            {
+                'opcoes_fornecedores': opcoes,
+                'opcoes_classificacao': _opcoes_classificacao(oracle),
+            }
+            if incluir_opcoes
+            else {}
+        ),
         'total': total,
         'page': 1 if exportar else page,
         'total_pages': 1 if exportar else max(ceil(total / page_size), 1),
@@ -1434,7 +1492,9 @@ def consultar_matriz(
     faixa_atraso: Literal['todos', '1', '2', '3', '4', '5'] = 'todos',
     fornecedores_ids: Annotated[str | None, Query(max_length=50000)] = None,
     quadrante: Annotated[int | None, Query(ge=1, le=25)] = None,
+    classificacao: Annotated[str | None, Query(max_length=100)] = None,
 ):
+    classificacao = (classificacao or '').strip() or None
     competencia = (competencia or _hoje_hospital()).replace(day=1)
     if data_inicio and data_fim and data_inicio > data_fim:
         raise HTTPException(
@@ -1446,7 +1506,10 @@ def consultar_matriz(
     )
     tratamentos = _tratamentos(session)
     fornecedores = _consultar_oracle(
-        oracle, data_inicio=data_inicio, data_fim=data_fim
+        oracle,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        classificacao=classificacao,
     )
     termo = (q or '').strip().casefold()
     selecionados = []
@@ -1479,7 +1542,11 @@ def consultar_matriz(
             continue
         selecionados.append(item['codigo_fornecedor'])
     titulos = _consultar_titulos_oracle(
-        oracle, selecionados, data_inicio=data_inicio, data_fim=data_fim
+        oracle,
+        selecionados,
+        data_inicio=data_inicio,
+        data_fim=data_fim,
+        classificacao=classificacao,
     )
     grupos = _agrupar_fornecedores(titulos, _pagamentos_manuais(session))
     for item in grupos:

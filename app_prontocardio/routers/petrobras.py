@@ -25,8 +25,12 @@ from app_prontocardio.petrobras_models import (
 from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services import petrobras_oracle
 from app_prontocardio.services.petrobras_appeals import (
+    ACATO_EVENTS,
+    acatos,
     appeal_codes,
     appeal_readiness,
+    efetivar_portal,
+    efetivar_preview,
     poll_appeal,
     send_appeal,
     send_protocol_appeal,
@@ -193,9 +197,6 @@ def list_items(  # noqa: PLR0913 - independent HTTP query parameters
 MAX_DEMONSTRATIVO_ITEMS = 2000
 
 
-ACATO_EVENTS = ('acato', 'acato_removido')
-
-
 def acato_ativo():
     """Item whose latest acceptance event is an internal acato."""
     newer = aliased(PetrobrasEvento)
@@ -208,28 +209,6 @@ def acato_ativo():
             newer.id > PetrobrasEvento.id,
         ),
     )
-
-
-def acatos(db, ids):
-    """Internal acato (never sent to the payer): latest event per item."""
-    ids = list(ids)
-    if not ids:
-        return {}
-    last = (
-        select(func.max(PetrobrasEvento.id))
-        .where(
-            PetrobrasEvento.glosa_id.in_(ids),
-            PetrobrasEvento.tipo.in_(ACATO_EVENTS),
-        )
-        .group_by(PetrobrasEvento.glosa_id)
-    )
-    return {
-        e.glosa_id: e.dados
-        for e in db.scalars(
-            select(PetrobrasEvento).where(PetrobrasEvento.id.in_(last))
-        )
-        if e.tipo == 'acato'
-    }
 
 
 def treated(valor_glosa, recurso_estado, acato):
@@ -720,7 +699,7 @@ class AcatoInput(BaseModel):
 def save_acato(
     item_id: int, body: AcatoInput, db: DB, config: Config, user: Writer
 ):
-    """Internal control only, as for payers without integration."""
+    """Recorded here; sent on the payer's screen with the lot's appeal."""
     row = item(db, config, item_id, lock=True)
     if row.recurso_estado != 'rascunho':
         raise HTTPException(409, 'Recurso já transmitido; acato bloqueado.')
@@ -741,6 +720,8 @@ def remove_acato(item_id: int, db: DB, config: Config, user: Writer):
     current = acatos(db, [row.id]).get(row.id)
     if current is None:
         raise HTTPException(404, 'Acato não registrado para o item.')
+    if row.recurso_estado != 'rascunho':
+        raise HTTPException(409, 'Item já enviado ou aceito; acato bloqueado.')
     event(db, row, 'acato_removido', {'antes': current}, user.id)
     db.commit()
     return with_guide_senha(row, {})
@@ -883,6 +864,12 @@ def send(item_id: int, body: SendInput, db: DB, config: Config, user: Writer):
 
 
 MAX_BATCH_SEND = 50
+SENT_STATES = {'protocolado', 'enviado_portal'}
+PORTAL_SAVED_NOTICE = (
+    'Recurso salvo no portal, ainda não enviado. Use Efetivar/Enviar Recursos '
+    'Salvos quando quiser enviar o lote; os itens não recursados serão '
+    'marcados como aceitos.'
+)
 
 
 @router.get('/glosas/prontos')
@@ -918,9 +905,32 @@ def ready_appeals(db: DB, config: Config, user: User):
         (pending if issue else ready).append(
             {**data, 'pendencia': issue} if issue else data
         )
+    saved = {}
+    for row in db.scalars(
+        select(PetrobrasGlosa)
+        .join(PetrobrasProtocolo)
+        .where(
+            PetrobrasProtocolo.prestador == config.prestador_cnpj,
+            PetrobrasGlosa.recurso_estado == 'salvo_portal',
+        )
+        .order_by(PetrobrasGlosa.id)
+        .limit(500)
+    ):
+        source = row.fonte or {}
+        group = saved.setdefault(
+            (source.get('lote'), source.get('protocolo')),
+            {
+                'id': row.id,
+                'lote': source.get('lote'),
+                'protocolo': source.get('protocolo'),
+                'itens': 0,
+            },
+        )
+        group['itens'] += 1
     return {
         'prontos': ready,
         'pendencias': pending,
+        'salvos': list(saved.values()),
         'usuario_liberado': config.can_transmit(getattr(user, 'email', None)),
         'limite': MAX_BATCH_SEND,
     }
@@ -971,9 +981,22 @@ def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):  # n
         try:
             rows = send_protocol_appeal(db, config, pairs, user.id)
             outcome = {
-                'situacao': 'protocolado',
+                'situacao': rows[0].recurso_estado,
                 'protocolo': rows[0].recurso_protocolo,
             }
+            if rows[0].recurso_estado == 'salvo_portal':
+                outcome['aviso'] = PORTAL_SAVED_NOTICE
+            pending = db.scalar(
+                select(func.count(PetrobrasAnexo.id)).where(
+                    PetrobrasAnexo.glosa_id.in_(ids),
+                    PetrobrasAnexo.estado != 'protocolado',
+                )
+            )
+            if pending and rows[0].recurso_estado == 'protocolado':
+                outcome['aviso'] = (
+                    f'Recurso protocolado; {pending} comprovante(s) não '
+                    'enviado(s). Veja o histórico do item.'
+                )
         except (TissError, ValueError) as exc:
             db.rollback()
             current = db.get(PetrobrasGlosa, ids[0])
@@ -991,11 +1014,45 @@ def send_batch(body: BatchSendInput, db: DB, config: Config, user: Writer):  # n
             results[item_id] = {'id': item_id, **outcome}
     return {
         'protocolados': sum(
-            r.get('situacao') == 'protocolado' for r in results.values()
+            r.get('situacao') in SENT_STATES for r in results.values()
         ),
         'recursos': appeals,
         'resultados': list(results.values()),
     }
+
+
+class EfetivarInput(BaseModel):
+    ciente_nao_recursados: Literal[True]
+
+
+@router.get('/glosas/{item_id}/efetivar-portal')
+def portal_submit_preview(item_id: int, db: DB, config: Config, user: Writer):
+    """What the user must acknowledge before Efetivar."""
+    row = item(db, config, item_id)
+    try:
+        return efetivar_preview(db, config, row)
+    except (TissError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.post('/glosas/{item_id}/efetivar-portal')
+def portal_submit(
+    item_id: int,
+    body: EfetivarInput,
+    db: DB,
+    config: Config,
+    user: Writer,
+):
+    """Send the lot's saved appeals at the user's explicit request."""
+    if not config.can_transmit(getattr(user, 'email', None)):
+        raise HTTPException(
+            403, 'Envio de recurso em piloto; usuário ainda não liberado.'
+        )
+    row = item(db, config, item_id, lock=True)
+    try:
+        return public(efetivar_portal(db, config, row, user.id))
+    except (TissError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.post('/glosas/{item_id}/consultar-recurso')

@@ -62,6 +62,34 @@ class TissError(ValueError):
     """Safe message only; never include an HTTP body or credentials."""
 
 
+class TissRejected(TissError):
+    """Operator answered with a SOAP fault: the message was not accepted."""
+
+
+FAULT_TEXT_LIMIT = 200
+# dm_tipoGuia: 1 solicitação, 2 faturamento, 3 recurso de glosa.
+APPEAL_DOCUMENT_NATURE = '3'
+FAULT_PARTS = {'faultcode', 'faultstring', 'detail', 'Code', 'Reason', 'Text'}
+
+
+def fault_text(fault, secrets):
+    """Operator fault reason, flattened, without our credentials."""
+    parts = []
+    for node in fault.iter():
+        if (
+            isinstance(node.tag, str)
+            and node.tag.split('}')[-1] in FAULT_PARTS
+        ):
+            text = ' '.join(''.join(node.itertext()).split())
+            if text and text not in parts:
+                parts.append(text)
+    text = ' | '.join(parts)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, '***')
+    return ''.join(c for c in text if c.isprintable())[:FAULT_TEXT_LIMIT]
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: PLR0913 - urllib override signature
         raise TissError('Redirecionamento do serviço recusado.')
@@ -176,6 +204,12 @@ def appeal_block(source, table_codes=frozenset()):
         )
     if source.get('escopo') != 'item' or not source.get('motivos'):
         return 'Recurso automático disponível apenas para itens discriminados.'
+    if 'lote_prestador' not in source:
+        # Only the payment demonstrativo has the payer's lot number.
+        return (
+            'Lote da Petrobras ainda não importado; importe a competência '
+            'deste demonstrativo.'
+        )
     unknown = [c for c in operator_codes(source) if c not in table_codes]
     if unknown:
         return (
@@ -285,26 +319,39 @@ class PetrobrasClient:
             ) as response:
                 raw = response.read(MAX_RESPONSE + 1)
         except HTTPError as exc:
-            # SOAP faults can use HTTP 500. Expose only known safe fault codes.
+            # SOAP faults use HTTP 500: the operator refused the message.
             try:
                 fault = parse_xml(exc.read(32768))
-                code = next(
-                    (
-                        n.text
-                        for n in fault.iter()
-                        if n.tag.split('}')[-1] == 'faultstring'
-                    ),
-                    '',
+                names = {
+                    n.tag.split('}')[-1]: n
+                    for n in fault.iter()
+                    if isinstance(n.tag, str)
+                }
+                faults = (
+                    [names.get('Fault', fault)]
+                    if {'Fault', 'faultstring'} & names.keys()
+                    else []
                 )
             except TissError:
-                code = ''
-            if code in {
-                'DESTINATARIO_INVALIDO',
-                'LOGIN_INVALIDO',
-                'SENHA_INVALIDA',
-                'HASH_INVALIDO',
-            }:
-                raise TissError('Petrobras: ' + code) from None
+                faults = []
+            if faults:
+                login = self.config.login.get_secret_value()
+                password = self.config.password.get_secret_value()
+                reason = fault_text(
+                    faults[0],
+                    [
+                        login,
+                        password,
+                        hashlib.md5(
+                            password.encode('iso-8859-1'),
+                            usedforsecurity=False,
+                        ).hexdigest(),
+                    ],
+                )
+                raise TissRejected(
+                    f'Petrobras recusou a mensagem (HTTP {exc.code}): '
+                    f'{reason or "sem motivo informado"}.'
+                ) from None
             raise TissError(
                 (
                     f'Serviço Petrobras retornou HTTP '
@@ -358,7 +405,8 @@ class PetrobrasClient:
                     ],
                 )
             )[:150]
-            raise TissError(
+            # An explicit business answer: nothing was accepted.
+            raise TissRejected(
                 'Operadora recusou a consulta/transação'
                 + (f' ({detail})' if detail else '')
                 + '; verificar cadastro, credenciais e protocolo.'
@@ -461,7 +509,11 @@ class PetrobrasClient:
             raise TissError('Recurso reúne itens de um único lote/protocolo.')
         guides = {}
         for source, justification in entries:
-            key = (source['guia_prestador'], source.get('guia_operadora'))
+            key = (
+                source['guia_prestador'],
+                source.get('guia_operadora'),
+                source.get('senha'),
+            )
             guides.setdefault(key, []).append((source, justification))
         if len(guides) > MAX_APPEAL_GUIDES:
             raise TissError(
@@ -477,11 +529,16 @@ class PetrobrasClient:
         element(guide, 'numeroLote', first['lote'])
         element(guide, 'numeroProtocolo', first['protocolo'])
         option = element(guide, 'opcaoRecurso')
-        for (origin_guide, operator_guide), items in guides.items():
+        for (origin_guide, operator_guide, senha), items in guides.items():
             origin = element(option, 'recursoGuia')
+            # As the operator stores it (left-padded to 20, as the portal
+            # shows); the unpadded number fails with ORA-01403 there.
             element(origin, 'numeroGuiaOrigem', origin_guide)
             if operator_guide:
                 element(origin, 'numeroGuiaOperadora', operator_guide)
+            # Authorization of the original guide, as the operator returned.
+            if senha:
+                element(origin, 'senha', senha)
             listed = element(origin, 'opcaoRecursoGuia')
             for source, justification in items:
                 for reason in source['motivos']:
@@ -508,21 +565,22 @@ class PetrobrasClient:
         relaxed = any(operator_codes(s) for s, _ in entries)
         return self.call('recurso', root, relaxed)
 
-    def document(self, source, attachment):
+    def document(self, source, attachment, appeal):
+        """Proof of an appeal: TISS naturezaGuia 3 (Recurso de Glosa).
+
+        appeal: (numeroGuiaRecGlosaPrestador, nrProtocoloRecursoGlosa) of
+        the appeal already received by the operator; the document cites the
+        appeal guide, not the closed billing guide (naturezaGuia 2).
+        """
+        appeal_guide, appeal_protocol = appeal
         root = message(self.config, 'documento')
         body = element(
             root, 'envioDOcumento'
         )  # Exact spelling from published XSD.
-        for key, tag in [
-            ('lote', 'numeroLote'),
-            ('protocolo', 'numeroProtocolo'),
-            ('guia_prestador', 'numeroGuiaPrestador'),
-            ('guia_operadora', 'numeroGuiaOperadora'),
-        ]:
-            if source.get(key):
-                element(body, tag, source[key])
+        element(body, 'numeroProtocolo', appeal_protocol)
+        element(body, 'numeroGuiaPrestador', appeal_guide)
         element(body, 'numeroDocumento', str(attachment.id))
-        element(body, 'naturezaGuia', attachment.natureza_guia)
+        element(body, 'naturezaGuia', APPEAL_DOCUMENT_NATURE)
         element(body, 'formatoDocumento', attachment.formato)
         if source.get('sequencial'):
             element(body, 'seqReferenciaItem', source['sequencial'])
@@ -737,6 +795,16 @@ def payment_protocols(root, config):
             'Demonstrativo sem protocolos; dados anteriores preservados.'
         )
     return sorted(n for n in numbers if set(n) != {'0'})
+
+
+def payment_lots(root):
+    """{protocol: payer's lot number}; conflicting protocols are left out."""
+    found = {}
+    for node in root.iter('{%s}relacaoProtocolos' % NS):
+        number, lot = value(node, 'numeroProtocolo'), value(node, 'numeroLote')
+        if number and lot and set(number) != {'0'}:
+            found.setdefault(number, set()).add(lot)
+    return {n: lots.pop() for n, lots in found.items() if len(lots) == 1}
 
 
 GUIDE_ONLY_NOTICE = (

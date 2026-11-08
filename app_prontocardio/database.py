@@ -5,8 +5,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
-from app_prontocardio.settings import Settings
 from app_prontocardio.services.payables_mv import bound_connect_timeout
+from app_prontocardio.settings import Settings
 
 settings = Settings()
 

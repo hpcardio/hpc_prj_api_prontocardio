@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from evolucao_sadt_backend.integrated_forms import render_integrated_form
 
 from evolucao_sadt_backend.mv_context_token import (
     MvContextClaims,
@@ -22,8 +24,8 @@ from evolucao_sadt_backend.mv_identity import (
 
 LIMITE_TEXTO_MV = 4000
 FORM_VERSION = '3.1'
-SUPPORTED_FORM_VERSIONS = {'1.0', '2.0', '3.0', '3.1', '4.0'}
-SUPPORTED_LINES = {'LC-DAC', 'LC-IC', 'LC-PREVENCAO'}
+SUPPORTED_FORM_VERSIONS = {'1.0', '2.0', '3.0', '3.1', '4.0', '5.0'}
+SUPPORTED_LINES = {'LC-DAC', 'LC-IC', 'LC-PREVENCAO', 'LC-MULTI'}
 
 default_data_dir = (
     Path(tempfile.gettempdir()) / 'evolucao_sadt_data'
@@ -37,16 +39,35 @@ DATABASE_PATH = DATA_DIR / 'formularios.sqlite3'
 
 class FormInput(BaseModel):
     cd_atendimento: int
-    linha_cuidado: Literal['LC-DAC', 'LC-IC', 'LC-PREVENCAO']
+    linha_cuidado: Literal['LC-DAC', 'LC-IC', 'LC-PREVENCAO', 'LC-MULTI']
     versao: str = Field(default=FORM_VERSION, max_length=20)
     dados: dict[str, Any]
     copiado_de_cd_pre_med: int | None = None
+
+    @model_validator(mode='after')
+    def validate_integrated_contract(self):
+        integrated = self.linha_cuidado == 'LC-MULTI'
+        if integrated and (
+            self.versao != '5.0'
+            or self.dados.get('schema') != 'integrated-care-v1'
+        ):
+            raise ValueError('LC-MULTI exige versão 5.0 e schema integrado.')
+        if not integrated and self.versao == '5.0':
+            raise ValueError('A versão 5.0 exige a linha LC-MULTI.')
+        return self
+
+
+class FormSaveInput(FormInput):
+    base_atualizado_em: str | None = None
+    conflict_resolution: Literal['keep_server', 'replace_with_local'] | None = None
 
 
 class FormRecord(FormInput):
     cd_pre_med: int
     texto_mv: str
     caracteres: int
+    limite: int = LIMITE_TEXTO_MV
+    excede_limite: bool = False
     criado_em: str
     atualizado_em: str
 
@@ -60,14 +81,13 @@ def _connect() -> sqlite3.Connection:
 
 
 def _oracle_session():
-    # Keep standalone form rendering independent of Oracle initialization.
-    from app_prontocardio.database import get_session_oracle  # noqa: PLC0415
+    from app_prontocardio.database import get_session_oracle
 
     yield from get_session_oracle()
 
 
 def _load_evolution(session, cd_pre_med: int):
-    from app_prontocardio.evolucao_service import (  # noqa: PLC0415
+    from app_prontocardio.evolucao_service import (
         EvolucaoMvNaoEncontrada,
         obter_evolucao,
     )
@@ -94,6 +114,26 @@ def _initialize_database() -> None:
                 criado_em TEXT NOT NULL,
                 atualizado_em TEXT NOT NULL
             )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS formularios_evolucao_revisoes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cd_pre_med INTEGER NOT NULL,
+                dados_json TEXT NOT NULL,
+                texto_mv TEXT NOT NULL,
+                atualizado_em TEXT NOT NULL,
+                substituido_em TEXT NOT NULL,
+                substituido_por TEXT NOT NULL,
+                FOREIGN KEY (cd_pre_med) REFERENCES formularios_evolucao(cd_pre_med)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_formularios_revisoes_pre_med
+            ON formularios_evolucao_revisoes (cd_pre_med, substituido_em DESC)
             """
         )
         connection.execute(
@@ -1808,7 +1848,16 @@ def _render_ic_current(data: dict[str, Any]) -> str:
     return '\n'.join(lines).strip()
 
 
-def render_form(payload: FormInput) -> str:
+class RenderedForm(BaseModel):
+    texto_mv: str
+    caracteres: int
+    limite: int = LIMITE_TEXTO_MV
+    excede_limite: bool
+
+
+def render_form_result(
+    payload: FormInput, *, enforce_mv_limit: bool
+) -> RenderedForm:
     if payload.versao not in SUPPORTED_FORM_VERSIONS:
         raise HTTPException(
             status_code=422, detail='Versão de formulário não suportada.'
@@ -1818,7 +1867,9 @@ def render_form(payload: FormInput) -> str:
         'LC-IC': _render_ic,
         'LC-PREVENCAO': _render_prevent,
     }
-    if payload.versao == '4.0' and payload.linha_cuidado == 'LC-IC':
+    if payload.linha_cuidado == 'LC-MULTI':
+        text = render_integrated_form(payload.dados)
+    elif payload.versao == '4.0' and payload.linha_cuidado == 'LC-IC':
         text = _render_ic_current(payload.dados)
     elif payload.versao == '4.0' and payload.linha_cuidado == 'LC-PREVENCAO':
         text = _render_prevent_current(payload.dados)
@@ -1826,7 +1877,8 @@ def render_form(payload: FormInput) -> str:
         text = _render_dac_v2(payload.dados, payload.versao)
     else:
         text = renderers[payload.linha_cuidado](payload.dados)
-    if len(text) > LIMITE_TEXTO_MV:
+    exceeds = len(text) > LIMITE_TEXTO_MV
+    if exceeds and enforce_mv_limit:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -1834,7 +1886,16 @@ def render_form(payload: FormInput) -> str:
                 f'o limite de {LIMITE_TEXTO_MV} do MV.'
             ),
         )
-    return text
+    return RenderedForm(
+        texto_mv=text,
+        caracteres=len(text),
+        limite=LIMITE_TEXTO_MV,
+        excede_limite=exceeds,
+    )
+
+
+def render_form(payload: FormInput) -> str:
+    return render_form_result(payload, enforce_mv_limit=True).texto_mv
 
 
 def _record(row: sqlite3.Row) -> dict[str, Any]:
@@ -1846,6 +1907,8 @@ def _record(row: sqlite3.Row) -> dict[str, Any]:
         'dados': json.loads(row['dados_json']),
         'texto_mv': row['texto_mv'],
         'caracteres': len(row['texto_mv']),
+        'limite': LIMITE_TEXTO_MV,
+        'excede_limite': len(row['texto_mv']) > LIMITE_TEXTO_MV,
         'copiado_de_cd_pre_med': row['copiado_de_cd_pre_med'],
         'criado_em': row['criado_em'],
         'atualizado_em': row['atualizado_em'],
@@ -1879,6 +1942,66 @@ def latest_previous_form_value(
     return None
 
 
+def latest_integrated_cal_origin(
+    cd_atendimentos: list[int],
+    linha_cuidado: str,
+) -> dict[str, Any] | None:
+    """Return the newest structured CAL for the patient's known attendances."""
+    attendance_ids = sorted({int(value) for value in cd_atendimentos if int(value) > 0})
+    if not attendance_ids:
+        return None
+    placeholders = ','.join('?' for _ in attendance_ids)
+    with _connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT cd_pre_med, dados_json
+              FROM formularios_evolucao
+             WHERE cd_atendimento IN ({placeholders})
+               AND linha_cuidado = 'LC-MULTI'
+             ORDER BY atualizado_em DESC
+            """,
+            attendance_ids,
+        ).fetchall()
+    for row in rows:
+        try:
+            data = json.loads(row['dados_json'])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if data.get('schema') != 'integrated-care-v1' or data.get('tipo_consulta') != 'CAL':
+            continue
+        if linha_cuidado not in (data.get('linhas_ativas') or []):
+            continue
+        common = data.get('comum') if isinstance(data.get('comum'), dict) else {}
+        modules = data.get('modulos') if isinstance(data.get('modulos'), dict) else {}
+        module = modules.get(linha_cuidado) if isinstance(modules.get(linha_cuidado), dict) else {}
+        conducts: list[str] = []
+        for key, value in common.items():
+            if key == 'conduta_adicional' or key == 'decisao_clinica' or key.startswith('conduta_'):
+                items = value if isinstance(value, list) else [value]
+                conducts.extend(str(item).strip() for item in items if str(item or '').strip())
+        for medication in data.get('medicamentos') or []:
+            if not isinstance(medication, dict) or not medication.get('acao_consulta'):
+                continue
+            drug = str(medication.get('farmaco') or '').strip()
+            dosage = str(medication.get('posologia') or '').strip()
+            action = str(medication.get('acao_consulta') or '').strip().capitalize()
+            if drug:
+                conducts.append(' '.join(part for part in (action, drug, dosage) if part))
+        exams = [
+            {'codigo': str(code), 'situacao': 'aguardando'}
+            for code in data.get('exames_solicitados') or []
+            if str(code or '').strip()
+        ]
+        return {
+            'id': str(row['cd_pre_med']),
+            'data': str(common.get('data_consulta') or ''),
+            'momento': str(module.get('tempo') or ''),
+            'condutas': list(dict.fromkeys(conducts)),
+            'exames': exams,
+        }
+    return None
+
+
 _initialize_database()
 
 app = FastAPI(
@@ -1902,12 +2025,7 @@ def status():
 
 @app.post('/renderizar')
 def render(payload: FormInput):
-    text = render_form(payload)
-    return {
-        'texto_mv': text,
-        'caracteres': len(text),
-        'limite': LIMITE_TEXTO_MV,
-    }
+    return render_form_result(payload, enforce_mv_limit=False).model_dump()
 
 
 def require_form_read_context(
@@ -1978,7 +2096,6 @@ def require_form_write_owner(
     except (
         EvolutionOwnershipError,
         MvContextTokenError,
-        ValueError,
     ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return claims
@@ -1987,24 +2104,54 @@ def require_form_write_owner(
 @app.put('/{cd_pre_med}', response_model=FormRecord)
 def save_form(
     cd_pre_med: int,
-    payload: FormInput,
+    payload: FormSaveInput,
     claims: MvContextClaims = Depends(require_form_write_owner),
 ):
     try:
         claims.require_attendance(payload.cd_atendimento)
     except (EvolutionOwnershipError, MvContextTokenError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    text = render_form(payload)
+    rendered = render_form_result(payload, enforce_mv_limit=False)
+    text = rendered.texto_mv
     now = datetime.now(timezone.utc).isoformat()
     data_json = json.dumps(
         payload.dados, ensure_ascii=False, separators=(',', ':')
     )
     text_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
     with _connect() as connection:
+        connection.execute('BEGIN IMMEDIATE')
         existing = connection.execute(
-            'SELECT criado_em FROM formularios_evolucao WHERE cd_pre_med = ?',
+            'SELECT * FROM formularios_evolucao WHERE cd_pre_med = ?',
             (cd_pre_med,),
         ).fetchone()
+        if existing is not None and payload.base_atualizado_em and payload.base_atualizado_em != existing['atualizado_em']:
+            if payload.conflict_resolution == 'keep_server':
+                return _record(existing)
+            if payload.conflict_resolution != 'replace_with_local':
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        'message': 'O rascunho foi atualizado em outra aba ou estação.',
+                        'server_atualizado_em': existing['atualizado_em'],
+                        'server_record': _record(existing),
+                    },
+                )
+            connection.execute(
+                """
+                INSERT INTO formularios_evolucao_revisoes (
+                    cd_pre_med, dados_json, texto_mv, atualizado_em,
+                    substituido_em, substituido_por
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cd_pre_med,
+                    existing['dados_json'],
+                    existing['texto_mv'],
+                    existing['atualizado_em'],
+                    now,
+                    claims.cd_usuario,
+                ),
+            )
         created_at = existing['criado_em'] if existing else now
         connection.execute(
             """

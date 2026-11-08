@@ -4,14 +4,15 @@ import logging
 import os
 
 import oracledb
-
 from sqlalchemy.exc import DBAPIError
 
 logger = logging.getLogger(__name__)
 
 
 def bound_connect_timeout(connect_params):
-    timeout_seconds = float(os.getenv('PAYABLES_MV_CONNECT_TIMEOUT_SECONDS', '0'))
+    timeout_seconds = float(
+        os.getenv('PAYABLES_MV_CONNECT_TIMEOUT_SECONDS', '0')
+    )
     if timeout_seconds <= 0:
         return
     params = oracledb.ConnectParams()
@@ -26,8 +27,9 @@ def read_payables_rows(session, statement, params):
     except DBAPIError as exc:
         if not exc.connection_invalidated:
             raise
-        # These call sites execute only SELECTs. Never replay a request handler,
-        # a PostgreSQL transaction, a snapshot, or a payment operation.
+        # These call sites execute only SELECTs. Never replay a request
+        # handler, a PostgreSQL transaction, a snapshot, or a payment
+        # operation.
         session.invalidate()
         logger.warning('MV read disconnected; retrying the SELECT once')
     return session.execute(statement, params).mappings().all()

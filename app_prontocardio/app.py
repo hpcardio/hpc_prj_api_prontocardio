@@ -10,6 +10,7 @@ from app_prontocardio.database import (
     ensure_postgres_schema,
     run_postgres_migrations,
 )
+from app_prontocardio.services import followup_cache
 from app_prontocardio.routers import (
     agenda_medica,
     agendamentos,
@@ -93,6 +94,17 @@ async def bloquear_escrita_perfil_leitura(request: Request, call_next):
         )
 
     return await call_next(request)
+
+@app.middleware('http')
+async def invalidar_cache_follow_up(request: Request, call_next):
+    response = await call_next(request)
+    # A successful glosa write changes Follow-Up data: next listing recomputes.
+    if followup_cache.invalidates(
+        request.method, request.url.path, response.status_code
+    ):
+        followup_cache.bump_generation()
+    return response
+
 
 if settings.cors_allowed_origins:
     app.add_middleware(
