@@ -50,6 +50,13 @@ def data(monkeypatch):
     monkeypatch.setattr(cp, '_pagamentos_manuais', lambda s: {})
     monkeypatch.setattr(
         cp,
+        '_opcoes_classificacao',
+        lambda s: [
+            {'valor': cp.SEM_CLASSIFICACAO, 'nome': 'Sem classificação'}
+        ],
+    )
+    monkeypatch.setattr(
+        cp,
         '_tratamentos',
         lambda s: {
             10: {'critico': True, 'nivel_criticidade': 5},
@@ -163,3 +170,96 @@ def test_invalid_identity_is_rejected(value):
     with pytest.raises(HTTPException) as exc:
         cp._selecionar_codigos(value)
     assert exc.value.status_code == 422
+
+
+def test_account_classification_filter_reaches_both_oracle_queries(
+    data, monkeypatch
+):
+    calls = []
+    groups = deepcopy(data)
+    monkeypatch.setattr(
+        cp,
+        '_consultar_oracle',
+        lambda *a, **k: calls.append(('fornecedores', k)) or deepcopy(groups),
+    )
+    monkeypatch.setattr(
+        cp,
+        '_consultar_titulos_oracle',
+        lambda s, codes, **k: calls.append(('titulos', k)) or [],
+    )
+    snapshots = []
+    monkeypatch.setattr(
+        cp, '_registrar_snapshot', lambda *a: snapshots.append(a)
+    )
+    cp.listar_contas_pagar(
+        None,
+        FakeSession([]),
+        None,
+        page=1,
+        page_size=20,
+        exportar=False,
+        classificacao=' ACORDO ',
+    )
+    assert calls
+    assert all(k.get('classificacao') == 'ACORDO' for _, k in calls)
+    assert snapshots == []
+
+
+def test_supplier_lists_the_classifications_of_its_titles(data, monkeypatch):
+    titles = cp._consultar_titulos_oracle
+    monkeypatch.setattr(
+        cp,
+        '_consultar_titulos_oracle',
+        lambda s, codes, **kw: [
+            {
+                **t,
+                'classificacao': 'ACORDO'
+                if t['codigo_parcela'] == 1
+                else None,
+            }
+            for t in titles(s, codes, **kw)
+        ],
+    )
+    result = listing(fornecedores_ids='10')
+    supplier = result['fornecedores'][0]
+    assert supplier['classificacoes'] == ['ACORDO', 'Sem classificação']
+    assert {t['classificacao'] for t in supplier['titulos']} == {
+        'ACORDO',
+        None,
+    }
+
+
+class ScalarSession:
+    def __init__(self, names=None, error=None):
+        self.names, self.error = names, error
+
+    def execute(self, *_args, **_kwargs):
+        if self.error:
+            raise self.error
+        names = self.names
+        return type('R', (), {'scalars': lambda _self: iter(names)})()
+
+
+def test_classification_options_put_the_empty_case_first():
+    options = cp._opcoes_classificacao(
+        ScalarSession(['ACORDO', None, 'MEDICOS'])
+    )
+    assert options == [
+        {'valor': cp.SEM_CLASSIFICACAO, 'nome': 'Sem classificação'},
+        {'valor': 'ACORDO', 'nome': 'ACORDO'},
+        {'valor': 'MEDICOS', 'nome': 'MEDICOS'},
+    ]
+    failed = cp._opcoes_classificacao(
+        ScalarSession(error=cp.SQLAlchemyError('sem acesso'))
+    )
+    assert failed == [
+        {'valor': cp.SEM_CLASSIFICACAO, 'nome': 'Sem classificação'}
+    ]
+
+
+def test_queries_filter_and_return_the_account_classification():
+    for query in (cp.ORACLE_FORNECEDORES_QUERY, cp.ORACLE_TITULOS_QUERY):
+        sql = str(query)
+        assert 'MAX(v.classificacao) AS classificacao' in sql
+        assert cp.FILTRO_CLASSIFICACAO_SQL in sql
+    assert 'p.classificacao,' in str(cp.ORACLE_TITULOS_QUERY)
