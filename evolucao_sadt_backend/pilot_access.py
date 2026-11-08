@@ -21,3 +21,4 @@ def _parse_attendances() -> tuple[int, ...]:
 
 ATENDIMENTOS_PILOTO = _parse_attendances()
 ATENDIMENTO_PILOTO = ATENDIMENTOS_PILOTO[0]
+

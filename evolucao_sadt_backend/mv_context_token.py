@@ -12,7 +12,6 @@ from evolucao_sadt_backend.prontorede_context import VerifiedMvContext
 
 TOKEN_PURPOSE = 'EVOLUCAO_SADT_CONTEXT_V1'
 DEFAULT_TTL_SECONDS = 5 * 60
-MIN_SECRET_BYTES = 32
 
 
 class MvContextTokenError(PermissionError):
@@ -41,10 +40,7 @@ def _b64decode(value: str) -> bytes:
 
 
 def _secret(value: str) -> bytes:
-    if (
-        not isinstance(value, str)
-        or len(value.encode('utf-8')) < MIN_SECRET_BYTES
-    ):
+    if not isinstance(value, str) or len(value.encode('utf-8')) < 32:
         raise MvContextTokenError('Assinatura do contexto MV indisponível.')
     return value.encode('utf-8')
 
@@ -84,9 +80,7 @@ def verify_mv_context_token(
     try:
         encoded, signature = token.split('.', 1)
         expected = _b64encode(
-            hmac.new(
-                _secret(secret), encoded.encode(), hashlib.sha256
-            ).digest()
+            hmac.new(_secret(secret), encoded.encode(), hashlib.sha256).digest()
         )
         if not hmac.compare_digest(signature, expected):
             raise MvContextTokenError('Contexto MV inválido.')
@@ -100,13 +94,7 @@ def verify_mv_context_token(
         )
     except MvContextTokenError:
         raise
-    except (
-        KeyError,
-        TypeError,
-        ValueError,
-        UnicodeError,
-        json.JSONDecodeError,
-    ) as exc:
+    except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         raise MvContextTokenError('Contexto MV inválido.') from exc
     if payload.get('purpose') != TOKEN_PURPOSE:
         raise MvContextTokenError('Contexto MV inválido.')

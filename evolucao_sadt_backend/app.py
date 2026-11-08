@@ -12,11 +12,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StrictInt, constr
 
 from evolucao_sadt_backend.evolution_app import app as evolution_app
-from evolucao_sadt_backend.mv_context_token import (
-    DEFAULT_TTL_SECONDS,
-    MvContextTokenError,
-    issue_mv_context_token,
-)
 from evolucao_sadt_backend.prontorede_context import (
     MvContextVerificationError,
     ProntoRedeContextInvalidResponseError,
@@ -29,15 +24,18 @@ from evolucao_sadt_backend.prontorede_device import (
     ChallengeRequest,
     EnrollmentChallengeRequest,
     EnrollmentProofRequest,
-    ProntoRedeDeviceConfigurationError,
     ProntoRedeDeviceConflictError,
+    ProntoRedeDeviceConfigurationError,
     ProntoRedeDeviceResolutionError,
     ProntoRedeDeviceService,
     ProntoRedeDeviceVerificationError,
     ProofRequest,
 )
-from evolucao_sadt_backend.prontorede_device_registry import (
-    SqliteDeviceRegistry,
+from evolucao_sadt_backend.prontorede_device_registry import SqliteDeviceRegistry
+from evolucao_sadt_backend.mv_context_token import (
+    DEFAULT_TTL_SECONDS,
+    MvContextTokenError,
+    issue_mv_context_token,
 )
 from evolucao_sadt_backend.sadt_app import app as sadt_app
 
@@ -110,9 +108,7 @@ def _configure_prontorede_device_service() -> None:
         mv_context_resolver=_resolve_authorized_mv_context,
         device_registry=SqliteDeviceRegistry(database_path),
         autoenroll_enabled=(
-            os.getenv(
-                'PRONTOREDE_MV_DEVICE_AUTOENROLL_ENABLED', 'false'
-            ).lower()
+            os.getenv('PRONTOREDE_MV_DEVICE_AUTOENROLL_ENABLED', 'false').lower()
             == 'true'
         ),
     )

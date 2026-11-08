@@ -1,8 +1,9 @@
 import re
 from http import HTTPStatus
-from typing import Annotated, Callable
+from typing import Annotated, Callable, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -11,6 +12,27 @@ from app_prontocardio.database import (
     get_session_oracle,
     get_session_postgres,
 )
+from evolucao_sadt_backend.evolucao_schema import (
+    ContextoEvolucaoMv,
+    EvolucaoMv,
+    EvolucaoRascunhoInput,
+    EvolucaoTextoInput,
+    EvolucoesMv,
+    LinhasCuidadoEvolucao,
+)
+from evolucao_sadt_backend.care_support import load_care_support
+from evolucao_sadt_backend.care_enrollment import default_enrollment_store
+from evolucao_sadt_backend.mv_identity import (
+    EvolutionOwnershipError,
+    assert_evolution_ownership,
+    normalize_mv_user,
+)
+from evolucao_sadt_backend.mv_context_token import (
+    MvContextClaims,
+    MvContextTokenError,
+    require_mv_context,
+)
+from evolucao_sadt_backend.patient_context import patient_identification
 from app_prontocardio.evolucao_service import (
     ConfiguracaoEvolucaoMv,
     EvolucaoMvConfiguracaoInvalida,
@@ -26,29 +48,22 @@ from app_prontocardio.evolucao_service import (
 from app_prontocardio.models import AuditoriaEvolucaoMv, Usuario
 from app_prontocardio.security import valida_usuario_ti
 from app_prontocardio.settings import Settings
-from evolucao_sadt_backend.care_support import load_care_support
-from evolucao_sadt_backend.evolucao_schema import (
-    ContextoEvolucaoMv,
-    EvolucaoMv,
-    EvolucaoRascunhoInput,
-    EvolucaoTextoInput,
-    EvolucoesMv,
-    LinhasCuidadoEvolucao,
-)
-from evolucao_sadt_backend.mv_context_token import (
-    MvContextClaims,
-    MvContextTokenError,
-    require_mv_context,
-)
-from evolucao_sadt_backend.mv_identity import (
-    EvolutionOwnershipError,
-    assert_evolution_ownership,
-    normalize_mv_user,
-)
 
 router = APIRouter(prefix='/mv/evolucoes', tags=['evolucoes-mv'])
 settings = Settings()
 LIMITE_TEXTO_EVOLUCAO = 4000
+care_enrollment_store = default_enrollment_store()
+
+
+class CareEnrollmentEntry(BaseModel):
+    linha: Literal['LC-DAC', 'LC-IC', 'LC-PREVENCAO']
+    ativa: bool
+    data_ancora: str | None = None
+    origem: str = 'MEDICO'
+
+
+class CareEnrollmentInput(BaseModel):
+    linhas: list[CareEnrollmentEntry]
 
 LINHAS_CUIDADO_CARDIOLOGIA = (
     {
@@ -596,9 +611,7 @@ def _contexto_do_medico(
     )
 
 
-def _identificacao_do_medico(
-    session: Session, cd_prestador: int
-) -> dict[str, str]:
+def _identificacao_do_medico(session: Session, cd_prestador: int) -> dict[str, str]:
     row = session.execute(
         text(
             """
@@ -800,6 +813,7 @@ def consultar_contexto(
         return {
             **contexto.model_dump(),
             **_identificacao_do_medico(session, contexto.cd_prestador),
+            **patient_identification(session, cd_atendimento),
         }
     except (
         EvolucaoMvNaoEncontrada,
@@ -807,6 +821,55 @@ def consultar_contexto(
         SQLAlchemyError,
     ) as exc:
         raise _mapear_erro(exc) from exc
+
+
+@router.get('/linhas-paciente/{cd_atendimento}')
+def consultar_linhas_paciente(
+    cd_atendimento: int,
+    session: SessionOracle,
+    _: UsuarioTi,
+    identidade: ContextoMv,
+):
+    contexto = _contexto_do_medico(
+        session, cd_atendimento, identidade, False
+    )
+    return {
+        'cd_atendimento': cd_atendimento,
+        'linhas': care_enrollment_store.list_for_patient(
+            contexto.cd_paciente
+        ),
+    }
+
+
+@router.put('/linhas-paciente/{cd_atendimento}')
+def atualizar_linhas_paciente(
+    cd_atendimento: int,
+    payload: CareEnrollmentInput,
+    session: SessionOracle,
+    _: UsuarioTi,
+    identidade: ContextoMv,
+):
+    contexto = _contexto_do_medico(
+        session, cd_atendimento, identidade, False
+    )
+    try:
+        alteradas = care_enrollment_store.upsert(
+            patient_id=contexto.cd_paciente,
+            attendance_id=cd_atendimento,
+            user=identidade.cd_usuario,
+            entries=[entry.model_dump() for entry in payload.linhas],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return {
+        'cd_atendimento': cd_atendimento,
+        'alteradas': alteradas,
+        'linhas': care_enrollment_store.list_for_patient(
+            contexto.cd_paciente
+        ),
+    }
 
 
 @router.get(
@@ -912,7 +975,8 @@ def criar_evolucao_rascunho(
         atual = _obter_evolucao_ou_erro(session_oracle, auditoria.cd_pre_med)
         if atual.cd_atendimento != payload.cd_atendimento:
             raise HTTPException(
-                status_code=409, detail='Atendimento divergente.'
+                status_code=HTTPStatus.CONFLICT,
+                detail='Atendimento divergente.',
             )
         _validar_autoria(atual, contexto)
         return atual
