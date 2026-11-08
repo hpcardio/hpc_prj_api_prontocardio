@@ -263,3 +263,24 @@ def test_queries_filter_and_return_the_account_classification():
         assert 'MAX(v.classificacao) AS classificacao' in sql
         assert cp.FILTRO_CLASSIFICACAO_SQL in sql
     assert 'p.classificacao,' in str(cp.ORACLE_TITULOS_QUERY)
+
+
+def test_summary_without_titles_skips_the_title_query(data, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cp,
+        '_consultar_titulos_oracle',
+        lambda s, codes, **k: calls.append(codes) or [],
+    )
+    result = cp.listar_contas_pagar(
+        None,
+        FakeSession([]),
+        None,
+        page=1,
+        page_size=20,
+        exportar=False,
+        incluir_titulos=False,
+    )
+    assert result['fornecedores']
+    assert all(item['titulos'] == [] for item in result['fornecedores'])
+    assert calls == []
