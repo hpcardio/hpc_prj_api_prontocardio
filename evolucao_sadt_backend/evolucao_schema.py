@@ -33,6 +33,11 @@ class ContextoEvolucaoMv(BaseModel):
     objeto: str
     assinatura_digital_configurada: bool
     escrita_habilitada: bool
+    nome_paciente: str | None = None
+    idade: int | None = None
+    sexo: str | None = None
+    prontuario: str | None = None
+    data_atendimento: datetime | None = None
 
 
 class EvolucaoMv(BaseModel):

@@ -11,9 +11,72 @@ from evolucao_sadt_backend.lc_dac_support import (
     extract_numeric_result,
     load_lc_dac_support,
 )
-from evolucao_sadt_backend.forms_app import latest_previous_form_value
+from evolucao_sadt_backend.forms_app import (
+    latest_integrated_cal_origin,
+    latest_previous_form_value,
+)
 
 SUPPORTED_LINES = {'LC-DAC', 'LC-IC', 'LC-PREVENCAO'}
+VERIFIED_MV_CONSULTATION_VALUES: dict[str, str] = {}
+
+
+def _patient_attendance_ids(session: Session, cd_atendimento: int) -> list[int]:
+    rows = session.execute(
+        text(
+            '''
+            SELECT a.CD_ATENDIMENTO
+              FROM DBAMV.ATENDIME a
+             WHERE a.CD_PACIENTE = (
+                   SELECT atual.CD_PACIENTE
+                     FROM DBAMV.ATENDIME atual
+                    WHERE atual.CD_ATENDIMENTO = :cd_atendimento
+             )
+             ORDER BY a.DT_ATENDIMENTO DESC NULLS LAST
+            '''
+        ),
+        {'cd_atendimento': cd_atendimento},
+    ).scalars().all()
+    return [int(value) for value in rows if value is not None]
+
+
+def _load_latest_cal_origin(
+    session: Session,
+    cd_atendimento: int,
+    line_code: str,
+) -> dict[str, Any] | None:
+    attendances = _patient_attendance_ids(session, cd_atendimento)
+    if cd_atendimento not in attendances:
+        attendances.insert(0, cd_atendimento)
+    return latest_integrated_cal_origin(attendances, line_code)
+
+
+def map_verified_consultation_value(value: Any) -> str | None:
+    """Map only values backed by a documented MV source contract."""
+    normalized = _normalized_report_text(value)
+    return VERIFIED_MV_CONSULTATION_VALUES.get(normalized)
+
+
+def load_mv_consultation_type(
+    _session: Session,
+    _cd_atendimento: int,
+) -> dict[str, str] | None:
+    """Keep manual selection until a conclusive MV column is verified.
+
+    Generic agenda and attendance descriptions are intentionally not queried
+    or inferred because they cannot safely distinguish CAM, CAL, CIR and EXT.
+    """
+    return None
+
+
+def _with_consultation_type(
+    support: dict[str, Any],
+    consultation: dict[str, str] | None,
+) -> dict[str, Any]:
+    if not consultation:
+        return support
+    result = {**support, 'campos': dict(support.get('campos') or {})}
+    result['campos']['tipo_consulta'] = consultation
+    return result
 
 
 def _normalized_report_text(value: Any) -> str:
@@ -205,6 +268,25 @@ def _load_latest_receituario_text(
     return '\n'.join(values) or None
 
 
+def _structured_receituario_items(receituario: str | None) -> list[dict[str, str]]:
+    if not receituario:
+        return []
+    items: list[dict[str, str]] = []
+    for index, line in enumerate(receituario.splitlines(), start=1):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        items.append(
+            {
+                'id': f'mv-receituario-{index}',
+                'texto': cleaned,
+                'origem': 'MV',
+                'chave_origem': f'receituario:{index}',
+            }
+        )
+    return items
+
+
 def _generic_support(
     raw: dict[str, Any],
     line_code: str,
@@ -262,12 +344,31 @@ def _generic_support(
                 'origem': exam['origem'],
             }
 
+    exam_results = {
+        exam_key: {
+            'exame': exam_key,
+            'valor': exam['valor'],
+            'data': exam['data'],
+            'origem': exam['origem'],
+            'situacao': 'resultado_disponivel',
+        }
+        for exam_key, exam in exams.items()
+    }
+
     return {
         'cd_atendimento': raw.get('cd_atendimento'),
         'linha_cuidado': line_code,
         'campos': fields,
         'exames': exams,
         'alertas': [],
+        'medicamentos': [],
+        'resultados_exames': exam_results,
+        'eventos_assistenciais': {
+            'internacoes_ic_6m': None,
+            'emergencias_12m': None,
+        },
+        'cal_origem': None,
+        'fontes_indisponiveis': [],
     }
 
 
@@ -279,12 +380,19 @@ def load_care_support(
     if line_code not in SUPPORTED_LINES:
         raise ValueError('Linha de cuidado inválida.')
     raw = load_lc_dac_support(session, cd_atendimento)
+    consultation = load_mv_consultation_type(session, cd_atendimento)
+    try:
+        cal_origin = _load_latest_cal_origin(session, cd_atendimento, line_code)
+    except Exception:
+        cal_origin = None
     if line_code == 'LC-DAC':
-        return raw
+        result = {**raw, 'cal_origem': cal_origin}
+        return _with_consultation_type(result, consultation)
     if line_code in {'LC-IC', 'LC-PREVENCAO'}:
         raw = {**raw, 'itens_ultima_prescricao': []}
     identification = _attendance_identification(session, cd_atendimento)
     result = _generic_support(raw, line_code, identification)
+    result['cal_origem'] = cal_origin
     if line_code in {'LC-IC', 'LC-PREVENCAO'}:
         receituario = _load_latest_receituario_text(session, cd_atendimento)
         if receituario:
@@ -296,6 +404,7 @@ def load_care_support(
                 'valor': receituario,
                 'origem': 'MV - último receituário fechado',
             }
+            result['medicamentos'] = _structured_receituario_items(receituario)
         anchor = latest_previous_form_value(
             cd_atendimento,
             line_code,
@@ -314,6 +423,7 @@ def load_care_support(
                 result['alertas'].append(
                     'FEVE automática indisponível; informe manualmente.'
                 )
+                result['fontes_indisponiveis'].append('laudo_ecocardiograma')
             if latest_feve:
                 result['campos']['feve'] = latest_feve
                 if latest_feve.get('data'):
@@ -331,4 +441,4 @@ def load_care_support(
                     'valor': previous_phenotype,
                     'origem': 'Última evolução estruturada',
                 }
-    return result
+    return _with_consultation_type(result, consultation)

@@ -2178,7 +2178,7 @@ class FakePortal:
         if self.efetivar_error:
             raise self.efetivar_error
         self.efetivados += 1
-        self.account['quantidadeItensRecursado'] = 1
+        self.account['qtdItemEfetivado'] = 1
         for row in self.denied:
             if row.get('situacaoRecursadoAceito') == 'R':
                 row['protocoloRecurso'] = 162723152
@@ -2233,27 +2233,102 @@ def test_webservice_failure_uses_portal_only_when_enabled(  # noqa: PLR0913, PLR
     assert calls == [[row.id]]
 
 
-def test_portal_efetiva_only_when_every_denied_item_is_treated(
+def test_transmission_never_efetivates_on_its_own(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
     target, other = rows['1'], rows['2']
+    acato_row(db, other)
     portal = FakePortal([target, other])
     run_portal(db, config, target, portal)
     assert [s[0] for s in portal.saved] == [target.id]
     assert portal.efetivados == 0
     assert target.recurso_estado == 'salvo_portal'
     assert portal.closed
-    with pytest.raises(TissError, match=r'1 item\(ns\).*seriam aceitos'):
-        petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+
+
+def efetivar_ready(db, protocol, config, source, candidate):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    portal = FakePortal([target, other])
+    run_portal(db, config, target, portal)
+    return target, other, portal
+
+
+def test_preview_tells_what_efetivar_would_accept(
+    db, protocol, config, source, candidate
+):
+    target, other, portal = efetivar_ready(
+        db, protocol, config, source, candidate
+    )
+    preview = petrobras_appeals.efetivar_preview(db, config, target, portal)
+    assert preview['recursos'] == 1
+    assert preview['acatos'] == 0
+    assert [i['tuss'] for i in preview['nao_recursados']] == [other.tuss]
     assert portal.efetivados == 0
-    acato_row(db, other)
+
+
+def test_efetivar_with_untreated_item_records_it_as_accepted(
+    db, protocol, config, source, candidate
+):
+    target, other, portal = efetivar_ready(
+        db, protocol, config, source, candidate
+    )
     petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
     assert portal.efetivados == 1
     assert target.recurso_estado == 'enviado_portal'
+    assert target.recurso_protocolo == '162723152'
+    assert other.recurso_estado == 'aceito_portal'
+    recorded = petrobras_appeals.acatos(db, [other.id])[other.id]
+    assert Decimal(recorded['valor']) == other.valor_glosa
+    assert 'transmitido' in petrobras_appeals.appeal_readiness(other)
 
 
-def test_portal_sends_at_once_when_the_rest_of_the_lot_is_accepted(
+def test_efetivar_accepts_marked_acatos_first_and_keeps_their_record(
+    db, protocol, config, source, candidate
+):
+    target, other, portal = efetivar_ready(
+        db, protocol, config, source, candidate
+    )
+    acato_row(db, other)
+    petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+    assert portal.accepted == [other.id]
+    assert other.recurso_estado == 'aceito_portal'
+    events = db.scalars(
+        select(PetrobrasEvento).where(
+            PetrobrasEvento.glosa_id == other.id,
+            PetrobrasEvento.tipo == 'acato',
+        )
+    ).all()
+    assert len(events) == 1
+
+
+def test_efetivar_route_requires_the_explicit_acknowledgement(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    target, other, portal = efetivar_ready(
+        db, protocol, config, source, candidate
+    )
+    config.transmission_enabled = True
+    monkeypatch.setattr(config.__class__, 'can_transmit', lambda *_: True)
+    monkeypatch.setattr(petrobras_appeals, 'PortalAppeal', lambda _c: portal)
+    url = f'/app_glosas/petrobras/glosas/{target.id}/efetivar-portal'
+    with petrobras_client(db, config) as client:
+        assert client.post(url, json={}).status_code == 422
+        refused = client.post(url, json={'ciente_nao_recursados': False})
+        assert refused.status_code == 422
+        assert portal.efetivados == 0
+        ready = client.get('/app_glosas/petrobras/glosas/prontos').json()
+        assert ready['salvos'][0]['id'] == target.id
+        assert ready['salvos'][0]['itens'] == 1
+        preview = client.get(url).json()
+        assert len(preview['nao_recursados']) == 1
+        sent = client.post(url, json={'ciente_nao_recursados': True})
+    assert sent.status_code == 200
+    assert portal.efetivados == 1
+
+
+def test_efetivar_sends_the_saved_proof_and_keeps_the_acato_draft_apart(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
@@ -2273,24 +2348,174 @@ def test_portal_sends_at_once_when_the_rest_of_the_lot_is_accepted(
     db.commit()
     portal = FakePortal([target, other])
     run_portal(db, config, target, portal)
-    assert portal.efetivados == 1
-    assert target.recurso_estado == 'enviado_portal'
     assert portal.saved[0][2][0].nome == 'formulario.pdf'
-    assert proof.estado == 'protocolado'
     assert portal.accepted == [other.id]
+    assert proof.estado != 'protocolado'
+    petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+    assert proof.estado == 'protocolado'
     assert target.recurso_protocolo == '162723152'
-    assert other.recurso_estado == 'rascunho'
 
 
-def test_portal_does_not_accept_while_an_item_is_untreated(
+def test_portal_accepts_acatos_without_efetivar_while_one_is_untreated(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted, untreated = rows['1'], rows['2'], rows['3']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted, untreated])
+    run_portal(db, config, target, portal)
+    assert portal.accepted == [accepted.id]
+    assert portal.efetivados == 0
+    assert target.recurso_estado == 'salvo_portal'
+
+
+def test_portal_accepts_before_saving_the_appeal(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted])
+    order = []
+    accept, save = portal.accept, portal.save
+    portal.accept = lambda *a: (order.append('aceite'), accept(*a))
+    portal.save = lambda *a: (order.append('recurso'), save(*a))
+    run_portal(db, config, target, portal)
+    assert order == ['aceite', 'recurso']
+    assert portal.efetivados == 0
+
+
+def test_portal_appeals_an_item_that_also_has_an_acato(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
     target = rows['1']
+    acato_row(db, target)
     portal = FakePortal([target, rows['2']])
     run_portal(db, config, target, portal)
     assert portal.accepted == []
+    assert [s[0] for s in portal.saved] == [target.id]
+
+
+def test_failed_accept_leaves_no_appeal_saved(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted])
+    portal.accept = Mock(side_effect=TissError('Portal Petrobras: HTTP 500.'))
+    with pytest.raises(TissError):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+    assert target.recurso_estado == 'rascunho'
+
+
+def test_account_with_a_saved_item_still_takes_the_next_item(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    portal = FakePortal([target, other], {'quantidadeItensRecursado': 1})
+    run_portal(db, config, target, portal)
+    assert target.recurso_estado == 'salvo_portal'
+
+
+def test_saved_count_alone_does_not_confirm_efetivar(
+    db, protocol, config, source, candidate
+):
+    target, _, portal = efetivar_ready(db, protocol, config, source, candidate)
+    portal.account['quantidadeItensRecursado'] = 1
+    portal.efetivar = lambda _lot: {}
+    with pytest.raises(TissError, match='não confirmado'):
+        petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
+    assert target.recurso_estado == 'envio_incerto'
+
+
+def test_item_with_appeal_protocol_is_never_saved_again(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    portal = FakePortal([target])
+    portal.denied[0]['protocoloRecurso'] = 162723152
+    with pytest.raises(TissError):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+
+
+def test_portal_never_sends_a_partial_acato_as_a_full_accept(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, partial = rows['1'], rows['2']
+    event(db, partial, 'acato', {'valor': '0.01'}, 1)
+    db.commit()
+    portal = FakePortal([target, partial])
+    run_portal(db, config, target, portal)
+    assert portal.accepted == []
     assert portal.efetivados == 0
+
+
+def test_webservice_protocol_sends_acatos_to_the_screen_without_efetivar(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted])
+    petrobras_appeals.accept_on_screen(db, config, [target], 1, portal)
+    assert portal.accepted == [accepted.id]
+    assert portal.efetivados == 0
+    assert portal.closed
+
+
+def test_webservice_success_calls_the_screen_only_when_enabled(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target = rows['1']
+    client = Mock()
+    client.appeal_protocol.return_value = receipt(target.fonte['protocolo'])
+    calls = []
+    monkeypatch.setattr(
+        petrobras_appeals,
+        'accept_on_screen',
+        lambda _db, _config, sent, _user: calls.append(sent),
+    )
+    config.portal_fallback = False
+    send_appeal(db, config, target, target.versao, 1, client)
+    assert calls == []
+    assert target.recurso_estado == 'protocolado'
+    other = rows['2']
+    other.prazo = target.prazo
+    db.commit()
+    config.portal_fallback = True
+    client.appeal_protocol.return_value = receipt(other.fonte['protocolo'])
+    client.appeal_protocol.side_effect = None
+    send_appeal(db, config, other, other.versao, 1, client)
+    assert calls == [[other]]
+
+
+def test_screen_failure_never_undoes_the_webservice_protocol(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted = rows['1'], rows['2']
+    acato_row(db, accepted)
+    target.recurso_estado = 'protocolado'
+    db.commit()
+    portal = FakePortal([target, accepted])
+    portal.accept = Mock(side_effect=TissError('Portal Petrobras: HTTP 500.'))
+    petrobras_appeals.accept_on_screen(db, config, [target], 1, portal)
+    assert target.recurso_estado == 'protocolado'
+    failure = db.scalar(
+        select(PetrobrasEvento).where(
+            PetrobrasEvento.glosa_id == target.id,
+            PetrobrasEvento.tipo == 'aceite_portal_falhou',
+        )
+    )
+    assert failure.dados['causa'] == 'Portal Petrobras: HTTP 500.'
 
 
 def test_portal_keeps_the_send_when_the_protocol_is_not_listed(
@@ -2310,6 +2535,7 @@ def test_portal_keeps_the_send_when_the_protocol_is_not_listed(
 
     portal.efetivar = without_protocol
     run_portal(db, config, target, portal)
+    petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
     assert target.recurso_estado == 'enviado_portal'
     assert target.recurso_protocolo is None
 
@@ -2399,7 +2625,7 @@ def test_portal_never_touches_an_account_already_sent(
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
     target = rows['1']
-    portal = FakePortal([target], {'quantidadeItensRecursado': 1})
+    portal = FakePortal([target], {'qtdItemEfetivado': 1})
     with pytest.raises(TissError, match='já tem item enviado'):
         run_portal(db, config, target, portal)
     assert portal.saved == []
@@ -2414,8 +2640,9 @@ def test_failed_efetivar_is_uncertain_and_blocks_resend(
     target = rows['1']
     portal = FakePortal([target])
     portal.efetivar_error = TissError('Portal Petrobras: HTTP 500.')
+    run_portal(db, config, target, portal)
     with pytest.raises(TissError, match='não confirmado'):
-        run_portal(db, config, target, portal)
+        petrobras_appeals.efetivar_portal(db, config, target, 1, portal)
     assert target.recurso_estado == 'envio_incerto'
     with pytest.raises(TissError, match='iniciada'):
         send_appeal(db, config, target, target.versao, 1, Mock())

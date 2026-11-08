@@ -70,7 +70,10 @@ def test_ic_usa_receituario_e_historico_sem_prescricao_ativa(
 def test_dac_preserva_suporte_original(monkeypatch):
     raw = {'itens_ultima_prescricao': ['Prescrição ativa']}
     monkeypatch.setattr(care_support, 'load_lc_dac_support', lambda *_: raw)
-    assert care_support.load_care_support(object(), 123, 'LC-DAC') is raw
+    result = care_support.load_care_support(object(), 123, 'LC-DAC')
+    # The original support is kept; production adds the CAL origin.
+    assert result == {**raw, 'cal_origem': None}
+    assert raw == {'itens_ultima_prescricao': ['Prescrição ativa']}
 
 
 def test_ic_renderiza_campos_recuperados_sem_exigir_risco():
