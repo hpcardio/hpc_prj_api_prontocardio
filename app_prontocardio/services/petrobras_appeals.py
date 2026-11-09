@@ -318,31 +318,40 @@ def account_groups(portal, lot):
 
 
 def accept_treated(db, portal, lot, demonstrativo, user_id, appealing=()):  # noqa: PLR0913, PLR0917 - audit context
-    """Aceitar Selecionados of the accounts fully marked as acato.
+    """Aceitar Selecionados of the items fully marked as acato here.
 
-    The screen accepts whole accounts, so an account goes only when every
-    open denied item has a full acato here and none of them is appealed.
+    An account whose open denied items are all acato goes whole, as before;
+    otherwise only those items are selected in the procedures grid, as the
+    screen allows. Items being appealed now are never accepted.
     """
     by_key = accepted_rows(db, demonstrativo)
-    chosen = []
+    whole, partial = [], []
     for account, items in account_groups(portal, lot):
         denied = [i for i in items if is_denied(i)]
         pending = [
-            i for i in denied if not is_saved(i) and not is_accepted(i)
+            i
+            for i in denied
+            if not is_saved(i) and not is_accepted(i) and not was_sent(i)
         ]
-        if (
-            not pending
-            or any(is_saved(i) for i in denied)
-            or any(i.get('numeroItem') in appealing for i in denied)
-            or not all(item_key(i) in by_key for i in pending)
-        ):
+        chosen = [
+            i
+            for i in pending
+            if item_key(i) in by_key and i.get('numeroItem') not in appealing
+        ]
+        if not chosen:
             continue
-        chosen.append((account, pending))
-    if not chosen:
-        return
-    portal.accept_accounts(lot, [account for account, _ in chosen])
-    for account, pending in chosen:
-        for item in pending:
+        if len(chosen) == len(pending) and not any(
+            is_saved(i) or was_sent(i) for i in denied
+        ):
+            whole.append((account, chosen))
+        else:
+            partial.append((account, chosen))
+    if whole:
+        portal.accept_accounts(lot, [account for account, _ in whole])
+    for _, chosen in partial:
+        portal.accept_items(lot, chosen)
+    for account, chosen in [*whole, *partial]:
+        for item in chosen:
             for row in by_key[item_key(item)]:
                 event(
                     db,
@@ -354,7 +363,8 @@ def accept_treated(db, portal, lot, demonstrativo, user_id, appealing=()):  # no
                     },
                     user_id,
                 )
-    db.commit()
+    if whole or partial:
+        db.commit()
 
 
 def was_sent(item):
@@ -421,15 +431,17 @@ def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR09
 
 
 def appeal_accounts(portal, targets):
-    """Group the appeal by account and check it can go as whole accounts.
+    """Group the appeal by account and choose how the screen selects it.
 
-    The portal appeals a whole account: every denied item of the account
-    must be in this appeal, with one justification. Checked before writing.
+    When every denied item of the account is in this appeal the whole
+    account is selected, as before; otherwise only these procedures are,
+    and the other items stay as they are. One justification per save.
     """
     groups = {}
     for row, lot, account, item in targets:
         key = (lot['numeroLote'], str(account.get('numeroConta')))
         groups.setdefault(key, (lot, account, []))[2].append((row, item))
+    result = []
     for lot, account, members in groups.values():
         chosen = {item.get('numeroItem') for _, item in members}
         others = [
@@ -437,19 +449,14 @@ def appeal_accounts(portal, targets):
             for i in portal.items(lot, account)
             if is_denied(i) and i.get('numeroItem') not in chosen
         ]
-        guide = account.get('numeroContaPrestador')
-        if others:
-            raise TissError(
-                f'A guia {guide} tem {len(others)} outro(s) item(ns) '
-                'glosado(s); o portal recursa a guia inteira. Inclua-os '
-                'neste recurso ou trate a guia pelo site.'
-            )
         if len({row.justificativa.strip() for row, _ in members}) > 1:
             raise TissError(
-                f'Itens da guia {guide} com justificativas diferentes; o '
-                'portal usa uma justificativa por guia.'
+                f'Itens da guia {account.get("numeroContaPrestador")} com '
+                'justificativas diferentes; o portal usa uma justificativa '
+                'por envio.'
             )
-    return list(groups.values())
+        result.append((lot, account, members, not others))
+    return result
 
 
 def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  # noqa: PLR0912, PLR0913, PLR0917 - audit context
@@ -493,19 +500,26 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
         # The screen's order: Aceitar Selecionados, then Salvar Recurso.
         for lot, lot_rows in {
             lot['numeroLote']: (lot, [row for row, *_ in members])
-            for lot, _, members in groups
+            for lot, _, members, _ in groups
         }.values():
             accept_treated(
                 db, client, lot, lot_rows[0].demonstrativo, user_id, appealing
             )
-        for lot, account, members in groups:
+        for lot, account, members, whole in groups:
             if not all(is_saved(item) for _, item in members):
-                client.save_accounts(
-                    lot,
-                    [account],
-                    members[0][0].justificativa.strip(),
-                    [a for row, _ in members for a in files[row.id]],
-                )
+                justification = members[0][0].justificativa.strip()
+                documents = [a for row, _ in members for a in files[row.id]]
+                if whole:
+                    client.save_accounts(
+                        lot, [account], justification, documents
+                    )
+                else:
+                    client.save_items(
+                        lot,
+                        [item for _, item in members if not is_saved(item)],
+                        justification,
+                        documents,
+                    )
                 stored = [
                     find_item(client, lot, account, row.fonte)
                     for row, _ in members
