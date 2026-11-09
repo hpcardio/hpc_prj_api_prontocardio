@@ -43,6 +43,9 @@ from app_prontocardio.services.petrobras_match import (
     reconcile,
 )
 from app_prontocardio.services.petrobras_portal_pipeline import detail_guides
+from app_prontocardio.services.petrobras_portal_status import (
+    sync_portal_situation,
+)
 from app_prontocardio.services.petrobras_sync import (
     event,
     guide_senhas,
@@ -511,6 +514,15 @@ def portal_detail(db: DB, config: Config, user: Writer):
     """Item detail of guide-only glosas from the portal analysis XML."""
     try:
         return detail_guides(db, config, petrobras_oracle.candidates, user.id)
+    except (TissError, ValueError) as exc:
+        raise HTTPException(502, str(exc)) from None
+
+
+@router.post('/portal/situacao')
+def portal_situation(db: DB, config: Config, user: Writer):
+    """Record what was done directly on the portal (read-only there)."""
+    try:
+        return sync_portal_situation(db, config, user.id)
     except (TissError, ValueError) as exc:
         raise HTTPException(502, str(exc)) from None
 
