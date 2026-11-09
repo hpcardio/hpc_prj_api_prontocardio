@@ -356,8 +356,13 @@ def list_demonstrativos(  # noqa: PLR0913 - independent HTTP query parameters
         select(base.c.id, base.c.valor_glosa, base.c.recurso_estado)
     ).all()
     accepted = acatos(db, (r.id for r in states))
+    # Accepted on the portal is acato, not appeal, though no longer a draft.
     appealed = sum(
-        (Decimal(str(v or 0)) for _, v, e in states if e != 'rascunho'),
+        (
+            Decimal(str(v or 0))
+            for _, v, e in states
+            if e not in {'rascunho', 'aceito_portal'}
+        ),
         Decimal(0),
     )
     total_treated = sum(
