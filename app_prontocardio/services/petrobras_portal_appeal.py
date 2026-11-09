@@ -34,49 +34,37 @@ DEFAULTS_ID = 'dadosLotesRecursoAberto_defaultValues'
 APPEALED = 'R'
 ACCEPTED = 'A'
 ERROR_TEXT_LIMIT = 200
-# Columns of the screen's procedure grid that come straight from the JSON.
-# getRowData posts them as text, and only these, whatever the JSON carries.
-GRID_COLUMNS = (
-    'statusItem',
-    'itemRecursado',
-    'aglutinador',
-    'idRecursoGlosaProvisorio',
-    'numeroConta',
+# Columns of the screen's account grid (Contas Médicas), in its order.
+# Aceitar/Salvar post the selected accounts with these, as text, plus the
+# constant ContaInteira the grid sets; the screen never posts procedure rows
+# when an account is selected (recorded on the portal on 2026-11-09).
+ACCOUNT_COLUMNS = (
+    'numeroCapaLotePrestador',
+    'numeroCapaLote',
     'numeroContaPrestador',
     'numeroContaOperadora',
-    'controle',
-    'numeroCapaLote',
-    'numeroCapaLotePrestador',
-    'valorTotalProcessado',
-    'valorTotalPago',
-    'valorTotalGlosado',
-    'valorTotalAcerto',
-    'numeroItemPrincipal',
-    'numeroItem',
-    'codigoItem',
-    'descricaoItem',
-    'qtdItem',
-    'qtdItemAglutinados',
-    'qtdItemAglutinadosGlosa',
-    'qtdItemAglutinadoSalvoR',
-    'qtdItemAglutinadoSalvoA',
-    'qtdItemAglutinadoDispSalvar',
-    'dataCronogramaLote',
-    'dataRealizacao',
-    'dataRealizacaoStr',
-    'codigoBeneficiario',
+    'numeroConta',
+    'seqConta',
+    'dataRealizacaoFmt',
     'carteirinhaBeneficiario',
     'nomeBeneficiario',
-    'valorDeclarado',
-    'valorPago',
-    'valorGlosado',
-    'flagAcertoItem',
-    'flagDenyItem',
-    'protocoloRecurso',
-    'efetivado',
+    'somaValorGlosadoItensConta',
+    'quantidadeItensConta',
+    'quantidadeItensRecursado',
+    'quantidadeItensRecursadoAceito',
+    'quantidadeItensFlagAcerto',
+    'quantidadeItensFlagDeny',
+    'quantidadeItensDispSalvarRecurso',
+    'quantidadeItensSalvoRecursado',
+    'quantidadeItensSalvoAceito',
+    'flagDenyConta',
+    'flagAcertoConta',
     'flagDenyGlosa',
-    'flagDenyPCMSO',
+    'qtdItemEfetivado',
+    'qtdItemDispEfetivar',
 )
+WHOLE_ACCOUNT = 'ContaInteira'
+CURRENCY_COLUMNS = {'somaValorGlosadoItensConta'}
 DENIED = 'S'
 
 
@@ -100,13 +88,19 @@ def lot_forms(html):
     return forms
 
 
-def grid_row(item):
-    """The row as the screen reads it from its grid: text, blank for null."""
-    return {
-        column: '' if item[column] is None else str(item[column])
-        for column in GRID_COLUMNS
-        if column in item
-    }
+def account_row(account):
+    """The account as the screen reads it from its grid: text, blank null."""
+    row = {}
+    for column in ACCOUNT_COLUMNS:
+        value = account.get(column)
+        if value is None:
+            row[column] = ''
+        elif column in CURRENCY_COLUMNS:
+            row[column] = f'{Decimal(str(value)):.2f}'
+        else:
+            row[column] = str(value)
+    row['tipoRecurso_ContaInteira_Procedimento'] = WHOLE_ACCOUNT
+    return row
 
 
 def error_text(exc):
@@ -132,15 +126,19 @@ def error_text(exc):
     return ' '.join(text.split())[:ERROR_TEXT_LIMIT]
 
 
-def multipart(fields, files):
+def multipart(parts):
+    """Body in the given order; a part is (name, value) or a file 4-tuple."""
     boundary = uuid4().hex
     body = bytearray()
-    for name, value in fields:
-        body += (
-            f'--{boundary}\r\nContent-Disposition: form-data; '
-            f'name="{name}"\r\n\r\n{value}\r\n'
-        ).encode()
-    for name, filename, mime, content in files:
+    for part in parts:
+        if len(part) == 2:  # noqa: PLR2004 - (name, value)
+            name, value = part
+            body += (
+                f'--{boundary}\r\nContent-Disposition: form-data; '
+                f'name="{name}"\r\n\r\n{value}\r\n'
+            ).encode()
+            continue
+        name, filename, mime, content = part
         safe = re.sub(r'[^\w.-]', '_', filename, flags=re.ASCII)
         body += (
             f'--{boundary}\r\nContent-Disposition: form-data; '
@@ -252,31 +250,34 @@ class PortalAppeal:
             numeroConta=account['numeroConta'],
         )
 
-    def _respond(self, lot, item, situation, justification, attachments):  # noqa: PLR0913, PLR0917 - one screen action
-        """Post one item as the screen's responderRecursoComAnexo does."""
+    def _respond(self, lot, accounts, situation, justification, attachments):  # noqa: PLR0913, PLR0917 - one screen action
+        """Post whole accounts as the screen's responderRecursoComAnexo does.
+
+        Order and shape follow the portal: form fields, the file inputs, the
+        hidden defaults, then the selected accounts as compact JSON objects
+        joined by commas (FormData of a JavaScript array).
+        """
         hidden = {
             'mensagemRespostaPrestador': justification,
-            'codigosSelecionados': f'{item["numeroItem"]};',
+            'codigosSelecionados': '',
             **lot,
         }
-        row = {
-            **grid_row(item),
-            'listaDetalheRecursoGlosa': None,
-            'valorAcerto': item.get('valorAcerto') or 0,
-            'valorRecursado': (
-                item['valorGlosado'] if situation == APPEALED else '0.0'
-            ),
-            'situacaoRecursadoAceito': situation,
-            **hidden,
-        }
-        fields = [
-            ('acceptTypePersonalizado', ''),
-            ('tipoPermitidoPersonalizado', ''),
-            ('pathSaveFileDefault', 'a'),
-            ('origem', 'a'),
-            *hidden.items(),
-            ('listaItensSelecionadosRecursoGlosa', json.dumps(row)),
-        ]
+        records = []
+        for account in accounts:
+            record = account_row(account)
+            if situation == ACCEPTED:
+                # Appeals carry no value: the account grid has no such
+                # column and the portal appeals the whole denied amount.
+                record['valorRecursado'] = '0.0'
+            record.update({
+                'mensagemRespostaPrestador': justification,
+                'codigosSelecionados': '',
+                'situacaoRecursadoAceito': situation,
+                **lot,
+            })
+            records.append(
+                json.dumps(record, ensure_ascii=False, separators=(',', ':'))
+            )
         files = [
             (f'listaDocumentoAnexo[{i}].file', a.nome, a.mime, a.conteudo)
             for i, a in enumerate(attachments)
@@ -288,20 +289,28 @@ class PortalAppeal:
                 b'',
             )
         ]
-        body, content_type = multipart(fields, files)
+        body, content_type = multipart([
+            ('acceptTypePersonalizado', ''),
+            ('tipoPermitidoPersonalizado', ''),
+            ('pathSaveFileDefault', 'a'),
+            ('origem', 'a'),
+            *files,
+            *hidden.items(),
+            ('listaItensSelecionadosRecursoGlosa', ','.join(records)),
+        ])
         self._rest(
             'criarRecursoGlosaLoteProvisorio',
             data=body,
             content_type=content_type,
         )
 
-    def accept(self, lot, item):
-        """Aceitar Selecionados of one item; reversible until Efetivar."""
-        self._respond(lot, item, ACCEPTED, '', [])
+    def accept_accounts(self, lot, accounts):
+        """Aceitar Selecionados of whole accounts; undone until Efetivar."""
+        self._respond(lot, accounts, ACCEPTED, '', [])
 
-    def save(self, lot, item, justification, attachments):
-        """Salvar Recurso of one item, as the screen posts it."""
-        self._respond(lot, item, APPEALED, justification, attachments)
+    def save_accounts(self, lot, accounts, justification, attachments):
+        """Salvar Recurso dos Itens Selecionados for whole accounts."""
+        self._respond(lot, accounts, APPEALED, justification, attachments)
 
     def efetivar(self, lot):
         """Irreversible: every unappealed item of the lot becomes accepted."""
