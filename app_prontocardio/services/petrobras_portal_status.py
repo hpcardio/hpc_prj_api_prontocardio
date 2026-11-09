@@ -10,9 +10,10 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app_prontocardio.petrobras_models import (
+    PetrobrasEvento,
     PetrobrasGlosa,
     PetrobrasProtocolo,
 )
@@ -40,7 +41,10 @@ TIME_BUDGET_SECONDS = 25
 
 
 def open_demonstrativos(db, config):
-    """Demonstrativos with items still open here, most recent first."""
+    """Demonstrativos with items still open here, most recent first.
+
+    Also those with appeals sent on the portal whose text was not brought yet.
+    """
     return list(
         db.scalars(
             select(PetrobrasGlosa.demonstrativo)
@@ -49,11 +53,25 @@ def open_demonstrativos(db, config):
                 PetrobrasProtocolo.prestador == config.prestador_cnpj,
                 PetrobrasGlosa.presente_na_fonte.is_(True),
                 PetrobrasGlosa.demonstrativo.is_not(None),
-                PetrobrasGlosa.recurso_estado.in_(OPEN_STATES),
+                or_(
+                    PetrobrasGlosa.recurso_estado.in_(OPEN_STATES),
+                    and_(
+                        PetrobrasGlosa.recurso_estado == 'enviado_portal',
+                        PetrobrasGlosa.id.not_in(texts_brought()),
+                    ),
+                ),
             )
             .distinct()
             .order_by(PetrobrasGlosa.demonstrativo.desc())
         )
+    )
+
+
+def texts_brought():
+    """Rows whose appeal text the portal situation already recorded."""
+    return select(PetrobrasEvento.glosa_id).where(
+        PetrobrasEvento.tipo == 'situacao_portal',
+        PetrobrasEvento.dados['justificativa'].as_string().is_not(None),
     )
 
 
@@ -144,6 +162,13 @@ def sync_demonstrativo(db, portal, demonstrativo, user_id):
     for row in rows:
         by_key.setdefault(row_key(row), []).append(row)
     current = acatos(db, (r.id for r in rows))
+    brought = set(
+        db.scalars(
+            texts_brought().where(
+                PetrobrasEvento.glosa_id.in_([r.id for r in rows])
+            )
+        )
+    )
     changed = ambiguous = 0
     for lot in portal.lots(demonstrativo):
         for account, items in account_groups(portal, lot):
@@ -161,7 +186,14 @@ def sync_demonstrativo(db, portal, demonstrativo, user_id):
                     continue
                 sent = was_sent(item) or account_sent
                 changed += apply_situation(
-                    db, matches[0], item, account, sent, current, user_id
+                    db,
+                    matches[0],
+                    item,
+                    account,
+                    sent,
+                    current,
+                    user_id,
+                    brought,
                 )
     return changed, ambiguous
 
@@ -171,7 +203,9 @@ def portal_justification(item):
     return (item.get('justificativaRecurso') or '').strip()
 
 
-def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PLR0913, PLR0917 - audit context
+def apply_situation(  # noqa: PLR0913, PLR0917 - audit context
+    db, row, item, account, sent, current, user_id, brought=frozenset()
+):
     """Record the portal's situation of one item; True when it changed."""
     situation = item.get('situacaoRecursadoAceito')
     before = row.recurso_estado
@@ -194,7 +228,9 @@ def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PL
     )
     new_protocol = protocol and row.recurso_protocolo != protocol
     text = portal_justification(item) if situation == APPEALED else ''
-    new_text = bool(text) and (row.justificativa or '') != text
+    differs = bool(text) and (row.justificativa or '') != text
+    # Recorded once per row even when equal, so the row leaves the queue.
+    new_text = differs or (bool(text) and row.id not in brought)
     if target == before and not new_protocol and not accept and not new_text:
         return False
     if accept:
@@ -215,9 +251,9 @@ def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PL
     previous_text = row.justificativa
     if target != before:
         row.recurso_estado = target
-    if new_text:
+    if differs:
         row.justificativa = text
-    if target != before or new_text:
+    if target != before or differs:
         row.versao += 1
     if new_protocol:
         row.recurso_protocolo = protocol

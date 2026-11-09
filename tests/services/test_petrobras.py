@@ -3005,6 +3005,8 @@ def test_portal_situation_fills_the_text_of_items_already_synced(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
+    for other in rows.values():
+        other.recurso_estado = 'aceito_portal'
     row = rows['1']
     row.recurso_estado, row.recurso_protocolo = 'enviado_portal', '162770795'
     db.commit()
@@ -3014,6 +3016,24 @@ def test_portal_situation_fills_the_text_of_items_already_synced(
     assert situation_sync(db, config, portal)['atualizados'] == 1
     assert row.justificativa == text
     assert row.recurso_estado == 'enviado_portal'
+    assert situation_sync(db, config, portal)['demonstrativos'] == 0
+
+
+def test_portal_situation_reads_a_sent_item_once_even_with_the_same_text(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    for other in rows.values():
+        other.recurso_estado = 'aceito_portal'
+    row = rows['1']
+    row.recurso_estado, row.recurso_protocolo = 'enviado_portal', '162770795'
+    db.commit()
+    version = row.versao
+    portal = FakePortal([row])
+    portal_state(portal, row, 'R', 162770795, text=row.justificativa)
+    assert situation_sync(db, config, portal)['demonstrativos'] == 1
+    assert row.versao == version
+    assert situation_sync(db, config, portal)['demonstrativos'] == 0
 
 
 def test_portal_situation_records_a_pending_accept_as_acato(
