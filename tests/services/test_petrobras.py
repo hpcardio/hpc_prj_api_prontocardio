@@ -44,6 +44,7 @@ from app_prontocardio.services.petrobras_appeals import (
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import reconcile
 from app_prontocardio.services.petrobras_portal_appeal import (
+    ACCOUNT_COLUMNS,
     PortalAppeal,
     error_text,
     lot_forms,
@@ -2124,14 +2125,14 @@ def test_batch_sends_one_appeal_per_protocol(  # noqa: PLR0913 - pytest fixtures
 
 
 class FakePortal:
-    """Screen state: denied items of one lot, no network."""
+    """Screen state: one account per guide, with its denied items."""
 
     def __init__(self, rows, account_extra=None):
         self.lot = {'numeroLote': '77', 'numeroCapaLote': '77'}
         self.denied = [
             {
                 'numeroItem': row.id,
-                'numeroConta': 1,
+                'numeroConta': row.guia_prestador,
                 'numeroCapaLote': 77,
                 'numeroContaPrestador': row.guia_prestador,
                 'codigoItem': row.fonte['tuss'],
@@ -2140,45 +2141,63 @@ class FakePortal:
             }
             for row in rows
         ]
-        self.account = {
-            'numeroConta': 1,
-            'numeroCapaLote': 77,
-            'numeroCapaLotePrestador': 36022538,
-            'numeroContaPrestador': rows[0].fonte['guia_prestador'],
-            'numeroContaOperadora': rows[0].fonte['guia_operadora'],
-            **(account_extra or {}),
-        }
+        self.account_list = []
+        for row in rows:
+            if any(
+                a['numeroConta'] == row.guia_prestador
+                for a in self.account_list
+            ):
+                continue
+            self.account_list.append({
+                'numeroConta': row.guia_prestador,
+                'numeroCapaLote': 77,
+                'numeroCapaLotePrestador': 36022538,
+                'numeroContaPrestador': row.fonte['guia_prestador'],
+                'numeroContaOperadora': row.fonte['guia_operadora'],
+                **(account_extra or {}),
+            })
         self.saved, self.efetivados, self.closed = [], 0, False
         self.accepted = []
         self.efetivar_error = None
+
+    @property
+    def account(self):
+        return self.account_list[0]
 
     def lots(self, _demonstrativo):
         yield self.lot
 
     def accounts(self, _lot):
-        return [self.account]
+        return self.account_list
 
-    def items(self, _lot, _account):
-        return [dict(i) for i in self.denied]
+    def items(self, _lot, account):
+        return [
+            dict(i)
+            for i in self.denied
+            if i['numeroConta'] == account['numeroConta']
+        ]
 
-    def save(self, _lot, item, justification, attachments):
-        self.saved.append((item['numeroItem'], justification, attachments))
-        for row in self.denied:
-            if row['numeroItem'] == item['numeroItem']:
-                row['situacaoRecursadoAceito'] = 'R'
+    def _mark(self, accounts, situation):
+        numbers = {a['numeroConta'] for a in accounts}
+        marked = [i for i in self.denied if i['numeroConta'] in numbers]
+        for item in marked:
+            item['situacaoRecursadoAceito'] = situation
+        return [i['numeroItem'] for i in marked]
 
-    def accept(self, _lot, item):
+    def save_accounts(self, _lot, accounts, justification, attachments):
+        for item in self._mark(accounts, 'R'):
+            self.saved.append((item, justification, attachments))
+
+    def accept_accounts(self, _lot, accounts):
         assert self.efetivados == 0, 'aceite vem antes de efetivar'
-        self.accepted.append(item['numeroItem'])
-        for row in self.denied:
-            if row['numeroItem'] == item['numeroItem']:
-                row['situacaoRecursadoAceito'] = 'A'
+        self.accepted.extend(self._mark(accounts, 'A'))
 
     def efetivar(self, _lot):
         if self.efetivar_error:
             raise self.efetivar_error
         self.efetivados += 1
-        self.account['qtdItemEfetivado'] = 1
+        for account in self.account_list:
+            account['qtdItemEfetivado'] = 1
         for row in self.denied:
             if row.get('situacaoRecursadoAceito') == 'R':
                 row['protocoloRecurso'] = 162723152
@@ -2193,7 +2212,14 @@ def portal_rows(db, protocol, config, source, candidate):
     for sequence, row in rows.items():
         row.justificativa = 'Justificativa com mais de vinte caracteres'
         row.tuss = f'1000000{sequence}'
-        row.fonte = {**row.fonte, 'tuss': row.tuss}
+        # One guide per row: the portal treats a guide as one account.
+        row.guia_prestador = f'B00000{sequence}'
+        row.fonte = {
+            **row.fonte,
+            'tuss': row.tuss,
+            'guia_prestador': row.guia_prestador,
+            'guia_operadora': f'12325082{sequence}',
+        }
     config.portal_fallback = True
     db.commit()
     return rows
@@ -2377,9 +2403,9 @@ def test_portal_accepts_before_saving_the_appeal(
     acato_row(db, accepted)
     portal = FakePortal([target, accepted])
     order = []
-    accept, save = portal.accept, portal.save
-    portal.accept = lambda *a: (order.append('aceite'), accept(*a))
-    portal.save = lambda *a: (order.append('recurso'), save(*a))
+    accept, save = portal.accept_accounts, portal.save_accounts
+    portal.accept_accounts = lambda *a: (order.append('aceite'), accept(*a))
+    portal.save_accounts = lambda *a: (order.append('recurso'), save(*a))
     run_portal(db, config, target, portal)
     assert order == ['aceite', 'recurso']
     assert portal.efetivados == 0
@@ -2404,7 +2430,9 @@ def test_failed_accept_leaves_no_appeal_saved(
     target, accepted = rows['1'], rows['2']
     acato_row(db, accepted)
     portal = FakePortal([target, accepted])
-    portal.accept = Mock(side_effect=TissError('Portal Petrobras: HTTP 500.'))
+    portal.accept_accounts = Mock(
+        side_effect=TissError('Portal Petrobras: HTTP 500.')
+    )
     with pytest.raises(TissError):
         run_portal(db, config, target, portal)
     assert portal.saved == []
@@ -2442,6 +2470,113 @@ def test_item_with_appeal_protocol_is_never_saved_again(
     with pytest.raises(TissError):
         run_portal(db, config, target, portal)
     assert portal.saved == []
+
+
+def same_guide(db, row, other):
+    other.guia_prestador = row.guia_prestador
+    other.fonte = {
+        **other.fonte,
+        'guia_prestador': row.fonte['guia_prestador'],
+        'guia_operadora': row.fonte['guia_operadora'],
+    }
+    db.commit()
+
+
+def test_portal_refuses_a_guide_with_another_denied_item_before_writing(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, other = rows['1'], rows['2']
+    same_guide(db, target, other)
+    acato_row(db, other)
+    portal = FakePortal([target, other])
+    with pytest.raises(TissError):
+        run_portal(db, config, target, portal)
+    assert portal.saved == []
+    assert portal.accepted == []
+    assert target.recurso_estado == 'rascunho'
+    causa = (
+        db
+        .scalars(
+            select(PetrobrasEvento).where(
+                PetrobrasEvento.glosa_id == target.id,
+                PetrobrasEvento.tipo == 'recusado_operadora',
+            )
+        )
+        .all()[-1]
+        .dados['causa']
+    )
+    assert 'guia inteira' in causa
+
+
+def test_portal_appeals_a_whole_guide_with_one_justification(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    first, second = rows['1'], rows['2']
+    same_guide(db, first, second)
+    second.prazo = first.prazo
+    db.commit()
+    portal = FakePortal([first, second])
+    petrobras_appeals.appeal_by_portal(
+        db, config, [first.id, second.id], TissRejected('x'), 'G1', 1, portal
+    )
+    assert sorted(s[0] for s in portal.saved) == sorted([first.id, second.id])
+    assert {first.recurso_estado, second.recurso_estado} == {'salvo_portal'}
+
+
+def test_portal_refuses_different_justifications_in_one_guide(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    first, second = rows['1'], rows['2']
+    same_guide(db, first, second)
+    second.justificativa = 'Outra justificativa com mais de vinte'
+    db.commit()
+    portal = FakePortal([first, second])
+    with pytest.raises(TissError):
+        petrobras_appeals.appeal_by_portal(
+            db,
+            config,
+            [first.id, second.id],
+            TissRejected('x'),
+            'G1',
+            1,
+            portal,
+        )
+    assert portal.saved == []
+
+
+def test_accept_sends_all_fully_accepted_guides_in_one_request(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, first, second = rows['1'], rows['2'], rows['3']
+    acato_row(db, first)
+    acato_row(db, second)
+    portal = FakePortal([target, first, second])
+    calls = []
+    accept = portal.accept_accounts
+    portal.accept_accounts = lambda lot, accounts: (
+        calls.append([a['numeroConta'] for a in accounts]),
+        accept(lot, accounts),
+    )
+    run_portal(db, config, target, portal)
+    assert calls == [[first.guia_prestador, second.guia_prestador]]
+    assert sorted(portal.accepted) == sorted([first.id, second.id])
+
+
+def test_accept_skips_a_guide_with_an_item_without_acato(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    target, accepted, untreated = rows['1'], rows['2'], rows['3']
+    same_guide(db, accepted, untreated)
+    acato_row(db, accepted)
+    portal = FakePortal([target, accepted, untreated])
+    run_portal(db, config, target, portal)
+    assert portal.accepted == []
+    assert [s[0] for s in portal.saved] == [target.id]
 
 
 def test_portal_never_sends_a_partial_acato_as_a_full_accept(
@@ -2506,7 +2641,9 @@ def test_screen_failure_never_undoes_the_webservice_protocol(
     target.recurso_estado = 'protocolado'
     db.commit()
     portal = FakePortal([target, accepted])
-    portal.accept = Mock(side_effect=TissError('Portal Petrobras: HTTP 500.'))
+    portal.accept_accounts = Mock(
+        side_effect=TissError('Portal Petrobras: HTTP 500.')
+    )
     petrobras_appeals.accept_on_screen(db, config, [target], 1, portal)
     assert target.recurso_estado == 'protocolado'
     failure = db.scalar(
@@ -2562,53 +2699,105 @@ def posted(call):
     return fields
 
 
-PORTAL_ITEM = {
-    'numeroItem': 731101237,
-    'numeroConta': 1,
-    'codigoItem': '60000384',
-    'valorGlosado': 40.19,
-    'valorAcerto': None,
-    'flagDenyItem': 'S',
-    'dataRealizacao': 1755561600000,
-    'situacaoRecursadoAceito': None,
-    'listaDocumentoAnexo': [],
-    'stringArrayDetalhesRecursoGlosa': None,
-    'justificativaRecurso': None,
+# An account of listarContasLoteRecurso, as recorded on the portal (data
+# replaced by fictitious values).
+PORTAL_ACCOUNT = {
+    'numeroCapaLotePrestador': 36025402,
+    'numeroCapaLote': 12241235,
+    'numeroContaPrestador': '0000000000000B000001',
+    'numeroContaOperadora': '123250828',
+    'numeroConta': '156125777',
+    'seqConta': None,
+    'dataRealizacaoFmt': '04/08/2026',
+    'carteirinhaBeneficiario': '000000000000',
+    'nomeBeneficiario': 'BENEFICIARIO FICTICIO',
+    'somaValorGlosadoItensConta': 0.01,
+    'quantidadeItensConta': 1,
+    'quantidadeItensRecursado': 0,
+    'quantidadeItensRecursadoAceito': 0,
+    'quantidadeItensFlagAcerto': 0,
+    'quantidadeItensFlagDeny': 1,
+    'quantidadeItensDispSalvarRecurso': 1,
+    'quantidadeItensSalvoRecursado': 0,
+    'quantidadeItensSalvoAceito': 0,
+    'flagDenyConta': 'S',
+    'flagAcertoConta': 'N',
+    'flagDenyGlosa': 'N',
+    'qtdItemEfetivado': 0,
+    'qtdItemDispEfetivar': 1,
+    'valorGlosadoStr': 'R$ 0,01',
+    'protocoloRecurso': None,
 }
-PORTAL_LOT = {'numeroLote': '12241103', 'codigoUsuario': 'U'}
+PORTAL_LOT = {
+    'codigoUsuario': 'U',
+    'codigoSistema': '1',
+    'numeroCapaLote': '12241235',
+    'numeroLote': '12241235',
+}
 
 
-def test_portal_save_posts_what_the_screen_posts():
+def records(fields):
+    return json.loads(
+        '[' + fields['listaItensSelecionadosRecursoGlosa'][1].decode() + ']'
+    )
+
+
+def test_portal_accept_posts_whole_accounts_like_the_screen():
+    client = CapturingAppeal()
+    other = {
+        **PORTAL_ACCOUNT,
+        'numeroConta': '156125778',
+        'somaValorGlosadoItensConta': 12.5,
+    }
+    client.accept_accounts(PORTAL_LOT, [PORTAL_ACCOUNT, other])
+    path, data, _ = client.calls[0]
+    assert path == 'criarRecursoGlosaLoteProvisorio'
+    fields = posted(client.calls[0])
+    names = list(fields)
+    assert names[:5] == [
+        'acceptTypePersonalizado',
+        'tipoPermitidoPersonalizado',
+        'pathSaveFileDefault',
+        'origem',
+        'listaDocumentoAnexo[0].file',
+    ]
+    assert names[-1] == 'listaItensSelecionadosRecursoGlosa'
+    assert fields['codigosSelecionados'][1] == b''
+    assert fields['mensagemRespostaPrestador'][1] == b''
+    assert b'filename=""' in fields['listaDocumentoAnexo[0].file'][0]
+    assert b'},{' in data
+    first, second = records(fields)
+    assert list(first)[:23] == list(ACCOUNT_COLUMNS)
+    assert first['seqConta'] == ''
+    assert first['numeroCapaLotePrestador'] == '36025402'
+    assert first['somaValorGlosadoItensConta'] == '0.01'
+    assert second['somaValorGlosadoItensConta'] == '12.50'
+    assert first['tipoRecurso_ContaInteira_Procedimento'] == 'ContaInteira'
+    assert first['valorRecursado'] == '0.0'
+    assert first['situacaoRecursadoAceito'] == 'A'
+    assert first['codigoUsuario'] == 'U'
+    assert 'valorGlosadoStr' not in first
+    assert 'protocoloRecurso' not in first
+
+
+def test_portal_save_posts_the_account_with_its_proofs():
     client = CapturingAppeal()
     proof = SimpleNamespace(
-        nome='formulario.pdf', mime='application/pdf', conteudo=b'%PDF'
+        nome='formulário.pdf', mime='application/pdf', conteudo=b'%PDF'
     )
-    client.save(PORTAL_LOT, PORTAL_ITEM, 'Justificativa', [proof])
+    client.save_accounts(
+        PORTAL_LOT, [PORTAL_ACCOUNT], 'Justificativa', [proof]
+    )
     fields = posted(client.calls[0])
-    row = json.loads(fields['listaItensSelecionadosRecursoGlosa'][1])
-    assert 'situacaoRecursadoAceito' not in fields
-    assert fields['codigosSelecionados'][1] == b'731101237;'
+    assert list(fields)[4] == 'listaDocumentoAnexo[0].file'
     assert fields['listaDocumentoAnexo[0].file'][1] == b'%PDF'
-    assert row['situacaoRecursadoAceito'] == 'R'
-    assert row['valorRecursado'] == pytest.approx(40.19)
-    assert row['valorGlosado'] == '40.19'
-    assert row['dataRealizacao'] == '1755561600000'
-    assert row['listaDetalheRecursoGlosa'] is None
-    assert 'listaDocumentoAnexo' not in row
-    assert 'stringArrayDetalhesRecursoGlosa' not in row
-    assert row['mensagemRespostaPrestador'] == 'Justificativa'
-
-
-def test_portal_accept_posts_zero_value_and_an_empty_file():
-    client = CapturingAppeal()
-    client.accept(PORTAL_LOT, PORTAL_ITEM)
-    fields = posted(client.calls[0])
-    row = json.loads(fields['listaItensSelecionadosRecursoGlosa'][1])
-    assert row['situacaoRecursadoAceito'] == 'A'
-    assert row['valorRecursado'] == '0.0'
-    assert fields['mensagemRespostaPrestador'][1] == b''
-    assert fields['listaDocumentoAnexo[0].file'][1] == b''
-    assert b'filename=""' in fields['listaDocumentoAnexo[0].file'][0]
+    assert b'application/pdf' in fields['listaDocumentoAnexo[0].file'][0]
+    assert fields['mensagemRespostaPrestador'][1] == 'Justificativa'.encode()
+    (record,) = records(fields)
+    assert record['situacaoRecursadoAceito'] == 'R'
+    # The account grid has no value column: the portal appeals it all.
+    assert 'valorRecursado' not in record
+    assert record['mensagemRespostaPrestador'] == 'Justificativa'
 
 
 def test_portal_http_error_reports_the_reason_of_the_server():
@@ -2690,10 +2879,10 @@ def test_portal_screen_parsers():
     assert lot_forms(html) == {
         '36022538': {'lote': '12241103', 'periodo': '60'}
     }
-    body, kind = multipart(
-        [('campo', 'é')],
-        [('arq[0].file', 'nó me.pdf', 'application/pdf', b'P')],
-    )
+    body, kind = multipart([
+        ('campo', 'é'),
+        ('arq[0].file', 'nó me.pdf', 'application/pdf', b'P'),
+    ])
     assert 'boundary=' in kind
     assert 'name="campo"'.encode() in body
     assert b'filename="n__me.pdf"' in body
@@ -2742,9 +2931,7 @@ def test_protocol_sync_keeps_the_stored_payer_lot(
     ready_rows(db, protocol, config, source, candidate)
     apply_payer_lots(db, config, {protocol.numero: '36022538'})
     db.commit()
-    assert known_payer_lots(db, [protocol.id]) == {
-        protocol.numero: '36022538'
-    }
+    assert known_payer_lots(db, [protocol.id]) == {protocol.numero: '36022538'}
 
 
 def test_row_without_the_payer_lot_cannot_be_appealed(source):

@@ -312,30 +312,49 @@ def lot_items(portal, lot):
     ]
 
 
+def account_groups(portal, lot):
+    """Each account of the lot with its items, as the screen lists them."""
+    return [(a, portal.items(lot, a)) for a in portal.accounts(lot)]
+
+
 def accept_treated(db, portal, lot, demonstrativo, user_id, appealing=()):  # noqa: PLR0913, PLR0917 - audit context
-    """Aceitar Selecionados: items marked as acato, except those appealing."""
+    """Aceitar Selecionados of the accounts fully marked as acato.
+
+    The screen accepts whole accounts, so an account goes only when every
+    open denied item has a full acato here and none of them is appealed.
+    """
     by_key = accepted_rows(db, demonstrativo)
-    for item in lot_items(portal, lot):
+    chosen = []
+    for account, items in account_groups(portal, lot):
+        denied = [i for i in items if is_denied(i)]
+        pending = [
+            i for i in denied if not is_saved(i) and not is_accepted(i)
+        ]
         if (
-            not is_denied(item)
-            or is_saved(item)
-            or is_accepted(item)
-            or item.get('numeroItem') in appealing
+            not pending
+            or any(is_saved(i) for i in denied)
+            or any(i.get('numeroItem') in appealing for i in denied)
+            or not all(item_key(i) in by_key for i in pending)
         ):
             continue
-        rows = by_key.get(item_key(item))
-        if not rows:
-            continue
-        portal.accept(lot, item)
-        for row in rows:
-            event(
-                db,
-                row,
-                'aceito_portal',
-                {'numero_item': item.get('numeroItem')},
-                user_id,
-            )
-        db.commit()  # Each accept stays recorded if a later one fails.
+        chosen.append((account, pending))
+    if not chosen:
+        return
+    portal.accept_accounts(lot, [account for account, _ in chosen])
+    for account, pending in chosen:
+        for item in pending:
+            for row in by_key[item_key(item)]:
+                event(
+                    db,
+                    row,
+                    'aceito_portal',
+                    {
+                        'numero_item': item.get('numeroItem'),
+                        'conta': account.get('numeroConta'),
+                    },
+                    user_id,
+                )
+    db.commit()
 
 
 def was_sent(item):
@@ -401,6 +420,38 @@ def submit_lot(db, portal, lot, account, rows, user_id):  # noqa: PLR0913, PLR09
     db.commit()
 
 
+def appeal_accounts(portal, targets):
+    """Group the appeal by account and check it can go as whole accounts.
+
+    The portal appeals a whole account: every denied item of the account
+    must be in this appeal, with one justification. Checked before writing.
+    """
+    groups = {}
+    for row, lot, account, item in targets:
+        key = (lot['numeroLote'], str(account.get('numeroConta')))
+        groups.setdefault(key, (lot, account, []))[2].append((row, item))
+    for lot, account, members in groups.values():
+        chosen = {item.get('numeroItem') for _, item in members}
+        others = [
+            i
+            for i in portal.items(lot, account)
+            if is_denied(i) and i.get('numeroItem') not in chosen
+        ]
+        guide = account.get('numeroContaPrestador')
+        if others:
+            raise TissError(
+                f'A guia {guide} tem {len(others)} outro(s) item(ns) '
+                'glosado(s); o portal recursa a guia inteira. Inclua-os '
+                'neste recurso ou trate a guia pelo site.'
+            )
+        if len({row.justificativa.strip() for row, _ in members}) > 1:
+            raise TissError(
+                f'Itens da guia {guide} com justificativas diferentes; o '
+                'portal usa uma justificativa por guia.'
+            )
+    return list(groups.values())
+
+
 def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  # noqa: PLR0912, PLR0913, PLR0917 - audit context
     """Webservice failed: same appeal through the payer's own screen."""
     db.rollback()
@@ -437,34 +488,46 @@ def appeal_by_portal(db, config, ids, cause, appeal_id, user_id, portal=None):  
             a.get('qtdItemEfetivado') or was_sent(i) for *_, a, i in targets
         ):
             raise TissError('Conta já tem item enviado no portal; confira.')
-        by_lot = {}
-        for row, lot, _, _ in targets:
-            by_lot.setdefault(lot['numeroLote'], (lot, []))[1].append(row)
+        groups = appeal_accounts(client, targets)
         appealing = {item.get('numeroItem') for *_, item in targets}
         # The screen's order: Aceitar Selecionados, then Salvar Recurso.
-        for lot, lot_rows in by_lot.values():
+        for lot, lot_rows in {
+            lot['numeroLote']: (lot, [row for row, *_ in members])
+            for lot, _, members in groups
+        }.values():
             accept_treated(
                 db, client, lot, lot_rows[0].demonstrativo, user_id, appealing
             )
-        for row, lot, account, item in targets:
-            if not is_saved(item):
-                client.save(lot, item, row.justificativa, files[row.id])
-                if not is_saved(find_item(client, lot, account, row.fonte)):
+        for lot, account, members in groups:
+            if not all(is_saved(item) for _, item in members):
+                client.save_accounts(
+                    lot,
+                    [account],
+                    members[0][0].justificativa.strip(),
+                    [a for row, _ in members for a in files[row.id]],
+                )
+                stored = [
+                    find_item(client, lot, account, row.fonte)
+                    for row, _ in members
+                ]
+                if not all(is_saved(item) for item in stored):
                     raise TissError('Portal não confirmou o recurso salvo.')
-            row.recurso_estado, row.recurso_guia = 'salvo_portal', None
-            event(
-                db,
-                row,
-                'salvo_portal',
-                {
-                    'capa_lote': account.get('numeroCapaLotePrestador'),
-                    'numero_item': item.get('numeroItem'),
-                    'motivo_webservice': str(cause)[:300],
-                },
-                user_id,
-            )
+            for row, item in members:
+                row.recurso_estado, row.recurso_guia = 'salvo_portal', None
+                event(
+                    db,
+                    row,
+                    'salvo_portal',
+                    {
+                        'capa_lote': account.get('numeroCapaLotePrestador'),
+                        'conta': account.get('numeroConta'),
+                        'numero_item': item.get('numeroItem'),
+                        'motivo_webservice': str(cause)[:300],
+                    },
+                    user_id,
+                )
             db.commit()
-            saved.append(row.id)
+            saved.extend(row.id for row, _ in members)
         return rows
     except Exception as exc:  # noqa: BLE001 - recorded on the items
         if any(

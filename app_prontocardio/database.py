@@ -1,8 +1,11 @@
+import os
+
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
+from app_prontocardio.services.payables_mv import bound_connect_timeout
 from app_prontocardio.settings import Settings
 
 settings = Settings()
@@ -21,6 +24,20 @@ oracle_engine = create_engine(
     pool_timeout=5,
     pool_use_lifo=True,
 )
+
+@event.listens_for(oracle_engine, 'do_connect')
+def configure_payables_mv_connect(dialect, connection_record, args, params):
+    bound_connect_timeout(params)
+
+
+@event.listens_for(oracle_engine, 'connect')
+def configure_payables_mv_timeout(dbapi_connection, connection_record):
+    timeout_ms = int(os.getenv('PAYABLES_MV_CALL_TIMEOUT_MS', '0'))
+    if timeout_ms > 0:
+        # Applied only in the dedicated service's Compose configuration. This
+        # bounds a database round trip, including subsequent pool pre-pings.
+        dbapi_connection.call_timeout = timeout_ms
+
 
 # Larger Oracle fetch batch only for statements that opt in (accounts payable
 # titles); every other query keeps the driver default.

@@ -25,6 +25,7 @@ from app_prontocardio.payables_priority import (
     classification,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.payables_mv import read_payables_rows
 
 router = APIRouter(
     prefix='/app_glosas/financeiro/contas-a-pagar', tags=['contas-a-pagar']
@@ -295,19 +296,15 @@ def _consultar_oracle(
     classificacao: str | None = None,
 ) -> list[dict]:
     try:
-        rows = (
-            session
-            .execute(
-                ORACLE_FORNECEDORES_QUERY,
-                {
-                    'data_inicio': data_inicio,
-                    'data_fim': data_fim,
-                    'hoje': _hoje_hospital(),
-                    'classificacao': classificacao,
-                },
-            )
-            .mappings()
-            .all()
+        rows = read_payables_rows(
+            session,
+            ORACLE_FORNECEDORES_QUERY,
+            {
+                'data_inicio': data_inicio,
+                'data_fim': data_fim,
+                'hoje': _hoje_hospital(),
+                'classificacao': classificacao,
+            },
         )
     except SQLAlchemyError as exc:
         raise HTTPException(
@@ -365,23 +362,19 @@ def _consultar_titulos_oracle(
                 if isinstance(codigo, str)
                 and codigo.startswith(SEM_CADASTRO_PREFIX)
             ]
-            rows.extend(
-                session
-                .execute(
-                    ORACLE_TITULOS_QUERY.execution_options(
-                        prontoglosa_fetch_rows=1000
-                    ),
-                    {
-                        'codigos_fornecedor': codigos,
-                        'referencias_sem_cadastro': referencias,
-                        'data_inicio': data_inicio,
-                        'data_fim': data_fim,
-                        'classificacao': classificacao,
-                    },
-                )
-                .mappings()
-                .all()
-            )
+            rows.extend(read_payables_rows(
+                session,
+                ORACLE_TITULOS_QUERY.execution_options(
+                    prontoglosa_fetch_rows=1000
+                ),
+                {
+                    'codigos_fornecedor': codigos,
+                    'referencias_sem_cadastro': referencias,
+                    'data_inicio': data_inicio,
+                    'data_fim': data_fim,
+                    'classificacao': classificacao,
+                },
+            ))
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
@@ -826,6 +819,7 @@ def listar_contas_pagar(
     quadrante: Annotated[int | None, Query(ge=1, le=25)] = None,
     ordenar: Literal['prioridade', 'maior_valor_vencido'] = 'prioridade',
     incluir_opcoes: bool = False,
+    incluir_titulos: bool = True,
     classificacao: Annotated[str | None, Query(max_length=100)] = None,
 ):
     classificacao = (classificacao or '').strip() or None
@@ -982,7 +976,9 @@ def listar_contas_pagar(
     inicio = (page - 1) * page_size
     pagina = filtrados if exportar else filtrados[inicio : inicio + page_size]
     codigos_pagina = [item['codigo_fornecedor'] for item in pagina]
-    if detalhes_filtrados is not None:
+    if not incluir_titulos and not exportar:
+        detalhes_pagina = {}
+    elif detalhes_filtrados is not None:
         detalhes_pagina = detalhes_filtrados
     else:
         titulos_pagina = _consultar_titulos_oracle(
