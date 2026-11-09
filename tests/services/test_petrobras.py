@@ -49,6 +49,7 @@ from app_prontocardio.services.petrobras_config import PetrobrasConfig
 from app_prontocardio.services.petrobras_match import reconcile
 from app_prontocardio.services.petrobras_portal_appeal import (
     ACCOUNT_COLUMNS,
+    PROCEDURE_COLUMNS,
     PortalAppeal,
     error_text,
     lot_forms,
@@ -2132,6 +2133,7 @@ class FakePortal:
             })
         self.saved, self.efetivados, self.closed = [], 0, False
         self.accepted = []
+        self.item_calls = []
         self.efetivar_error = None
 
     @property
@@ -2165,6 +2167,23 @@ class FakePortal:
     def accept_accounts(self, _lot, accounts):
         assert self.efetivados == 0, 'aceite vem antes de efetivar'
         self.accepted.extend(self._mark(accounts, 'A'))
+
+    def _mark_items(self, items, situation):
+        numbers = {i['numeroItem'] for i in items}
+        for item in self.denied:
+            if item['numeroItem'] in numbers:
+                item['situacaoRecursadoAceito'] = situation
+        return sorted(numbers)
+
+    def accept_items(self, _lot, items):
+        assert self.efetivados == 0, 'aceite vem antes de efetivar'
+        self.item_calls.append(('A', sorted(i['numeroItem'] for i in items)))
+        self.accepted.extend(self._mark_items(items, 'A'))
+
+    def save_items(self, _lot, items, justification, attachments):
+        self.item_calls.append(('R', sorted(i['numeroItem'] for i in items)))
+        for item in self._mark_items(items, 'R'):
+            self.saved.append((item, justification, attachments))
 
     def efetivar(self, _lot):
         if self.efetivar_error:
@@ -2456,31 +2475,31 @@ def same_guide(db, row, other):
     db.commit()
 
 
-def test_portal_refuses_a_guide_with_another_denied_item_before_writing(
+def test_portal_appeals_one_item_of_a_guide_after_accepting_its_acatos(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
-    target, other = rows['1'], rows['2']
+    target, other, untreated = rows['1'], rows['2'], rows['3']
     same_guide(db, target, other)
+    same_guide(db, target, untreated)
     acato_row(db, other)
-    portal = FakePortal([target, other])
-    with pytest.raises(TissError):
-        run_portal(db, config, target, portal)
-    assert portal.saved == []
-    assert portal.accepted == []
-    assert target.recurso_estado == 'rascunho'
-    causa = (
-        db
-        .scalars(
-            select(PetrobrasEvento).where(
-                PetrobrasEvento.glosa_id == target.id,
-                PetrobrasEvento.tipo == 'recusado_operadora',
-            )
-        )
-        .all()[-1]
-        .dados['causa']
-    )
-    assert 'guia inteira' in causa
+    portal = FakePortal([target, other, untreated])
+    order = []
+    accept, save = portal.accept_items, portal.save_items
+    portal.accept_items = lambda *a: (order.append('aceite'), accept(*a))
+    portal.save_items = lambda *a: (order.append('recurso'), save(*a))
+    portal.save_accounts = Mock(side_effect=AssertionError('guia inteira'))
+    portal.accept_accounts = Mock(side_effect=AssertionError('guia inteira'))
+    run_portal(db, config, target, portal)
+    assert order == ['aceite', 'recurso']
+    assert portal.item_calls == [('A', [other.id]), ('R', [target.id])]
+    assert target.recurso_estado == 'salvo_portal'
+    situation = {
+        i['numeroItem']: i.get('situacaoRecursadoAceito')
+        for i in portal.denied
+    }
+    assert situation == {target.id: 'R', other.id: 'A', untreated.id: None}
+    assert portal.efetivados == 0
 
 
 def test_portal_appeals_a_whole_guide_with_one_justification(
@@ -2540,7 +2559,7 @@ def test_accept_sends_all_fully_accepted_guides_in_one_request(
     assert sorted(portal.accepted) == sorted([first.id, second.id])
 
 
-def test_accept_skips_a_guide_with_an_item_without_acato(
+def test_accept_selects_only_the_acato_item_of_a_mixed_guide(
     db, protocol, config, source, candidate
 ):
     rows = portal_rows(db, protocol, config, source, candidate)
@@ -2549,7 +2568,9 @@ def test_accept_skips_a_guide_with_an_item_without_acato(
     acato_row(db, accepted)
     portal = FakePortal([target, accepted, untreated])
     run_portal(db, config, target, portal)
-    assert portal.accepted == []
+    # The guide also has an untreated item: only the acato goes, by item.
+    assert portal.accepted == [accepted.id]
+    assert portal.item_calls == [('A', [accepted.id])]
     assert [s[0] for s in portal.saved] == [target.id]
 
 
@@ -2772,6 +2793,80 @@ def test_portal_save_posts_the_account_with_its_proofs():
     # The account grid has no value column: the portal appeals it all.
     assert 'valorRecursado' not in record
     assert record['mensagemRespostaPrestador'] == 'Justificativa'
+
+
+PORTAL_ITEM = {
+    'idRecursoGlosaProvisorio': None,
+    'numeroCapaLote': 12241235,
+    'numeroCapaLotePrestador': 36026073,
+    'numeroConta': 156126142,
+    'numeroContaPrestador': '00000000000003094252',
+    'numeroContaOperadora': '123260045',
+    'controle': 1554975,
+    'numeroItem': 731108853,
+    'codigoItem': '30911141',
+    'descricaoItem': 'ESTUDO A & B',
+    'qtdItem': 2,
+    'dataRealizacao': 1784851200000,
+    'valorTotalProcessado': 1710.58,
+    'valorTotalGlosado': 1081.67,
+    'valorDeclarado': 1078.18,
+    'valorPago': 0.0,
+    'valorGlosado': 1078.18,
+    'valorAcerto': 0.0,
+    'valorRecursado': None,
+    'flagAcertoItem': 'N',
+    'flagDenyItem': 'S',
+    'situacaoRecursadoAceito': None,
+    'listaDetalheRecursoGlosa': [],
+    'protocoloRecurso': None,
+}
+
+
+def test_portal_appeals_selected_procedures_like_the_screen():
+    client = CapturingAppeal()
+    proof = SimpleNamespace(
+        nome='prova.pdf', mime='application/pdf', conteudo=b'%PDF'
+    )
+    client.save_items(PORTAL_LOT, [PORTAL_ITEM], 'Justificativa', [proof])
+    fields = posted(client.calls[0])
+    assert fields['codigosSelecionados'][1] == b'731108853;'
+    assert fields['listaDocumentoAnexo[0].file'][1] == b'%PDF'
+    (record,) = records(fields)
+    assert list(record)[: len(PROCEDURE_COLUMNS)] == list(PROCEDURE_COLUMNS)
+    assert record['tipoRecurso_ContaInteira_Procedimento'] == 'Procedimentos'
+    assert record['codigosSelecionados'] == '731108853;'
+    assert record['situacaoRecursadoAceito'] == 'R'
+    assert record['mensagemRespostaPrestador'] == 'Justificativa'
+    # Numbers where the screen parses them; currency cells as decimals.
+    assert record['valorRecursado'] == 1078.18
+    assert record['valorAcerto'] == 0
+    assert record['valorGlosado'] == '1078.18'
+    assert record['valorPago'] == '0.00'
+    assert record['valorTotalProcessado'] == '1710.58'
+    assert record['numeroItem'] == '731108853'
+    assert record['qtdItem'] == '2'
+    assert record['listaDetalheRecursoGlosa'] is None
+    assert record['imgDetalhesRecursoGlosa'] == ''
+    assert record['numeroItemPrincipal'] == ''
+    assert record['codigoItemDet'] == (
+        '<div title=" 30911141 - ESTUDO A &amp; B">30911141</div>'
+    )
+    assert record['codigoUsuario'] == 'U'
+
+
+def test_portal_accepts_selected_procedures_without_value():
+    client = CapturingAppeal()
+    second = {**PORTAL_ITEM, 'numeroItem': 731108854, 'valorGlosado': 1.67}
+    client.accept_items(PORTAL_LOT, [PORTAL_ITEM, second])
+    fields = posted(client.calls[0])
+    assert fields['codigosSelecionados'][1] == b'731108853;731108854;'
+    assert fields['mensagemRespostaPrestador'][1] == b''
+    first, other = records(fields)
+    assert first['valorRecursado'] == '0.0'
+    assert other['valorRecursado'] == '0.0'
+    assert first['situacaoRecursadoAceito'] == 'A'
+    assert other['valorGlosado'] == '1.67'
 
 
 def test_portal_http_error_reports_the_reason_of_the_server():

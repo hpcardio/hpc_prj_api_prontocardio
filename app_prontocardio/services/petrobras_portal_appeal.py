@@ -7,6 +7,7 @@ the payer's REST host. `accept` and `save` are reversible in the portal;
 so it only runs at the user's explicit request. No request or response logging.
 """
 
+import html
 import json
 import re
 from decimal import Decimal
@@ -65,6 +66,80 @@ ACCOUNT_COLUMNS = (
 )
 WHOLE_ACCOUNT = 'ContaInteira'
 CURRENCY_COLUMNS = {'somaValorGlosadoItensConta'}
+# Columns of the screen's procedures grid (Procedimentos), in its order, read
+# from dadosLotesRecursoAberto_gridProcedimentosContas.js on 2026-11-09.
+# Selecting procedures instead of an account posts each selected row with
+# these, so one item of a guide can be accepted or appealed alone.
+PROCEDURE_COLUMNS = (
+    'statusItem',
+    'itemRecursado',
+    'imgSituacaoRecursadoAceito',
+    'situacaoRecursadoAceito',
+    'imgAglutinador',
+    'aglutinador',
+    'idRecursoGlosaProvisorio',
+    'numeroConta',
+    'numeroContaPrestador',
+    'numeroContaOperadora',
+    'controle',
+    'numeroCapaLote',
+    'numeroCapaLotePrestador',
+    'valorTotalProcessado',
+    'valorTotalPago',
+    'valorTotalGlosado',
+    'valorTotalAcerto',
+    'numeroItemPrincipal',
+    'numeroItem',
+    'codigoItemDet',
+    'codigoItem',
+    'descricaoItem',
+    'qtdItem',
+    'qtdItemAglutinadosFmt',
+    'qtdItemAglutinados',
+    'qtdItemAglutinadosGlosa',
+    'qtdItemAglutinadoSalvoR',
+    'qtdItemAglutinadoSalvoA',
+    'qtdItemAglutinadoDispSalvar',
+    'dataCronogramaLote',
+    'dataRealizacao',
+    'dataRealizacaoStr',
+    'codigoBeneficiario',
+    'carteirinhaBeneficiario',
+    'nomeBeneficiario',
+    'valorDeclarado',
+    'valorPago',
+    'valorGlosado',
+    'valorAcerto',
+    'valorRecursado',
+    'flagAcertoItem',
+    'flagDenyItem',
+    'valorRecursados',
+    'imgDetalhesRecursoGlosa',
+    'imgJustificativaRecurso',
+    'protocoloRecurso',
+    'efetivado',
+    'listaDetalheRecursoGlosa',
+    'stringArrayDetalhesRecursoGlosa',
+    'detalhesRecursoGlosa',
+    'tipoRecurso_ContaInteira_Procedimento',
+    'flagDenyGlosa',
+    'flagDenyPCMSO',
+)
+PROCEDURES = 'Procedimentos'
+# Icons and HTML summaries the grid draws; no data of their own.
+PROCEDURE_DISPLAY = {
+    'statusItem',
+    'imgSituacaoRecursadoAceito',
+    'imgAglutinador',
+    'qtdItemAglutinadosFmt',
+    'valorRecursados',
+    'imgDetalhesRecursoGlosa',
+    'imgJustificativaRecurso',
+    'stringArrayDetalhesRecursoGlosa',
+    'detalhesRecursoGlosa',
+}
+# jqGrid currency cells, read back as plain decimals.
+PROCEDURE_CURRENCY = {'valorDeclarado', 'valorPago', 'valorGlosado'}
 DENIED = 'S'
 
 
@@ -101,6 +176,59 @@ def account_row(account):
             row[column] = str(value)
     row['tipoRecurso_ContaInteira_Procedimento'] = WHOLE_ACCOUNT
     return row
+
+
+def js_number(value):
+    """A number as JavaScript prints it: 0 not 0.0, 1078.18 as is."""
+    number = Decimal(str(value or 0))
+    return (
+        int(number) if number == number.to_integral_value() else float(number)
+    )
+
+
+def js_text(value):
+    """A grid cell as text: blank for null, integers without '.0'."""
+    if value is None:
+        return ''
+    if isinstance(value, float):
+        return str(js_number(value))
+    return str(value)
+
+
+def procedure_row(item, situation):
+    """A selected procedure as the screen reads it from its grid.
+
+    Mirrors getRowDataProcedimentosSelecionados: text cells, valorAcerto as
+    a number, valorRecursado '0.0' to accept or the whole denied value to
+    appeal, and no detail list.
+    """
+    row = {}
+    for column in PROCEDURE_COLUMNS:
+        value = item.get(column)
+        if column in PROCEDURE_DISPLAY:
+            row[column] = ''
+        elif column in PROCEDURE_CURRENCY:
+            row[column] = f'{Decimal(str(value or 0)):.2f}'
+        else:
+            row[column] = js_text(value)
+    code = html.escape(js_text(item.get('codigoItem')))
+    title = html.escape(
+        f' {js_text(item.get("codigoItem"))} - '
+        f'{js_text(item.get("descricaoItem"))}'
+    )
+    row['codigoItemDet'] = f'<div title="{title}">{code}</div>'
+    row['listaDetalheRecursoGlosa'] = None
+    row['valorAcerto'] = js_number(item.get('valorAcerto'))
+    row['valorRecursado'] = (
+        '0.0' if situation == ACCEPTED else js_number(item.get('valorGlosado'))
+    )
+    row['tipoRecurso_ContaInteira_Procedimento'] = PROCEDURES
+    return row
+
+
+def selected_codes(items):
+    """codigosSelecionados: the grid's row ids (numeroItem), ';' after each."""
+    return ''.join(f'{js_text(i.get("numeroItem"))};' for i in items)
 
 
 def error_text(exc):
@@ -250,28 +378,27 @@ class PortalAppeal:
             numeroConta=account['numeroConta'],
         )
 
-    def _respond(self, lot, accounts, situation, justification, attachments):  # noqa: PLR0913, PLR0917 - one screen action
-        """Post whole accounts as the screen's responderRecursoComAnexo does.
+    def _respond(  # noqa: PLR0913, PLR0917 - one screen action
+        self, lot, rows, situation, justification, attachments, codes=''
+    ):
+        """Post selected grid rows as the screen's responderRecursoComAnexo.
 
         Order and shape follow the portal: form fields, the file inputs, the
-        hidden defaults, then the selected accounts as compact JSON objects
-        joined by commas (FormData of a JavaScript array).
+        hidden defaults, then the selected rows as compact JSON objects
+        joined by commas (FormData of a JavaScript array). `codes` is the
+        procedures grid selection; blank when whole accounts are selected.
         """
         hidden = {
             'mensagemRespostaPrestador': justification,
-            'codigosSelecionados': '',
+            'codigosSelecionados': codes,
             **lot,
         }
         records = []
-        for account in accounts:
-            record = account_row(account)
-            if situation == ACCEPTED:
-                # Appeals carry no value: the account grid has no such
-                # column and the portal appeals the whole denied amount.
-                record['valorRecursado'] = '0.0'
+        for row in rows:
+            record = dict(row)
             record.update({
                 'mensagemRespostaPrestador': justification,
-                'codigosSelecionados': '',
+                'codigosSelecionados': codes,
                 'situacaoRecursadoAceito': situation,
                 **lot,
             })
@@ -304,13 +431,55 @@ class PortalAppeal:
             content_type=content_type,
         )
 
+    @staticmethod
+    def _account_rows(accounts, situation):
+        rows = []
+        for account in accounts:
+            row = account_row(account)
+            if situation == ACCEPTED:
+                # Appeals carry no value: the account grid has no such
+                # column and the portal appeals the whole denied amount.
+                row['valorRecursado'] = '0.0'
+            rows.append(row)
+        return rows
+
     def accept_accounts(self, lot, accounts):
         """Aceitar Selecionados of whole accounts; undone until Efetivar."""
-        self._respond(lot, accounts, ACCEPTED, '', [])
+        self._respond(
+            lot, self._account_rows(accounts, ACCEPTED), ACCEPTED, '', []
+        )
 
     def save_accounts(self, lot, accounts, justification, attachments):
         """Salvar Recurso dos Itens Selecionados for whole accounts."""
-        self._respond(lot, accounts, APPEALED, justification, attachments)
+        self._respond(
+            lot,
+            self._account_rows(accounts, APPEALED),
+            APPEALED,
+            justification,
+            attachments,
+        )
+
+    def accept_items(self, lot, items):
+        """Aceitar Selecionados of some procedures of one account."""
+        self._respond(
+            lot,
+            [procedure_row(i, ACCEPTED) for i in items],
+            ACCEPTED,
+            '',
+            [],
+            selected_codes(items),
+        )
+
+    def save_items(self, lot, items, justification, attachments):
+        """Salvar Recurso of some procedures of one account."""
+        self._respond(
+            lot,
+            [procedure_row(i, APPEALED) for i in items],
+            APPEALED,
+            justification,
+            attachments,
+            selected_codes(items),
+        )
 
     def efetivar(self, lot):
         """Irreversible: every unappealed item of the lot becomes accepted."""
