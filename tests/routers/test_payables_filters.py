@@ -284,3 +284,41 @@ def test_summary_without_titles_skips_the_title_query(data, monkeypatch):
     assert result['fornecedores']
     assert all(item['titulos'] == [] for item in result['fornecedores'])
     assert calls == []
+
+
+def test_titles_bring_the_mv_spreadsheet_fields(data, monkeypatch):
+    sql = str(cp.ORACLE_TITULOS_QUERY)
+    for column in (
+        'MAX(v.observacao) AS observacao',
+        'MAX(v.valor_desconto) AS valor_desconto',
+        'MAX(v.valor_acrescimo) AS valor_acrescimo',
+        'MAX(data_baixa) AS data_baixa',
+        'pg.data_baixa',
+    ):
+        assert column in sql
+    title = dict(
+        codigo_fornecedor=10,
+        nome_fornecedor='Fornecedor 10',
+        codigo_parcela=1,
+        codigo_contas_pagar=1,
+        data_vencimento=date(2026, 6, 1),
+        data_emissao=date(2026, 5, 1),
+        data_lancamento=date(2026, 5, 2),
+        data_baixa=date(2026, 6, 3),
+        observacao='=Parcela renegociada',
+        valor_desconto=Decimal('10.5'),
+        valor_acrescimo=None,
+        valor_total=Decimal('100'),
+        valor_honrado_oracle=Decimal('40'),
+        sem_cadastro=False,
+    )
+    monkeypatch.setattr(
+        cp, '_consultar_titulos_oracle', lambda s, codes, **kw: [dict(title)]
+    )
+    result = listing(fornecedores_ids='10')
+    exported = result['fornecedores'][0]['titulos'][0]
+    assert exported['data_baixa'] == '2026-06-03'
+    assert exported['observacao'] == '=Parcela renegociada'
+    assert exported['valor_desconto'] == '10.50'
+    assert exported['valor_acrescimo'] is None
+    assert exported['valor_honrado_oracle'] == '40.00'
