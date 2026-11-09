@@ -5,6 +5,7 @@ open items here and records the screen's situation (saved, accepted,
 appealed, efetivado) on the matching rows. Never writes to the portal.
 """
 
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -33,7 +34,8 @@ from app_prontocardio.services.petrobras_tiss import TissError
 
 # States the portal may still change; webservice and final ones are kept.
 OPEN_STATES = ('rascunho', 'salvo_portal', 'envio_incerto', 'transmitindo')
-MAX_DEMONSTRATIVOS = 20
+# Below the screen proxy's wait; the screen calls again with `proximo`.
+TIME_BUDGET_SECONDS = 25
 
 
 def open_demonstrativos(db, config):
@@ -54,23 +56,55 @@ def open_demonstrativos(db, config):
     )
 
 
-def sync_portal_situation(
-    db, config, user_id, limit=MAX_DEMONSTRATIVOS, portal=None
+def demonstrativo_order(value):
+    """Newest first: numeric demonstrativos compare as numbers."""
+    return (1, int(value), '') if value.isdigit() else (0, 0, value)
+
+
+def sync_portal_situation(  # noqa: PLR0913 - cursor, budget and injections
+    db,
+    config,
+    user_id,
+    after=None,
+    budget=TIME_BUDGET_SECONDS,
+    portal=None,
+    clock=time.monotonic,
 ):
-    """Read the portal and record its situation on the open items."""
-    demonstrativos = open_demonstrativos(db, config)
+    """Read the portal and record its situation on the open items.
+
+    One call stays short for the screen's proxy: it reads demonstrativos
+    until the time budget is spent and returns `proximo`, the cursor for
+    the next call (None when all were read).
+    """
+    pending = sorted(
+        (str(d) for d in open_demonstrativos(db, config)),
+        key=demonstrativo_order,
+        reverse=True,
+    )
+    if after:
+        pending = [
+            d
+            for d in pending
+            if demonstrativo_order(d) < demonstrativo_order(str(after))
+        ]
     result = {
         'demonstrativos': 0,
         'atualizados': 0,
         'ambiguos': 0,
         'falhas': {},
-        'restantes': max(len(demonstrativos) - limit, 0),
+        'restantes': len(pending),
+        'proximo': None,
     }
-    if not demonstrativos:
+    if not pending:
         return result
+    start = clock()
     client = portal or PortalAppeal(config)
     try:
-        for demonstrativo in demonstrativos[:limit]:
+        for index, demonstrativo in enumerate(pending):
+            if index and clock() - start >= budget:
+                result['proximo'] = pending[index - 1]
+                break
+            result['restantes'] -= 1
             try:
                 changed, ambiguous = sync_demonstrativo(
                     db, client, demonstrativo, user_id
@@ -78,7 +112,7 @@ def sync_portal_situation(
                 db.commit()
             except Exception as exc:  # noqa: BLE001 - one lot never stops the rest
                 db.rollback()
-                result['falhas'][str(demonstrativo)] = (
+                result['falhas'][demonstrativo] = (
                     str(exc)[:200]
                     if isinstance(exc, TissError)
                     else type(exc).__name__

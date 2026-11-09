@@ -518,11 +518,25 @@ def portal_detail(db: DB, config: Config, user: Writer):
         raise HTTPException(502, str(exc)) from None
 
 
+class SituacaoPortalInput(BaseModel):
+    apos: str | None = Field(None, max_length=30)
+
+
 @router.post('/portal/situacao')
-def portal_situation(db: DB, config: Config, user: Writer):
-    """Record what was done directly on the portal (read-only there)."""
+def portal_situation(
+    db: DB,
+    config: Config,
+    user: Writer,
+    body: SituacaoPortalInput | None = None,
+):
+    """Record what was done directly on the portal (read-only there).
+
+    Short calls: repeat with `apos` = the returned `proximo` until it is null.
+    """
     try:
-        return sync_portal_situation(db, config, user.id)
+        return sync_portal_situation(
+            db, config, user.id, after=body.apos if body else None
+        )
     except (TissError, ValueError) as exc:
         raise HTTPException(502, str(exc)) from None
 
