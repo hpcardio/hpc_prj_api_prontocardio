@@ -33,7 +33,11 @@ from app_prontocardio.petrobras_models import (
     PetrobrasProtocolo,
 )
 from app_prontocardio.routers import petrobras
-from app_prontocardio.services import petrobras_appeals, petrobras_sync
+from app_prontocardio.services import (
+    petrobras_appeals,
+    petrobras_portal_status,
+    petrobras_sync,
+)
 from app_prontocardio.services import petrobras_tiss as tiss
 from app_prontocardio.services.petrobras_appeals import (
     appeal_codes,
@@ -49,6 +53,9 @@ from app_prontocardio.services.petrobras_portal_appeal import (
     error_text,
     lot_forms,
     multipart,
+)
+from app_prontocardio.services.petrobras_portal_status import (
+    sync_portal_situation,
 )
 from app_prontocardio.services.petrobras_sync import (
     apply_payer_lots,
@@ -2916,3 +2923,113 @@ def test_new_rows_of_a_known_protocol_get_the_payer_lot():
         {'protocolo': '1', 'lote': '36022538', 'lote_prestador': '1928'},
         {'protocolo': '2', 'lote': '5'},
     ]
+
+
+def portal_state(portal, row, situation, protocol=None):
+    for item in portal.denied:
+        if item['numeroItem'] == row.id:
+            item['situacaoRecursadoAceito'] = situation
+            if protocol:
+                item['protocoloRecurso'] = protocol
+
+
+def situation_sync(db, config, portal):
+    return sync_portal_situation(db, config, 1, portal=portal)
+
+
+def test_portal_situation_brings_appeals_and_accepts_done_on_the_site(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    appealed, accepted, saved = rows['1'], rows['2'], rows['3']
+    portal = FakePortal([appealed, accepted, saved])
+    portal_state(portal, appealed, 'R', 162770795)
+    portal_state(portal, accepted, 'A')
+    portal_state(portal, saved, 'R')
+    for account in portal.account_list:
+        if account['numeroConta'] == accepted.guia_prestador:
+            account['qtdItemEfetivado'] = 1
+    result = situation_sync(db, config, portal)
+    assert result['atualizados'] == 3
+    assert result['falhas'] == {}
+    assert appealed.recurso_estado == 'enviado_portal'
+    assert appealed.recurso_protocolo == '162770795'
+    assert accepted.recurso_estado == 'aceito_portal'
+    recorded = petrobras_appeals.acatos(db, [accepted.id])[accepted.id]
+    assert Decimal(recorded['valor']) == accepted.valor_glosa
+    assert saved.recurso_estado == 'salvo_portal'
+    history = db.scalars(
+        select(PetrobrasEvento).where(
+            PetrobrasEvento.glosa_id == appealed.id,
+            PetrobrasEvento.tipo == 'situacao_portal',
+        )
+    ).one()
+    assert history.dados['origem'] == 'portal'
+    assert history.dados['antes'] == 'rascunho'
+    assert portal.saved == []
+    assert portal.accepted == []
+    assert portal.efetivados == 0
+    assert situation_sync(db, config, portal)['atualizados'] == 0
+
+
+def test_portal_situation_records_a_pending_accept_as_acato(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    portal = FakePortal([row])
+    portal_state(portal, row, 'A')
+    situation_sync(db, config, portal)
+    assert row.recurso_estado == 'rascunho'
+    assert row.id in petrobras_appeals.acatos(db, [row.id])
+
+
+def test_portal_situation_keeps_webservice_protocols(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    row, other = rows['1'], rows['2']
+    row.recurso_estado, row.recurso_protocolo = 'protocolado', 'RG1'
+    db.commit()
+    portal = FakePortal([row, other])
+    portal_state(portal, row, 'R', 999)
+    situation_sync(db, config, portal)
+    assert row.recurso_estado == 'protocolado'
+    assert row.recurso_protocolo == 'RG1'
+
+
+def test_portal_situation_skips_ambiguous_items(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    first, twin = rows['1'], rows['2']
+    twin.guia_prestador, twin.tuss = first.guia_prestador, first.tuss
+    twin.valor_glosa = first.valor_glosa
+    db.commit()
+    portal = FakePortal([first])
+    portal_state(portal, first, 'R', 1)
+    result = situation_sync(db, config, portal)
+    assert result['ambiguos'] == 1
+    assert first.recurso_estado == 'rascunho'
+
+
+def test_portal_situation_route_reports_failures_per_demonstrativo(  # noqa: PLR0913, PLR0917 - fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    portal = FakePortal([rows['1']])
+
+    def broken(_demonstrativo):
+        raise TissError('Portal Petrobras: HTTP 500.')
+
+    portal.lots = broken
+    monkeypatch.setattr(
+        petrobras_portal_status, 'PortalAppeal', lambda _config: portal
+    )
+    with petrobras_client(db, config) as client:
+        response = client.post('/app_glosas/petrobras/portal/situacao')
+    assert response.status_code == 200
+    body = response.json()
+    assert body['atualizados'] == 0
+    assert list(body['falhas'].values()) == ['Portal Petrobras: HTTP 500.']
+    assert portal.closed
