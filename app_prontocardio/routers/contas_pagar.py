@@ -210,14 +210,16 @@ ORACLE_TITULOS_QUERY = text(f"""
 WITH pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
-           MAX(NVL(valor_pago, 0)) AS valor_pago
+           MAX(NVL(valor_pago, 0)) AS valor_pago,
+           MAX(data_da_baixa) AS data_baixa
       FROM dbamv.HPC_V_CONTAS_A_PAGAR
      WHERE codigo_pagamento_pk IS NOT NULL
        AND data_de_estorno IS NULL
      GROUP BY codigo_parcela_pk, codigo_pagamento_pk
 ),
 pagamentos AS (
-    SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago
+    SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago,
+           MAX(data_baixa) AS data_baixa
       FROM pagamentos_distintos
      GROUP BY codigo_parcela_pk
 ),
@@ -229,6 +231,9 @@ parcelas AS (
            MAX(v.codigo_do_contas_a_pagar) AS codigo_contas_pagar,
            MAX(v.numero_do_documento) AS numero_documento,
            MAX(v.descricao_da_conta) AS descricao_conta,
+           MAX(v.observacao) AS observacao,
+           MAX(v.valor_desconto) AS valor_desconto,
+           MAX(v.valor_acrescimo) AS valor_acrescimo,
            MAX(v.numero_da_parcela) AS numero_parcela,
            MAX(v.data_de_lancamento) AS data_lancamento,
            MAX(v.data_de_emissao) AS data_emissao,
@@ -250,6 +255,9 @@ SELECT p.codigo_fornecedor,
        p.codigo_contas_pagar,
        p.numero_documento,
        p.descricao_conta,
+       p.observacao,
+       p.valor_desconto,
+       p.valor_acrescimo,
        p.numero_parcela,
        p.data_lancamento,
        p.data_emissao,
@@ -258,7 +266,8 @@ SELECT p.codigo_fornecedor,
        p.data_vencimento,
        p.tipo_quitacao,
        p.classificacao,
-       NVL(pg.valor_pago, 0) AS valor_honrado_oracle
+       NVL(pg.valor_pago, 0) AS valor_honrado_oracle,
+       pg.data_baixa
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
  WHERE p.tipo_quitacao IN (
@@ -279,6 +288,10 @@ def _decimal(value) -> Decimal:
         return Decimal(str(value or 0)).quantize(CENTAVOS)
     except (InvalidOperation, ValueError):
         return Decimal('0.00')
+
+
+def _decimal_opcional(value) -> Decimal | None:
+    return None if value is None else _decimal(value)
 
 
 def _serializar_decimal(value: Decimal) -> str:
@@ -394,6 +407,10 @@ def _consultar_titulos_oracle(
             else None,
             'numero_documento': row['numero_documento'],
             'descricao_conta': row['descricao_conta'],
+            'observacao': row.get('observacao'),
+            'valor_desconto': _decimal_opcional(row.get('valor_desconto')),
+            'valor_acrescimo': _decimal_opcional(row.get('valor_acrescimo')),
+            'data_baixa': _normalizar_data(row.get('data_baixa')),
             'numero_parcela': row['numero_parcela'],
             'data_lancamento': _normalizar_data(row['data_lancamento']),
             'data_emissao': _normalizar_data(row['data_emissao']),
@@ -1026,6 +1043,17 @@ def listar_contas_pagar(
                 else None,
                 'data_emissao': titulo['data_emissao'].isoformat()
                 if titulo['data_emissao']
+                else None,
+                'data_baixa': titulo['data_baixa'].isoformat()
+                if titulo.get('data_baixa')
+                else None,
+                'valor_desconto': _serializar_decimal(titulo['valor_desconto'])
+                if titulo.get('valor_desconto') is not None
+                else None,
+                'valor_acrescimo': _serializar_decimal(
+                    titulo['valor_acrescimo']
+                )
+                if titulo.get('valor_acrescimo') is not None
                 else None,
                 'valor_total': _serializar_decimal(titulo['valor_total']),
                 'valor_nota_fiscal': _serializar_decimal(
