@@ -2,7 +2,8 @@
 
 Read-only on the portal: lists the lots of each demonstrativo that still has
 open items here and records the screen's situation (saved, accepted,
-appealed, efetivado) on the matching rows. Never writes to the portal.
+appealed, efetivado) on the matching rows, with the appeal text presented
+there. Never writes to the portal.
 """
 
 import time
@@ -165,6 +166,11 @@ def sync_demonstrativo(db, portal, demonstrativo, user_id):
     return changed, ambiguous
 
 
+def portal_justification(item):
+    """The appeal text the portal holds for the item, as presented."""
+    return (item.get('justificativaRecurso') or '').strip()
+
+
 def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PLR0913, PLR0917 - audit context
     """Record the portal's situation of one item; True when it changed."""
     situation = item.get('situacaoRecursadoAceito')
@@ -187,7 +193,9 @@ def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PL
         row, current.get(row.id)
     )
     new_protocol = protocol and row.recurso_protocolo != protocol
-    if target == before and not new_protocol and not accept:
+    text = portal_justification(item) if situation == APPEALED else ''
+    new_text = bool(text) and (row.justificativa or '') != text
+    if target == before and not new_protocol and not accept and not new_text:
         return False
     if accept:
         source = row.fonte or {}
@@ -204,8 +212,12 @@ def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PL
         }
         event(db, row, 'acato', data, user_id)
         current[row.id] = data
+    previous_text = row.justificativa
     if target != before:
         row.recurso_estado = target
+    if new_text:
+        row.justificativa = text
+    if target != before or new_text:
         row.versao += 1
     if new_protocol:
         row.recurso_protocolo = protocol
@@ -222,6 +234,14 @@ def apply_situation(db, row, item, account, sent, current, user_id):  # noqa: PL
             'depois': target,
             'numero_item': item.get('numeroItem'),
             'conta': account.get('numeroConta'),
+            **(
+                {
+                    'justificativa': text,
+                    'justificativa_anterior': previous_text,
+                }
+                if new_text
+                else {}
+            ),
         },
         user_id,
     )

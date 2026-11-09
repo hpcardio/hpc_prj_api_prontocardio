@@ -2925,12 +2925,14 @@ def test_new_rows_of_a_known_protocol_get_the_payer_lot():
     ]
 
 
-def portal_state(portal, row, situation, protocol=None):
+def portal_state(portal, row, situation, protocol=None, text=None):
     for item in portal.denied:
         if item['numeroItem'] == row.id:
             item['situacaoRecursadoAceito'] = situation
             if protocol:
                 item['protocoloRecurso'] = protocol
+            if text:
+                item['justificativaRecurso'] = text
 
 
 def situation_sync(db, config, portal):
@@ -2970,6 +2972,48 @@ def test_portal_situation_brings_appeals_and_accepts_done_on_the_site(
     assert portal.accepted == []
     assert portal.efetivados == 0
     assert situation_sync(db, config, portal)['atualizados'] == 0
+
+
+def test_portal_situation_brings_the_appeal_text_presented_on_the_site(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    row.justificativa = 'Rascunho local anterior ao portal.'
+    db.commit()
+    version = row.versao
+    portal = FakePortal([row])
+    text = 'Procedimento autorizado conforme guia e laudo anexos ao recurso.'
+    portal_state(portal, row, 'R', 162770795, text=f'  {text} ')
+    situation_sync(db, config, portal)
+    assert row.justificativa == text
+    assert row.versao == version + 1
+    history = db.scalars(
+        select(PetrobrasEvento).where(
+            PetrobrasEvento.glosa_id == row.id,
+            PetrobrasEvento.tipo == 'situacao_portal',
+        )
+    ).one()
+    assert history.dados['justificativa'] == text
+    assert history.dados['justificativa_anterior'] == (
+        'Rascunho local anterior ao portal.'
+    )
+    assert situation_sync(db, config, portal)['atualizados'] == 0
+
+
+def test_portal_situation_fills_the_text_of_items_already_synced(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    row = rows['1']
+    row.recurso_estado, row.recurso_protocolo = 'enviado_portal', '162770795'
+    db.commit()
+    portal = FakePortal([row])
+    text = 'Material utilizado conforme descrição cirúrgica anexa.'
+    portal_state(portal, row, 'R', 162770795, text=text)
+    assert situation_sync(db, config, portal)['atualizados'] == 1
+    assert row.justificativa == text
+    assert row.recurso_estado == 'enviado_portal'
 
 
 def test_portal_situation_records_a_pending_accept_as_acato(
