@@ -438,3 +438,44 @@ def test_total_ate_hoje_inclui_hoje_exclui_futuro_e_desconta_pagamentos(
     assert contas_pagar._agrupar_fornecedores(titulos, {})[0][
         'valor_a_pagar_ate_hoje'
     ] == Decimal('240')
+
+
+def test_consulta_oracle_traz_campos_da_planilha_do_mv():
+    base = {
+        'codigo_fornecedor': 10,
+        'nome_fornecedor': 'Fornecedor',
+        'codigo_parcela_pk': 99,
+        'codigo_contas_pagar': 88,
+        'numero_documento': 'NF-10',
+        'descricao_conta': 'Medicamentos',
+        'numero_parcela': 1,
+        'data_lancamento': datetime(2026, 5, 20, 0, 0),
+        'data_emissao': datetime(2026, 5, 18, 0, 0),
+        'valor_duplicata': Decimal('500'),
+        'data_vencimento': datetime(2026, 6, 9, 0, 0),
+        'tipo_quitacao': 'parcialmente pago',
+        'valor_honrado_oracle': Decimal('100'),
+    }
+    oracle = FakeSession([
+        [
+            {
+                **base,
+                'observacao': 'Pagar com boleto',
+                'valor_desconto': Decimal('12.346'),
+                'valor_acrescimo': Decimal('1'),
+                'data_pagamento_mv': datetime(2026, 6, 10, 0, 0),
+            },
+            {**base, 'codigo_parcela_pk': 100},
+        ]
+    ])
+
+    com, sem = contas_pagar._consultar_titulos_oracle(oracle, [10])
+
+    assert com['observacao'] == 'Pagar com boleto'
+    assert com['valor_desconto'] == Decimal('12.35')
+    assert com['valor_acrescimo'] == Decimal('1.00')
+    assert com['data_pagamento_mv'] == date(2026, 6, 10)
+    assert sem['observacao'] is None
+    assert sem['valor_desconto'] is None
+    assert sem['valor_acrescimo'] is None
+    assert sem['data_pagamento_mv'] is None
