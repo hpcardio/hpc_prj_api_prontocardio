@@ -211,7 +211,7 @@ WITH pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
            MAX(NVL(valor_pago, 0)) AS valor_pago,
-           MAX(data_da_baixa) AS data_baixa
+           MAX(data_de_pagamento) AS data_pagamento_mv
       FROM dbamv.HPC_V_CONTAS_A_PAGAR
      WHERE codigo_pagamento_pk IS NOT NULL
        AND data_de_estorno IS NULL
@@ -219,7 +219,7 @@ WITH pagamentos_distintos AS (
 ),
 pagamentos AS (
     SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago,
-           MAX(data_baixa) AS data_baixa
+           MAX(data_pagamento_mv) AS data_pagamento_mv
       FROM pagamentos_distintos
      GROUP BY codigo_parcela_pk
 ),
@@ -267,7 +267,7 @@ SELECT p.codigo_fornecedor,
        p.tipo_quitacao,
        p.classificacao,
        NVL(pg.valor_pago, 0) AS valor_honrado_oracle,
-       pg.data_baixa
+       pg.data_pagamento_mv
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
  WHERE p.tipo_quitacao IN (
@@ -410,7 +410,9 @@ def _consultar_titulos_oracle(
             'observacao': row.get('observacao'),
             'valor_desconto': _decimal_opcional(row.get('valor_desconto')),
             'valor_acrescimo': _decimal_opcional(row.get('valor_acrescimo')),
-            'data_baixa': _normalizar_data(row.get('data_baixa')),
+            'data_pagamento_mv': _normalizar_data(
+                row.get('data_pagamento_mv')
+            ),
             'numero_parcela': row['numero_parcela'],
             'data_lancamento': _normalizar_data(row['data_lancamento']),
             'data_emissao': _normalizar_data(row['data_emissao']),
@@ -1044,8 +1046,8 @@ def listar_contas_pagar(
                 'data_emissao': titulo['data_emissao'].isoformat()
                 if titulo['data_emissao']
                 else None,
-                'data_baixa': titulo['data_baixa'].isoformat()
-                if titulo.get('data_baixa')
+                'data_pagamento_mv': titulo['data_pagamento_mv'].isoformat()
+                if titulo.get('data_pagamento_mv')
                 else None,
                 'valor_desconto': _serializar_decimal(titulo['valor_desconto'])
                 if titulo.get('valor_desconto') is not None
