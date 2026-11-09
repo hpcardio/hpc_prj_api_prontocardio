@@ -3066,3 +3066,29 @@ def test_portal_situation_route_reports_failures_per_demonstrativo(  # noqa: PLR
     assert body['atualizados'] == 0
     assert list(body['falhas'].values()) == ['Portal Petrobras: HTTP 500.']
     assert portal.closed
+
+
+def test_portal_situation_stops_on_budget_and_continues_from_the_cursor(
+    db, protocol, config, source, candidate
+):
+    rows = portal_rows(db, protocol, config, source, candidate)
+    for number, row in zip(('30', '200', '1000'), rows.values(), strict=True):
+        row.demonstrativo = number
+    db.commit()
+    portal = FakePortal(list(rows.values()))
+    for row in rows.values():
+        portal_state(portal, row, 'R', 5)
+    ticks = iter([0, 30])
+    first = sync_portal_situation(
+        db, config, 1, budget=25, portal=portal, clock=lambda: next(ticks)
+    )
+    assert first['proximo'] == '1000'
+    assert first['demonstrativos'] == 1
+    assert first['restantes'] == 2
+    assert rows['3'].recurso_estado == 'enviado_portal'
+    assert rows['1'].recurso_estado == 'rascunho'
+    rest = sync_portal_situation(db, config, 1, after='1000', portal=portal)
+    assert rest['proximo'] is None
+    assert rest['restantes'] == 0
+    assert rest['demonstrativos'] == 2
+    assert {r.recurso_estado for r in rows.values()} == {'enviado_portal'}
