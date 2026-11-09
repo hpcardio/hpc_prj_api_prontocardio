@@ -1292,6 +1292,32 @@ def test_match_all_uses_same_guide_senha(  # noqa: PLR0913 - pytest fixtures
     assert data['situacao'] == {'conciliado': 2}
 
 
+def test_item_accepted_on_the_portal_counts_as_acato_not_appeal(
+    db, protocol, config, source
+):
+    second = {
+        **source,
+        'chave': 'synthetic-key-2',
+        'sequencial': '2',
+        'tuss': '40302733',
+    }
+    import_rows(db, protocol, [source, second], set(), [], config)
+    db.commit()
+    accepted, appealed = db.scalars(
+        select(PetrobrasGlosa).order_by(PetrobrasGlosa.id)
+    ).all()
+    accepted.recurso_estado = 'aceito_portal'
+    appealed.recurso_estado = 'enviado_portal'
+    db.commit()
+    with petrobras_client(db, config) as client:
+        listed = client.get('/app_glosas/petrobras/demonstrativos').json()
+    glosa = Decimal(str(accepted.valor_glosa))
+    other = Decimal(str(appealed.valor_glosa))
+    assert Decimal(str(listed['valor_total_tratado'])) == glosa + other
+    assert Decimal(str(listed['valor_total_acatado'])) == glosa
+    assert Decimal(str(listed['valor_total_recursado'])) == other
+
+
 def test_internal_acato_counts_as_treated_and_can_be_removed(
     db, protocol, config, source
 ):
