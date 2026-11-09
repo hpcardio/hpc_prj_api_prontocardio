@@ -463,7 +463,7 @@ def test_consulta_oracle_traz_campos_da_planilha_do_mv():
                 'observacao': 'Pagar com boleto',
                 'valor_desconto': Decimal('12.346'),
                 'valor_acrescimo': Decimal('1'),
-                'data_baixa': datetime(2026, 6, 10, 0, 0),
+                'data_pagamento_mv': datetime(2026, 6, 10, 0, 0),
             },
             {**base, 'codigo_parcela_pk': 100},
         ]
@@ -474,8 +474,8 @@ def test_consulta_oracle_traz_campos_da_planilha_do_mv():
     assert com['observacao'] == 'Pagar com boleto'
     assert com['valor_desconto'] == Decimal('12.35')
     assert com['valor_acrescimo'] == Decimal('1.00')
-    assert com['data_baixa'] == date(2026, 6, 10)
+    assert com['data_pagamento_mv'] == date(2026, 6, 10)
     assert sem['observacao'] is None
     assert sem['valor_desconto'] is None
     assert sem['valor_acrescimo'] is None
-    assert sem['data_baixa'] is None
+    assert sem['data_pagamento_mv'] is None

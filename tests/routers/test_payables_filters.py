@@ -292,8 +292,8 @@ def test_titles_bring_the_mv_spreadsheet_fields(data, monkeypatch):
         'MAX(v.observacao) AS observacao',
         'MAX(v.valor_desconto) AS valor_desconto',
         'MAX(v.valor_acrescimo) AS valor_acrescimo',
-        'MAX(data_baixa) AS data_baixa',
-        'pg.data_baixa',
+        'MAX(data_de_pagamento) AS data_pagamento_mv',
+        'pg.data_pagamento_mv',
     ):
         assert column in sql
     title = dict(
@@ -304,7 +304,7 @@ def test_titles_bring_the_mv_spreadsheet_fields(data, monkeypatch):
         data_vencimento=date(2026, 6, 1),
         data_emissao=date(2026, 5, 1),
         data_lancamento=date(2026, 5, 2),
-        data_baixa=date(2026, 6, 3),
+        data_pagamento_mv=date(2026, 6, 3),
         observacao='=Parcela renegociada',
         valor_desconto=Decimal('10.5'),
         valor_acrescimo=None,
@@ -317,7 +317,7 @@ def test_titles_bring_the_mv_spreadsheet_fields(data, monkeypatch):
     )
     result = listing(fornecedores_ids='10')
     exported = result['fornecedores'][0]['titulos'][0]
-    assert exported['data_baixa'] == '2026-06-03'
+    assert exported['data_pagamento_mv'] == '2026-06-03'
     assert exported['observacao'] == '=Parcela renegociada'
     assert exported['valor_desconto'] == '10.50'
     assert exported['valor_acrescimo'] is None
