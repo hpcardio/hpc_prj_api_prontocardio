@@ -228,6 +228,12 @@ SELECT rp.cd_repasse,
            AS cd_prestador_destino,
        MAX(NVL(pd.nm_prestador, po.nm_prestador))
            AS nm_prestador_destino,
+       MAX(r.ds_repasse) AS ds_repasse_manual,
+       MAX(r.dt_repasse) AS dt_repasse_manual,
+       CASE
+           WHEN COUNT(rc.cd_repasse_consolidado) = 0 THEN 1
+           ELSE 0
+       END AS sn_manual,
        NVL(rc.cd_procedimento, rc.cd_pro_fat) AS cd_pro_fat,
        MAX(NVL(rc.ds_procedimento, rc.ds_pro_fat)) AS ds_procedimento,
        CASE
@@ -289,7 +295,8 @@ SELECT rc.cd_repasse_consolidado,
            ELSE 'NÃO INFORMADO'
        END AS tp_conta,
        rc.cd_remessa,
-       rf.nr_remessa_convenio,
+       NVL(rf.nr_remessa_convenio, TO_CHAR(rc.cd_remessa))
+           AS nr_remessa_convenio,
        NVL(rc.qt_lancamento, 1) AS quantidade,
        NVL(rc.vl_total_conta, 0) AS valor_bruto,
        NVL(rc.vl_glosa, 0) AS valor_desconto,
@@ -517,6 +524,36 @@ def _decimal(valor) -> Decimal:
     return Decimal(str(valor or 0)).quantize(Decimal('0.01'))
 
 
+def _parse_manual_repasse_description(descricao: str | None) -> dict:
+    texto = ' '.join(str(descricao or '').strip().lstrip(':').split())
+    prefixo, separador, sufixo = texto.rpartition('-')
+    if not separador:
+        return {
+            'procedimento': texto or 'Sem detalhamento',
+            'paciente': None,
+            'convenio': None,
+        }
+    corpo, separador, convenio = prefixo.rpartition('-')
+    if not separador or convenio.strip().upper() != 'SUS':
+        return {
+            'procedimento': texto or 'Sem detalhamento',
+            'paciente': None,
+            'convenio': None,
+        }
+    procedimento, separador, paciente = corpo.partition('-')
+    if not separador:
+        return {
+            'procedimento': corpo.strip() or 'Sem detalhamento',
+            'paciente': None,
+            'convenio': 'SUS',
+        }
+    return {
+        'procedimento': procedimento.strip() or 'Sem detalhamento',
+        'paciente': paciente.strip() or None,
+        'convenio': 'SUS',
+    }
+
+
 def _eh_teste_ergometrico(descricao: str | None) -> bool:
     texto = (descricao or '').upper()
     return 'TESTE ERGOMETRICO' in texto or 'TESTE ERGOMÉTRICO' in texto
@@ -614,6 +651,7 @@ def montar_preview(  # noqa: PLR0912
         .all()
     ]
     itens = []
+    detalhes_manuais = []
     excluidos_quantidade = 0
     excluidos_valor = Decimal('0')
     total = Decimal('0')
@@ -623,7 +661,16 @@ def montar_preview(  # noqa: PLR0912
         bruto = _decimal(row.get('valor_repasse'))
         desconto = _decimal(row.get('valor_desconto'))
         liquido = bruto - desconto
-        if _eh_teste_ergometrico(row.get('ds_procedimento')):
+        manual = bool(row.get('sn_manual'))
+        manual_info = _parse_manual_repasse_description(
+            row.get('ds_repasse_manual')
+        ) if manual else None
+        procedimento = (
+            manual_info['procedimento']
+            if manual_info
+            else row.get('ds_procedimento') or 'Sem detalhamento'
+        )
+        if _eh_teste_ergometrico(procedimento):
             excluidos_quantidade += int(row.get('quantidade') or 0)
             excluidos_valor += liquido
             continue
@@ -633,12 +680,40 @@ def montar_preview(  # noqa: PLR0912
             'codigo_prestador': row.get('cd_prestador_destino'),
             'prestador': row.get('nm_prestador_destino'),
             'codigo_procedimento': row.get('cd_pro_fat'),
-            'procedimento': row.get('ds_procedimento') or 'Sem detalhamento',
+            'procedimento': procedimento,
             'quantidade': int(row.get('quantidade') or 0),
             'valor_bruto': bruto,
             'valor_desconto': desconto,
             'valor_liquido': liquido,
         })
+        if manual:
+            detalhes_manuais.append({
+                'codigo_repasse_consolidado': (
+                    f"manual:{row.get('cd_repasse')}"
+                ),
+                'codigo_repasse': row.get('cd_repasse'),
+                'codigo_prestador': row.get('cd_prestador_destino'),
+                'prestador': row.get('nm_prestador_destino'),
+                'codigo_atendimento': None,
+                'paciente': manual_info['paciente'],
+                'data_atendimento': row.get('dt_repasse_manual'),
+                'codigo_procedimento': None,
+                'procedimento': procedimento,
+                'codigo_convenio': None,
+                'convenio': manual_info['convenio'],
+                'atividade': None,
+                'tipo_conta': None,
+                'codigo_remessa': None,
+                'numero_remessa': None,
+                'situacao_remessa': 'outside',
+                'quantidade': int(row.get('quantidade') or 0),
+                'valor_bruto': _decimal(row.get('valor_repasse')),
+                'valor_desconto': desconto,
+                'valor_liquido': liquido,
+                'percentual_repasse': None,
+                'origem_manual': True,
+                'descricao_manual': row.get('ds_repasse_manual'),
+            })
     detail_rows = [
         dict(row)
         for row in session
@@ -689,6 +764,7 @@ def montar_preview(  # noqa: PLR0912
             atendimentos_teste_ergometrico.append(atendimento)
         else:
             atendimentos.append(atendimento)
+    atendimentos.extend(detalhes_manuais)
     particulares_laudo = []
     if incluir_particulares_laudo and cd_prestador is None:
         linhas_particulares = [
