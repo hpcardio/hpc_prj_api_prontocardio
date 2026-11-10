@@ -240,11 +240,13 @@ parcelas AS (
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao,
            MAX(v.classificacao) AS classificacao,
-           -- The view defines the payment date; it may exist without a
-           -- registered payment row, so it is read from every row of the
-           -- installment (reversed payments excluded).
-           MAX(CASE WHEN v.data_de_estorno IS NULL
-                    THEN v.data_de_pagamento END) AS data_pagamento_mv
+           -- Payment date of the installment (ITCON_PAG.DT_PREVISTA_PAG);
+           -- the PAGCON_PAG date only when the installment has none.
+           COALESCE(
+               MAX(v.data_prevista_de_pagamento),
+               MAX(CASE WHEN v.data_de_estorno IS NULL
+                        THEN v.data_de_pagamento END)
+           ) AS data_pagamento_mv
      FROM dbamv.HPC_V_CONTAS_A_PAGAR v
      WHERE v.codigo_do_fornecedor IN :codigos_fornecedor
         OR ({REFERENCIA_SEM_CADASTRO_SQL}) IN :referencias_sem_cadastro
