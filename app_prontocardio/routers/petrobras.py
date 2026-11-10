@@ -3,6 +3,7 @@
 import base64
 import binascii
 import hashlib
+from collections import Counter
 from datetime import date
 from decimal import Decimal
 from pathlib import PurePath
@@ -36,6 +37,7 @@ from app_prontocardio.services.petrobras_appeals import (
     send_protocol_appeal,
 )
 from app_prontocardio.services.petrobras_config import PetrobrasConfig
+from app_prontocardio.services.petrobras_manual_link import guide_summary
 from app_prontocardio.services.petrobras_match import (
     GUIDE_FIELD,
     GUIDE_ONLY_SCOPE,
@@ -47,8 +49,10 @@ from app_prontocardio.services.petrobras_portal_status import (
     sync_portal_situation,
 )
 from app_prontocardio.services.petrobras_sync import (
+    MANUAL_KEY_EVENT,
     event,
     guide_senhas,
+    manual_keys,
     matching_source,
     synchronize,
     synchronize_competencia,
@@ -442,8 +446,12 @@ def glosa_terms(db, rows):
 def with_guide_senha(  # noqa: PLR0913 - page-level lookups
     row, senhas, accepted=None, terms=None, table_codes=frozenset()
 ):
-    """Public row plus the senha of its guide, when the guide has only one."""
-    source = matching_source(row.fonte or {}, senhas)
+    """Public row plus the senha of its guide, when the guide has only one.
+
+    Shows the payer's senha; a key typed in the manual association is used
+    only to find the MV account.
+    """
+    source = matching_source(row.fonte or {}, senhas, manual=False)
     acato = (accepted or {}).get(row.id)
     return {
         **public(row, table_codes),
@@ -658,6 +666,146 @@ def match_all(db: DB, config: Config, user: Writer):
         ).all()
     )
     return {'conferidos': len(ids), 'alterados': changed, 'situacao': totals}
+
+
+MAX_PENDING_ITEMS = 5000
+
+
+def pending_filters(config):
+    """Items the Follow-Up shows that are still not linked to the MV."""
+    return [
+        PetrobrasProtocolo.prestador == config.prestador_cnpj,
+        PetrobrasGlosa.presente_na_fonte.is_(True),
+        PetrobrasGlosa.cruzamento != 'conciliado',
+        ~superseded_by_reissue(),
+        ~detailed_by_analysis(),
+    ]
+
+
+@router.get('/vinculos-pendentes')
+def pending_links(  # noqa: PLR0913 - independent HTTP query parameters
+    db: DB,
+    config: Config,
+    user: User,
+    protocolo: str = Query('', max_length=20),
+    lote: str = Query('', max_length=100),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Unlinked guides, why each one failed and the MV key it needs."""
+    filters = pending_filters(config)
+    if protocolo.strip():
+        filters.append(PetrobrasProtocolo.numero == protocolo.strip())
+    if lote.strip():
+        filters.append(
+            PetrobrasGlosa.fonte['lote'].as_string() == lote.strip()
+        )
+    rows = db.scalars(
+        select(PetrobrasGlosa)
+        .join(PetrobrasProtocolo)
+        .where(*filters)
+        .order_by(
+            PetrobrasProtocolo.numero.desc(),
+            PetrobrasGlosa.guia_prestador,
+            PetrobrasGlosa.id,
+        )
+        .limit(MAX_PENDING_ITEMS)
+    ).all()
+    senhas = guide_senhas(db, {r.protocolo_id for r in rows})
+    sources = {r.id: matching_source(r.fonte or {}, senhas) for r in rows}
+    guides = {}
+    for row in rows:
+        guides.setdefault((row.protocolo_id, row.guia_prestador), []).append(
+            row
+        )
+    summaries = [
+        guide_summary(
+            items,
+            sources,
+            senhas.manual.get((
+                (items[0].fonte or {}).get('protocolo'),
+                guide,
+            )),
+        )
+        for (_, guide), items in guides.items()
+    ]
+    return {
+        'total': len(summaries),
+        'offset': offset,
+        'limit': limit,
+        'truncado': len(rows) >= MAX_PENDING_ITEMS,
+        'resumo': {
+            'guias': len(summaries),
+            'itens': len(rows),
+            'valor_glosa': sum(
+                (s['valor_glosa'] for s in summaries), Decimal(0)
+            ),
+            'com_campos': sum(1 for s in summaries if s['campos']),
+        },
+        'guias': summaries[offset : offset + limit],
+    }
+
+
+class ManualKeyInput(BaseModel):
+    protocolo_id: int = Field(ge=1)
+    guia_prestador: str = Field(min_length=1, max_length=20)
+    senha: str | None = Field(None, max_length=20, pattern=r'^\S*$')
+    carteira: str | None = Field(None, max_length=30, pattern=r'^\S*$')
+
+
+@router.put('/vinculos-pendentes')
+def save_manual_key(
+    body: ManualKeyInput, db: DB, config: Config, user: Writer
+):
+    """Store the guide's MV key and re-run the automatic item link.
+
+    An omitted field keeps the key already typed; an empty one falls back
+    to the payer's data. Nothing is kept when the Oracle lookup fails.
+    """
+    rows = db.scalars(
+        select(PetrobrasGlosa)
+        .join(PetrobrasProtocolo)
+        .where(
+            PetrobrasProtocolo.prestador == config.prestador_cnpj,
+            PetrobrasGlosa.protocolo_id == body.protocolo_id,
+            PetrobrasGlosa.guia_prestador == body.guia_prestador,
+        )
+        .order_by(PetrobrasGlosa.id)
+        .with_for_update(of=PetrobrasGlosa)
+    ).all()
+    if not rows:
+        raise HTTPException(404, 'Guia Petrobras não encontrada.')
+    number = db.get(PetrobrasProtocolo, body.protocolo_id).numero
+    typed = manual_keys(db, [body.protocolo_id]).get(
+        (number, body.guia_prestador), {}
+    )
+    key = {
+        f: (typed.get(f) or '') if value is None else value.strip()
+        for f, value in (('senha', body.senha), ('carteira', body.carteira))
+    }
+    for row in rows:
+        event(db, row, MANUAL_KEY_EVENT, key, user.id)
+    db.flush()
+    senhas = guide_senhas(db, [body.protocolo_id])
+    sources = {r.id: matching_source(r.fonte or {}, senhas) for r in rows}
+    try:
+        candidates = petrobras_oracle.candidates(
+            list(sources.values()), config
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            503, 'Oracle indisponível; nenhuma alteração foi salva.'
+        ) from None
+    for row in rows:
+        apply_match(db, config, row, sources[row.id], candidates, user.id)
+    db.commit()
+    situations = Counter(r.cruzamento for r in rows if r.presente_na_fonte)
+    return {
+        'itens': sum(situations.values()),
+        'conciliados': situations.get('conciliado', 0),
+        'situacao': dict(situations),
+    }
 
 
 class DraftInput(BaseModel):

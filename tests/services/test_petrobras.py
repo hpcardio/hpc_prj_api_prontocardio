@@ -3277,3 +3277,176 @@ def test_portal_situation_stops_on_budget_and_continues_from_the_cursor(
     assert rest['restantes'] == 0
     assert rest['demonstrativos'] == 2
     assert {r.recurso_estado for r in rows.values()} == {'enviado_portal'}
+
+
+def test_pending_links_explain_missing_senha_and_offer_only_its_field(
+    db, protocol, config, source
+):
+    import_rows(db, protocol, [{**source, 'senha': None}], set(), [], config)
+    db.commit()
+    with petrobras_client(db, config) as client:
+        data = client.get('/app_glosas/petrobras/vinculos-pendentes').json()
+    assert data['resumo']['guias'] == 1
+    (guide,) = data['guias']
+    assert guide['campos'] == ['senha']
+    assert [p['codigo'] for p in guide['pendencias']] == ['senha_ausente']
+    assert guide['guia_prestador'] == source['guia_prestador']
+    assert guide['chave_manual'] is None
+
+
+def test_pending_links_ask_wallet_when_it_diverges_from_mv(
+    db, protocol, config, source, candidate
+):
+    other = {**candidate, 'nr_carteira': '99999999'}
+    import_rows(db, protocol, [source], set(), [other], config)
+    db.commit()
+    with petrobras_client(db, config) as client:
+        (guide,) = client.get(
+            '/app_glosas/petrobras/vinculos-pendentes'
+        ).json()['guias']
+    assert guide['campos'] == ['carteira']
+    assert guide['pendencias'][0]['codigo'] == 'carteira_divergente'
+
+
+def test_manual_key_links_items_automatically_and_keeps_payer_data(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    import_rows(db, protocol, [{**source, 'senha': None}], set(), [], config)
+    db.commit()
+    seen = []
+
+    def loader(sources, _config):
+        seen.extend(s.get('senha') for s in sources)
+        return [candidate]
+
+    monkeypatch.setattr(petrobras.petrobras_oracle, 'candidates', loader)
+    row = db.scalar(select(PetrobrasGlosa))
+    with petrobras_client(db, config) as client:
+        data = client.put(
+            '/app_glosas/petrobras/vinculos-pendentes',
+            json={
+                'protocolo_id': protocol.id,
+                'guia_prestador': row.guia_prestador,
+                'senha': 'P0123',
+            },
+        ).json()
+        assert data == {
+            'itens': 1,
+            'conciliados': 1,
+            'situacao': {'conciliado': 1},
+        }
+        pending = client.get('/app_glosas/petrobras/vinculos-pendentes').json()
+        listed = client.get('/app_glosas/petrobras/demonstrativos').json()
+    assert seen == ['P0123']
+    assert pending['guias'] == []
+    db.refresh(row)
+    assert row.cruzamento == 'conciliado'
+    assert row.fonte.get('senha') is None
+    assert 'Chave do MV informada na Associação Manual.' in row.divergencias
+    # Follow-Up shows the payer's senha, not the typed MV key.
+    assert listed['items'][0]['senha_guia'] is None
+    # A later sync keeps using the typed key.
+    import_rows(
+        db, protocol, [{**source, 'senha': None}], set(), [candidate], config
+    )
+    db.commit()
+    db.refresh(row)
+    assert row.cruzamento == 'conciliado'
+
+
+def test_manual_key_replaces_senha_not_found_in_mv(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    import_rows(db, protocol, [{**source, 'senha': 'A1'}], set(), [], config)
+    db.commit()
+    monkeypatch.setattr(
+        petrobras.petrobras_oracle, 'candidates', lambda s, c: [candidate]
+    )
+    row = db.scalar(select(PetrobrasGlosa))
+    with petrobras_client(db, config) as client:
+        (guide,) = client.get(
+            '/app_glosas/petrobras/vinculos-pendentes'
+        ).json()['guias']
+        assert guide['pendencias'][0]['codigo'] == 'senha_nao_localizada'
+        assert guide['campos'] == ['senha']
+        data = client.put(
+            '/app_glosas/petrobras/vinculos-pendentes',
+            json={
+                'protocolo_id': protocol.id,
+                'guia_prestador': row.guia_prestador,
+                'senha': 'P0123',
+            },
+        ).json()
+    assert data['conciliados'] == 1
+
+
+def test_manual_key_is_not_saved_when_oracle_fails(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, monkeypatch
+):
+    import_rows(db, protocol, [{**source, 'senha': None}], set(), [], config)
+    db.commit()
+
+    def unavailable(*_):
+        raise RuntimeError('offline')
+
+    monkeypatch.setattr(petrobras.petrobras_oracle, 'candidates', unavailable)
+    row = db.scalar(select(PetrobrasGlosa))
+    with petrobras_client(db, config) as client:
+        response = client.put(
+            '/app_glosas/petrobras/vinculos-pendentes',
+            json={
+                'protocolo_id': protocol.id,
+                'guia_prestador': row.guia_prestador,
+                'senha': 'P0123',
+            },
+        )
+    assert response.status_code == 503
+    assert not db.scalars(
+        select(PetrobrasEvento).where(PetrobrasEvento.tipo == 'chave_manual')
+    ).all()
+
+
+def test_manual_key_requires_writer_and_existing_guide(db, protocol, config):
+    body = {'protocolo_id': protocol.id, 'guia_prestador': 'X', 'senha': 'S'}
+    with petrobras_client(db, config, perfil='leitura') as client:
+        assert (
+            client.put(
+                '/app_glosas/petrobras/vinculos-pendentes', json=body
+            ).status_code
+            == 403
+        )
+    with petrobras_client(db, config) as client:
+        assert (
+            client.put(
+                '/app_glosas/petrobras/vinculos-pendentes', json=body
+            ).status_code
+            == 404
+        )
+
+
+def test_manual_wallet_keeps_the_senha_typed_before(  # noqa: PLR0913 - pytest fixtures
+    db, protocol, config, source, candidate, monkeypatch
+):
+    import_rows(
+        db,
+        protocol,
+        [{**source, 'senha': None, 'carteira': '77'}],
+        set(),
+        [],
+        config,
+    )
+    db.commit()
+    monkeypatch.setattr(
+        petrobras.petrobras_oracle, 'candidates', lambda s, c: [candidate]
+    )
+    row = db.scalar(select(PetrobrasGlosa))
+    url = '/app_glosas/petrobras/vinculos-pendentes'
+    guide = {'protocolo_id': protocol.id, 'guia_prestador': row.guia_prestador}
+    with petrobras_client(db, config) as client:
+        first = client.put(url, json={**guide, 'senha': 'P0123'}).json()
+        assert first['conciliados'] == 0
+        (pending,) = client.get(url).json()['guias']
+        assert pending['campos'] == ['carteira']
+        assert pending['chave_manual']['senha'] == 'P0123'
+        second = client.put(url, json={**guide, 'carteira': '00000001'})
+    assert second.json()['conciliados'] == 1
