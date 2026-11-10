@@ -292,10 +292,12 @@ def test_titles_bring_the_mv_spreadsheet_fields(data, monkeypatch):
         'MAX(v.observacao) AS observacao',
         'MAX(v.valor_desconto) AS valor_desconto',
         'MAX(v.valor_acrescimo) AS valor_acrescimo',
-        'MAX(data_de_pagamento) AS data_pagamento_mv',
-        'pg.data_pagamento_mv',
+        'THEN v.data_de_pagamento END) AS data_pagamento_mv',
+        'p.data_pagamento_mv',
     ):
         assert column in sql
+    # Not only installments with a registered payment row.
+    assert 'MAX(data_de_pagamento)' not in sql
     title = dict(
         codigo_fornecedor=10,
         nome_fornecedor='Fornecedor 10',

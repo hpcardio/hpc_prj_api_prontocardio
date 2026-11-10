@@ -210,16 +210,14 @@ ORACLE_TITULOS_QUERY = text(f"""
 WITH pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
-           MAX(NVL(valor_pago, 0)) AS valor_pago,
-           MAX(data_de_pagamento) AS data_pagamento_mv
+           MAX(NVL(valor_pago, 0)) AS valor_pago
       FROM dbamv.HPC_V_CONTAS_A_PAGAR
      WHERE codigo_pagamento_pk IS NOT NULL
        AND data_de_estorno IS NULL
      GROUP BY codigo_parcela_pk, codigo_pagamento_pk
 ),
 pagamentos AS (
-    SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago,
-           MAX(data_pagamento_mv) AS data_pagamento_mv
+    SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago
       FROM pagamentos_distintos
      GROUP BY codigo_parcela_pk
 ),
@@ -241,7 +239,12 @@ parcelas AS (
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao,
-           MAX(v.classificacao) AS classificacao
+           MAX(v.classificacao) AS classificacao,
+           -- The view defines the payment date; it may exist without a
+           -- registered payment row, so it is read from every row of the
+           -- installment (reversed payments excluded).
+           MAX(CASE WHEN v.data_de_estorno IS NULL
+                    THEN v.data_de_pagamento END) AS data_pagamento_mv
      FROM dbamv.HPC_V_CONTAS_A_PAGAR v
      WHERE v.codigo_do_fornecedor IN :codigos_fornecedor
         OR ({REFERENCIA_SEM_CADASTRO_SQL}) IN :referencias_sem_cadastro
@@ -267,7 +270,7 @@ SELECT p.codigo_fornecedor,
        p.tipo_quitacao,
        p.classificacao,
        NVL(pg.valor_pago, 0) AS valor_honrado_oracle,
-       pg.data_pagamento_mv
+       p.data_pagamento_mv
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
  WHERE p.tipo_quitacao IN (
