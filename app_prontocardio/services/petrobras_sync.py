@@ -145,9 +145,51 @@ def import_rows(  # noqa: PLR0913 - explicit source, Oracle and audit context
     return count
 
 
+MANUAL_KEY_EVENT = 'chave_manual'
+MANUAL_KEY_FIELDS = ('senha', 'carteira')
+
+
+class GuideKeys(defaultdict):
+    """Senhas per guide plus the MV keys typed in the manual association."""
+
+    def __init__(self):
+        super().__init__(set)
+        self.manual = {}
+
+
+def manual_keys(session, protocol_ids):
+    """{(protocol, provider guide): MV key}; the latest event of a guide wins.
+
+    Stored as audit events of the guide items, so the payer source stays
+    unchanged and every change keeps its author and time.
+    """
+    rows = session.execute(
+        select(
+            PetrobrasProtocolo.numero,
+            PetrobrasGlosa.guia_prestador,
+            PetrobrasEvento.dados,
+        )
+        .join(PetrobrasGlosa, PetrobrasGlosa.id == PetrobrasEvento.glosa_id)
+        .join(PetrobrasProtocolo)
+        .where(
+            PetrobrasProtocolo.id.in_(list(protocol_ids)),
+            PetrobrasEvento.tipo == MANUAL_KEY_EVENT,
+        )
+        .order_by(PetrobrasEvento.id)
+    )
+    return {
+        (numero, guia): {
+            f: str((dados or {}).get(f) or '').strip()
+            for f in MANUAL_KEY_FIELDS
+        }
+        for numero, guia, dados in rows
+    }
+
+
 def guide_senhas(session, protocol_ids, sources=()):
     """Senha is a guide attribute: same protocol + same provider guide."""
-    found = defaultdict(set)
+    found = GuideKeys()
+    found.manual = manual_keys(session, protocol_ids)
     stmt = (
         select(
             PetrobrasProtocolo.numero,
@@ -170,17 +212,21 @@ def guide_senhas(session, protocol_ids, sources=()):
     return found
 
 
-def matching_source(source, senhas):
+def matching_source(source, senhas, manual=True):
     """Source used only for the Oracle key; the payer data stays unchanged.
 
     A missing senha is taken from the same guide in another demonstrativo of
-    the protocol, and only when that guide has exactly one senha.
+    the protocol, and only when that guide has exactly one senha. A key typed
+    in the manual association replaces the payer's senha/carteira.
     """
+    guide = (source.get('protocolo'), source.get('guia_prestador'))
+    typed = getattr(senhas, 'manual', {}).get(guide) if manual else None
+    typed = {f: v for f, v in (typed or {}).items() if v}
+    if typed:
+        source = {**source, **typed, 'chave_manual': True}
     if str(source.get('senha') or '').strip():
         return source
-    options = senhas.get(
-        (source.get('protocolo'), source.get('guia_prestador')), set()
-    )
+    options = senhas.get(guide, set())
     if len(options) != 1:
         return source
     return {**source, 'senha': next(iter(options)), 'senha_da_guia': True}

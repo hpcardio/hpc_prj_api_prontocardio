@@ -52,6 +52,7 @@ def _refine(rows, source):
 
 
 GUIDE_ONLY_SCOPE = 'guia_pagamento'
+MANUAL_KEY_NOTE = 'Chave do MV informada na Associação Manual.'
 ACCOUNT_FIELDS = (
     'cd_convenio',
     'nm_convenio',
@@ -129,7 +130,7 @@ def reconcile_guide(source, candidates, convenio_id):
             Decimal(0),
         )
     )
-    diffs = []
+    diffs = [MANUAL_KEY_NOTE] if source.get('chave_manual') else []
     if norm(source.get(GUIDE_FIELD)) != norm(rows[0].get('nr_guia')):
         diffs.append('Senha conferida sem zeros à esquerda.')
     return _result('conciliado', oracle, len(rows), diffs)
@@ -191,6 +192,8 @@ def reconcile(source, candidates, convenio_id):  # noqa: PLR0911 - explicit cons
         diffs.append(
             'Senha obtida da mesma guia em outro demonstrativo do protocolo.'
         )
+    if source.get('chave_manual'):
+        diffs.append(MANUAL_KEY_NOTE)
     if norm(source.get(GUIDE_FIELD)) != norm(row.get('nr_guia')):
         diffs.append('Senha conferida sem zeros à esquerda.')
     for sf, of in [('valor_informado', 'valor'), ('quantidade', 'quantidade')]:
