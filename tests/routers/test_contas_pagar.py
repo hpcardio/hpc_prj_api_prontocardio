@@ -818,3 +818,91 @@ def test_listagem_filtra_fornecedores_pelo_card_sem_alterar_resumo(
     )
     assert filtrado['resumo'] == padrao['resumo']
     assert padrao['resumo']['vencidos_dia_anterior'] == '10.00'
+
+
+def test_consultas_so_excluem_provisoes_de_oc_quando_pedido():
+    oracle = FakeSession([[], [], [], []])
+    contas_pagar._consultar_oracle(oracle)
+    contas_pagar._consultar_oracle(oracle, excluir_provisoes_oc=True)
+    contas_pagar._consultar_titulos_oracle(oracle, [1])
+    contas_pagar._consultar_titulos_oracle(
+        oracle, [1], excluir_provisoes_oc=True
+    )
+
+    for sql, _ in oracle.executions:
+        assert 'MAX(v.descricao_do_processo_prov) AS processo_provisao' in sql
+        assert contas_pagar.FILTRO_PROVISAO_OC_SQL in sql
+    assert [p['excluir_provisoes_oc'] for _, p in oracle.executions] == [
+        0,
+        1,
+        0,
+        1,
+    ]
+    # Only purchase-order provisions; document provisions stay listed.
+    assert {p['processo_provisao_oc'] for _, p in oracle.executions} == {
+        'Contas a Pagar de Previsão de Materiais'
+    }
+
+
+def test_listagem_repassa_exclusao_de_provisoes_oc_a_todas_consultas(
+    monkeypatch,
+):
+    fornecedor = dict(
+        codigo_fornecedor=1,
+        nome_fornecedor='Fornecedor',
+        dias_atraso=5,
+        vencimento_mais_antigo=date(2026, 1, 1),
+        titulos=[],
+        titulos_vencidos=1,
+        titulos_correntes=0,
+        **{
+            campo: Decimal('10')
+            for campo in (
+                'valor_total',
+                'valor_total_vencido',
+                'valor_total_honrado',
+                'saldo_a_pagar',
+                'valor_a_pagar_ate_hoje',
+                'valor_corrente',
+                'novos_vencidos_7d',
+            )
+        },
+    )
+    consulta = Mock(side_effect=lambda *a, **k: [deepcopy(fornecedor)])
+    detalhes = Mock(return_value=[])
+    monkeypatch.setattr(contas_pagar, '_consultar_oracle', consulta)
+    monkeypatch.setattr(contas_pagar, '_consultar_titulos_oracle', detalhes)
+    monkeypatch.setattr(
+        contas_pagar,
+        '_pagamentos_manuais',
+        lambda s: {99: [{'codigo_fornecedor': 1}]},
+    )
+    monkeypatch.setattr(contas_pagar, '_opcoes_classificacao', lambda s: [])
+    monkeypatch.setattr(contas_pagar, '_tratamentos', lambda s: {})
+    monkeypatch.setattr(contas_pagar, '_registrar_snapshot', Mock())
+    monkeypatch.setattr(contas_pagar, '_historico', lambda s: [])
+    monkeypatch.setattr(
+        contas_pagar, '_valor_vencido_inicio_acompanhamento', lambda s: None
+    )
+
+    contas_pagar.listar_contas_pagar(
+        _=None,
+        session=None,
+        oracle=None,
+        q=None,
+        criticidade='todos',
+        status=None,
+        page=1,
+        page_size=20,
+        exportar=True,
+        incluir_opcoes=True,
+        data_inicio=date(2026, 1, 1),
+        faixa_atraso='5',
+        excluir_provisoes_oc=True,
+    )
+
+    # Main query, picker options, manual payments, age band and titles.
+    assert consulta.call_count == 2
+    assert detalhes.call_count == 2
+    for chamada in consulta.call_args_list + detalhes.call_args_list:
+        assert chamada.kwargs['excluir_provisoes_oc'] is True
