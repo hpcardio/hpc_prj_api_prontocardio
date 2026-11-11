@@ -175,13 +175,21 @@ saldos AS (
            p.referencia_sem_cadastro,
            p.nome_fornecedor,
            p.data_vencimento,
-           p.valor_duplicata,
-           LEAST(p.valor_duplicata, NVL(pg.valor_pago, 0)) AS valor_honrado,
-           GREATEST(p.valor_duplicata - NVL(pg.valor_pago, 0), 0) AS saldo
+           -- Paid titles only make the supplier listable: every amount
+           -- below counts open titles alone.
+           CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
+                ELSE p.valor_duplicata END AS valor_duplicata,
+           CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
+                ELSE LEAST(p.valor_duplicata, NVL(pg.valor_pago, 0))
+           END AS valor_honrado,
+           CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
+                ELSE GREATEST(p.valor_duplicata - NVL(pg.valor_pago, 0), 0)
+           END AS saldo
       FROM parcelas p
       LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
-     WHERE p.tipo_quitacao IN (
-           'previsto', 'comprometido', 'parcialmente pago'
+     WHERE (
+           p.tipo_quitacao IN ('previsto', 'comprometido', 'parcialmente pago')
+           OR (:incluir_pagos = 1 AND p.tipo_quitacao = 'quitado')
      )
        AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
        AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
@@ -202,7 +210,7 @@ SELECT codigo_fornecedor,
        COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_correntes
   FROM saldos
  GROUP BY codigo_fornecedor, referencia_sem_cadastro
-HAVING SUM(saldo) > 0
+HAVING SUM(saldo) > 0 OR :incluir_pagos = 1
 """)
 
 
@@ -312,6 +320,7 @@ def _consultar_oracle(
     data_inicio: date | None = None,
     data_fim: date | None = None,
     classificacao: str | None = None,
+    incluir_pagos: bool = False,
 ) -> list[dict]:
     try:
         rows = read_payables_rows(
@@ -322,6 +331,7 @@ def _consultar_oracle(
                 'data_fim': data_fim,
                 'hoje': _hoje_hospital(),
                 'classificacao': classificacao,
+                'incluir_pagos': 1 if incluir_pagos else 0,
             },
         )
     except SQLAlchemyError as exc:
@@ -564,6 +574,8 @@ def _agrupar_fornecedores(
 
 def _chave_prioridade_fornecedor(item: dict):
     return (
+        # Suppliers with nothing left to pay (paid titles only) come last.
+        item.get('saldo_a_pagar', 1) <= 0,
         -(item.get('nivel_criticidade') or (5 if item['critico'] else 1)),
         -item['dias_atraso'],
         -item['valor_total_vencido'],
@@ -871,11 +883,12 @@ def listar_contas_pagar(
         data_inicio=data_inicio,
         data_fim=data_fim,
         classificacao=classificacao,
+        incluir_pagos=incluir_pagos,
     )
     opcoes = []
     if incluir_opcoes:
         base_opcoes = (
-            _consultar_oracle(oracle)
+            _consultar_oracle(oracle, incluir_pagos=incluir_pagos)
             if data_inicio or data_fim or classificacao
             else fornecedores
         )
@@ -979,7 +992,9 @@ def listar_contas_pagar(
     )
 
     filtrados = _filtrar_fornecedores(
-        vencidos,
+        # With incluir_pagos, suppliers whose titles are all paid are listed
+        # too (after the open ones); the summary above stays on open titles.
+        fornecedores if incluir_pagos else vencidos,
         q,
         criticidade,
         status,
