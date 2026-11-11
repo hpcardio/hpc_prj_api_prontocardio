@@ -175,13 +175,21 @@ saldos AS (
            p.referencia_sem_cadastro,
            p.nome_fornecedor,
            p.data_vencimento,
-           p.valor_duplicata,
-           LEAST(p.valor_duplicata, NVL(pg.valor_pago, 0)) AS valor_honrado,
-           GREATEST(p.valor_duplicata - NVL(pg.valor_pago, 0), 0) AS saldo
+           -- Paid titles only make the supplier listable: every amount
+           -- below counts open titles alone.
+           CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
+                ELSE p.valor_duplicata END AS valor_duplicata,
+           CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
+                ELSE LEAST(p.valor_duplicata, NVL(pg.valor_pago, 0))
+           END AS valor_honrado,
+           CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
+                ELSE GREATEST(p.valor_duplicata - NVL(pg.valor_pago, 0), 0)
+           END AS saldo
       FROM parcelas p
       LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
-     WHERE p.tipo_quitacao IN (
-           'previsto', 'comprometido', 'parcialmente pago'
+     WHERE (
+           p.tipo_quitacao IN ('previsto', 'comprometido', 'parcialmente pago')
+           OR (:incluir_pagos = 1 AND p.tipo_quitacao = 'quitado')
      )
        AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
        AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
@@ -198,11 +206,12 @@ SELECT codigo_fornecedor,
        SUM(CASE WHEN data_vencimento >= TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_corrente,
        MIN(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN data_vencimento END) AS vencimento_mais_antigo,
        SUM(CASE WHEN data_vencimento BETWEEN TRUNC(SYSDATE) - 6 AND TRUNC(SYSDATE) - 1 THEN saldo ELSE 0 END) AS novos_vencidos_7d,
+       SUM(CASE WHEN data_vencimento = TRUNC(SYSDATE) - 1 THEN saldo ELSE 0 END) AS vencidos_dia_anterior,
        COUNT(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_vencidos,
        COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_correntes
   FROM saldos
  GROUP BY codigo_fornecedor, referencia_sem_cadastro
-HAVING SUM(saldo) > 0
+HAVING SUM(saldo) > 0 OR :incluir_pagos = 1
 """)
 
 
@@ -210,16 +219,14 @@ ORACLE_TITULOS_QUERY = text(f"""
 WITH pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
-           MAX(NVL(valor_pago, 0)) AS valor_pago,
-           MAX(data_de_pagamento) AS data_pagamento_mv
+           MAX(NVL(valor_pago, 0)) AS valor_pago
       FROM dbamv.HPC_V_CONTAS_A_PAGAR
      WHERE codigo_pagamento_pk IS NOT NULL
        AND data_de_estorno IS NULL
      GROUP BY codigo_parcela_pk, codigo_pagamento_pk
 ),
 pagamentos AS (
-    SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago,
-           MAX(data_pagamento_mv) AS data_pagamento_mv
+    SELECT codigo_parcela_pk, SUM(valor_pago) AS valor_pago
       FROM pagamentos_distintos
      GROUP BY codigo_parcela_pk
 ),
@@ -241,7 +248,12 @@ parcelas AS (
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao,
-           MAX(v.classificacao) AS classificacao
+           MAX(v.classificacao) AS classificacao,
+           -- The view defines the payment date; it may exist without a
+           -- registered payment row, so it is read from every row of the
+           -- installment (reversed payments excluded).
+           MAX(CASE WHEN v.data_de_estorno IS NULL
+                    THEN v.data_de_pagamento END) AS data_pagamento_mv
      FROM dbamv.HPC_V_CONTAS_A_PAGAR v
      WHERE v.codigo_do_fornecedor IN :codigos_fornecedor
         OR ({REFERENCIA_SEM_CADASTRO_SQL}) IN :referencias_sem_cadastro
@@ -267,11 +279,13 @@ SELECT p.codigo_fornecedor,
        p.tipo_quitacao,
        p.classificacao,
        NVL(pg.valor_pago, 0) AS valor_honrado_oracle,
-       pg.data_pagamento_mv
+       p.data_pagamento_mv
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
- WHERE p.tipo_quitacao IN (
-       'previsto', 'comprometido', 'parcialmente pago'
+ WHERE (
+       p.tipo_quitacao IN ('previsto', 'comprometido', 'parcialmente pago')
+       -- Paid titles only on request (Contas Vencidas detail/export).
+       OR (:incluir_pagos = 1 AND p.tipo_quitacao = 'quitado')
  )
    AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
    AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
@@ -307,6 +321,7 @@ def _consultar_oracle(
     data_inicio: date | None = None,
     data_fim: date | None = None,
     classificacao: str | None = None,
+    incluir_pagos: bool = False,
 ) -> list[dict]:
     try:
         rows = read_payables_rows(
@@ -317,6 +332,7 @@ def _consultar_oracle(
                 'data_fim': data_fim,
                 'hoje': _hoje_hospital(),
                 'classificacao': classificacao,
+                'incluir_pagos': 1 if incluir_pagos else 0,
             },
         )
     except SQLAlchemyError as exc:
@@ -345,6 +361,9 @@ def _consultar_oracle(
             'dias_atraso': dias_atraso,
             'total_dias_vencidos': dias_atraso,
             'novos_vencidos_7d': _decimal(row['novos_vencidos_7d']),
+            'vencidos_dia_anterior': _decimal(
+                row.get('vencidos_dia_anterior')
+            ),
             'titulos_vencidos': int(row['titulos_vencidos'] or 0),
             'titulos_correntes': int(row['titulos_correntes'] or 0),
             'titulos': [],
@@ -358,6 +377,7 @@ def _consultar_titulos_oracle(
     data_inicio: date | None = None,
     data_fim: date | None = None,
     classificacao: str | None = None,
+    incluir_pagos: bool = False,
 ) -> list[dict]:
     if not codigos_fornecedor:
         return []
@@ -386,6 +406,7 @@ def _consultar_titulos_oracle(
                     'data_inicio': data_inicio,
                     'data_fim': data_fim,
                     'classificacao': classificacao,
+                    'incluir_pagos': 1 if incluir_pagos else 0,
                 },
             ))
     except SQLAlchemyError as exc:
@@ -486,6 +507,10 @@ def _agrupar_fornecedores(
         saldo = max(titulo['valor_total'] - valor_honrado, Decimal('0'))
         vencimento = titulo['data_vencimento']
         dias_vencidos = max((hoje - vencimento).days, 0) if vencimento else 0
+        if titulo.get('tipo_quitacao') == 'quitado':
+            # Settled in MV (discounts may leave paid < face value): no
+            # balance and no delay, so it never enters overdue totals.
+            saldo, dias_vencidos = Decimal('0'), 0
         titulo.update({
             'valor_honrado_manual': valor_manual,
             'valor_total_honrado': valor_honrado,
@@ -505,6 +530,7 @@ def _agrupar_fornecedores(
                 'valor_total_honrado': Decimal('0'),
                 'valor_corrente': Decimal('0'),
                 'novos_vencidos_7d': Decimal('0'),
+                'vencidos_dia_anterior': Decimal('0'),
                 'total_dias_vencidos': 0,
                 'dias_atraso': 0,
                 'vencimento_mais_antigo': None,
@@ -534,6 +560,8 @@ def _agrupar_fornecedores(
                 fornecedor['vencimento_mais_antigo'] = vencimento
             if vencimento >= hoje - timedelta(days=6):
                 fornecedor['novos_vencidos_7d'] += saldo
+            if vencimento == hoje - timedelta(days=1):
+                fornecedor['vencidos_dia_anterior'] += saldo
         elif saldo > 0:
             fornecedor['valor_corrente'] += saldo
             fornecedor['titulos_correntes'] += 1
@@ -541,6 +569,8 @@ def _agrupar_fornecedores(
     for fornecedor in resultado:
         fornecedor['titulos'].sort(
             key=lambda titulo: (
+                # Paid titles come after the open ones.
+                titulo.get('tipo_quitacao') == 'quitado',
                 -titulo['dias_vencidos'],
                 titulo['data_vencimento'] or date.max,
                 titulo['codigo_parcela'],
@@ -549,8 +579,54 @@ def _agrupar_fornecedores(
     return resultado
 
 
+def _fornecedor_compoe(item, componente, vencidos_dia_anterior):
+    """Whether the supplier contributes to the selected summary card."""
+    if vencidos_dia_anterior and item.get(
+        'vencidos_dia_anterior', Decimal('0')
+    ) <= 0:
+        return False
+    campo = {
+        'a_pagar': 'valor_a_pagar_ate_hoje',
+        'a_vencer': 'valor_corrente',
+        'vencida': 'valor_vencido',
+        'novos_7d': 'novos_vencidos_7d',
+        'pagar_agora': 'pagamento_imediato',
+        'saldo_negociar': 'saldo_negociar',
+    }.get(componente)
+    return campo is None or item[campo] > 0
+
+
+def _titulos_do_componente(titulos, componente, vencidos_dia_anterior):
+    """Open titles that make up the selected card (same date rules)."""
+    if not componente and not vencidos_dia_anterior:
+        return titulos
+    hoje = _hoje_hospital()
+    vencido = lambda v: v is not None and v < hoje  # noqa: E731
+    regras = {
+        'a_pagar': lambda v: v is not None and v <= hoje,
+        'a_vencer': lambda v: v is None or v >= hoje,
+        'vencida': vencido,
+        'novos_7d': lambda v: vencido(v) and v >= hoje - timedelta(days=6),
+        'saldo_negociar': vencido,
+    }
+    # 'pagar_agora' is a supplier amount: every open title stays visible.
+    regra = regras.get(componente, lambda v: True)
+    return [
+        titulo
+        for titulo in titulos
+        if titulo['saldo_a_pagar'] > 0
+        and regra(titulo['data_vencimento'])
+        and (
+            not vencidos_dia_anterior
+            or titulo['data_vencimento'] == hoje - timedelta(days=1)
+        )
+    ]
+
+
 def _chave_prioridade_fornecedor(item: dict):
     return (
+        # Suppliers with nothing left to pay (paid titles only) come last.
+        item.get('saldo_a_pagar', 1) <= 0,
         -(item.get('nivel_criticidade') or (5 if item['critico'] else 1)),
         -item['dias_atraso'],
         -item['valor_total_vencido'],
@@ -785,9 +861,19 @@ def _filtrar_fornecedores(
     status,
     codigos_selecionados,
     quadrante_compativel,
+    componente=None,
+    vencidos_dia_anterior=False,
 ):
     termo = (q or '').strip().casefold()
     filtrados = vencidos if quadrante_compativel else []
+    if componente or vencidos_dia_anterior:
+        # Summary card / day-before toggle: only suppliers (and their
+        # titles) that make up that amount.
+        filtrados = [
+            item
+            for item in filtrados
+            if _fornecedor_compoe(item, componente, vencidos_dia_anterior)
+        ]
     if codigos_selecionados:
         filtrados = [
             item
@@ -840,6 +926,17 @@ def listar_contas_pagar(
     incluir_opcoes: bool = False,
     incluir_titulos: bool = True,
     classificacao: Annotated[str | None, Query(max_length=100)] = None,
+    incluir_pagos: bool = False,
+    componente: Literal[
+        'a_pagar',
+        'a_vencer',
+        'vencida',
+        'novos_7d',
+        'pagar_agora',
+        'saldo_negociar',
+    ]
+    | None = None,
+    vencidos_dia_anterior: bool = False,
 ):
     classificacao = (classificacao or '').strip() or None
     if data_inicio and data_fim and data_inicio > data_fim:
@@ -857,11 +954,12 @@ def listar_contas_pagar(
         data_inicio=data_inicio,
         data_fim=data_fim,
         classificacao=classificacao,
+        incluir_pagos=incluir_pagos,
     )
     opcoes = []
     if incluir_opcoes:
         base_opcoes = (
-            _consultar_oracle(oracle)
+            _consultar_oracle(oracle, incluir_pagos=incluir_pagos)
             if data_inicio or data_fim or classificacao
             else fornecedores
         )
@@ -901,6 +999,7 @@ def listar_contas_pagar(
             'valor_total_honrado',
             'valor_corrente',
             'novos_vencidos_7d',
+            'vencidos_dia_anterior',
             'total_dias_vencidos',
             'dias_atraso',
             'vencimento_mais_antigo',
@@ -942,6 +1041,13 @@ def listar_contas_pagar(
         'novos_vencidos_7d': sum(
             (item['novos_vencidos_7d'] for item in vencidos), Decimal('0')
         ),
+        'vencidos_dia_anterior': sum(
+            (
+                item.get('vencidos_dia_anterior', Decimal('0'))
+                for item in vencidos
+            ),
+            Decimal('0'),
+        ),
         'pagamento_imediato': sum(
             (item['pagamento_imediato'] for item in vencidos), Decimal('0')
         ),
@@ -965,12 +1071,16 @@ def listar_contas_pagar(
     )
 
     filtrados = _filtrar_fornecedores(
-        vencidos,
+        # With incluir_pagos, suppliers whose titles are all paid are listed
+        # too (after the open ones); the summary above stays on open titles.
+        fornecedores if incluir_pagos else vencidos,
         q,
         criticidade,
         status,
         codigos_selecionados,
         quadrante_compativel,
+        componente=componente,
+        vencidos_dia_anterior=vencidos_dia_anterior,
     )
     filtrados, detalhes_filtrados = _filtrar_prioridade(
         filtrados,
@@ -1006,6 +1116,9 @@ def listar_contas_pagar(
             data_inicio=data_inicio,
             data_fim=data_fim,
             classificacao=classificacao,
+            # Lists paid titles beside the open ones; supplier totals and
+            # the priority filters above stay on open titles only.
+            incluir_pagos=incluir_pagos,
         )
         detalhes_pagina = {
             item['codigo_fornecedor']: item['titulos']
@@ -1014,7 +1127,11 @@ def listar_contas_pagar(
             )
         }
     for item in pagina:
-        item['titulos'] = detalhes_pagina.get(item['codigo_fornecedor'], [])
+        item['titulos'] = _titulos_do_componente(
+            detalhes_pagina.get(item['codigo_fornecedor'], []),
+            componente,
+            vencidos_dia_anterior,
+        )
         item['classificacoes'] = sorted({
             titulo.get('classificacao') or 'Sem classificação'
             for titulo in item['titulos']
@@ -1089,6 +1206,9 @@ def listar_contas_pagar(
             'valor_corrente': _serializar_decimal(item['valor_corrente']),
             'novos_vencidos_7d': _serializar_decimal(
                 item['novos_vencidos_7d']
+            ),
+            'vencidos_dia_anterior': _serializar_decimal(
+                item.get('vencidos_dia_anterior', Decimal('0'))
             ),
             'pagamento_imediato': _serializar_decimal(
                 item['pagamento_imediato']
