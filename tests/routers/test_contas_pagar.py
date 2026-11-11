@@ -479,3 +479,109 @@ def test_consulta_oracle_traz_campos_da_planilha_do_mv():
     assert sem['valor_desconto'] is None
     assert sem['valor_acrescimo'] is None
     assert sem['data_pagamento_mv'] is None
+
+
+def test_titulo_quitado_vem_sem_saldo_e_depois_dos_abertos(monkeypatch):
+    monkeypatch.setattr(
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 11, 11)
+    )
+    base = {
+        'codigo_fornecedor': 10,
+        'nome_fornecedor': 'Fornecedor',
+        'valor_total': Decimal('100'),
+    }
+    titulos = [
+        {
+            **base,
+            'codigo_parcela': 1,
+            'tipo_quitacao': 'quitado',
+            'data_vencimento': date(2026, 1, 10),
+            # Paid with a discount: the paid value is below face value.
+            'valor_honrado_oracle': Decimal('90'),
+        },
+        {
+            **base,
+            'codigo_parcela': 2,
+            'tipo_quitacao': 'previsto',
+            'data_vencimento': date(2026, 11, 1),
+            'valor_honrado_oracle': Decimal('0'),
+        },
+    ]
+
+    fornecedor = contas_pagar._agrupar_fornecedores(titulos, {})[0]
+
+    assert [t['codigo_parcela'] for t in fornecedor['titulos']] == [2, 1]
+    pago = fornecedor['titulos'][1]
+    assert pago['saldo_a_pagar'] == Decimal('0')
+    assert pago['dias_vencidos'] == 0
+    assert pago['valor_total_honrado'] == Decimal('90')
+    assert fornecedor['valor_total_vencido'] == Decimal('100')
+    assert fornecedor['saldo_a_pagar'] == Decimal('100')
+    assert fornecedor['titulos_vencidos'] == 1
+    assert fornecedor['dias_atraso'] == 10
+
+
+def test_consulta_titulos_so_traz_quitados_quando_pedido():
+    oracle = FakeSession([[], []])
+    contas_pagar._consultar_titulos_oracle(oracle, [10])
+    contas_pagar._consultar_titulos_oracle(oracle, [10], incluir_pagos=True)
+
+    sql = oracle.executions[0][0]
+    assert ":incluir_pagos = 1 AND p.tipo_quitacao = 'quitado'" in sql
+    assert [params['incluir_pagos'] for _, params in oracle.executions] == [
+        0,
+        1,
+    ]
+
+
+def test_listagem_repassa_incluir_pagos_so_aos_titulos(monkeypatch):
+    fornecedor = dict(
+        codigo_fornecedor=1,
+        nome_fornecedor='Fornecedor',
+        dias_atraso=5,
+        vencimento_mais_antigo=date(2026, 1, 1),
+        titulos=[],
+        titulos_vencidos=1,
+        titulos_correntes=0,
+        **{
+            campo: Decimal('10')
+            for campo in (
+                'valor_total',
+                'valor_total_vencido',
+                'valor_total_honrado',
+                'saldo_a_pagar',
+                'valor_a_pagar_ate_hoje',
+                'valor_corrente',
+                'novos_vencidos_7d',
+            )
+        },
+    )
+    consulta = Mock(side_effect=lambda *a, **k: [deepcopy(fornecedor)])
+    detalhes = Mock(return_value=[])
+    monkeypatch.setattr(contas_pagar, '_consultar_oracle', consulta)
+    monkeypatch.setattr(contas_pagar, '_consultar_titulos_oracle', detalhes)
+    monkeypatch.setattr(contas_pagar, '_pagamentos_manuais', lambda s: {})
+    monkeypatch.setattr(contas_pagar, '_tratamentos', lambda s: {})
+    monkeypatch.setattr(contas_pagar, '_registrar_snapshot', Mock())
+    monkeypatch.setattr(contas_pagar, '_historico', lambda s: [])
+    monkeypatch.setattr(
+        contas_pagar, '_valor_vencido_inicio_acompanhamento', lambda s: None
+    )
+    args = dict(
+        _=None,
+        session=None,
+        oracle=None,
+        q=None,
+        criticidade='todos',
+        status=None,
+        page=1,
+        page_size=20,
+        exportar=True,
+    )
+
+    padrao = contas_pagar.listar_contas_pagar(**args)
+    assert detalhes.call_args.kwargs['incluir_pagos'] is False
+    com_pagos = contas_pagar.listar_contas_pagar(**args, incluir_pagos=True)
+    assert detalhes.call_args.kwargs['incluir_pagos'] is True
+    assert com_pagos['resumo'] == padrao['resumo']
+    assert consulta.call_count == 2

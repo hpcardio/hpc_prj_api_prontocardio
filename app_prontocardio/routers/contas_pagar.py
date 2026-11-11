@@ -273,8 +273,10 @@ SELECT p.codigo_fornecedor,
        p.data_pagamento_mv
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
- WHERE p.tipo_quitacao IN (
-       'previsto', 'comprometido', 'parcialmente pago'
+ WHERE (
+       p.tipo_quitacao IN ('previsto', 'comprometido', 'parcialmente pago')
+       -- Paid titles only on request (Contas Vencidas detail/export).
+       OR (:incluir_pagos = 1 AND p.tipo_quitacao = 'quitado')
  )
    AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
    AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
@@ -361,6 +363,7 @@ def _consultar_titulos_oracle(
     data_inicio: date | None = None,
     data_fim: date | None = None,
     classificacao: str | None = None,
+    incluir_pagos: bool = False,
 ) -> list[dict]:
     if not codigos_fornecedor:
         return []
@@ -389,6 +392,7 @@ def _consultar_titulos_oracle(
                     'data_inicio': data_inicio,
                     'data_fim': data_fim,
                     'classificacao': classificacao,
+                    'incluir_pagos': 1 if incluir_pagos else 0,
                 },
             ))
     except SQLAlchemyError as exc:
@@ -489,6 +493,10 @@ def _agrupar_fornecedores(
         saldo = max(titulo['valor_total'] - valor_honrado, Decimal('0'))
         vencimento = titulo['data_vencimento']
         dias_vencidos = max((hoje - vencimento).days, 0) if vencimento else 0
+        if titulo.get('tipo_quitacao') == 'quitado':
+            # Settled in MV (discounts may leave paid < face value): no
+            # balance and no delay, so it never enters overdue totals.
+            saldo, dias_vencidos = Decimal('0'), 0
         titulo.update({
             'valor_honrado_manual': valor_manual,
             'valor_total_honrado': valor_honrado,
@@ -544,6 +552,8 @@ def _agrupar_fornecedores(
     for fornecedor in resultado:
         fornecedor['titulos'].sort(
             key=lambda titulo: (
+                # Paid titles come after the open ones.
+                titulo.get('tipo_quitacao') == 'quitado',
                 -titulo['dias_vencidos'],
                 titulo['data_vencimento'] or date.max,
                 titulo['codigo_parcela'],
@@ -843,6 +853,7 @@ def listar_contas_pagar(
     incluir_opcoes: bool = False,
     incluir_titulos: bool = True,
     classificacao: Annotated[str | None, Query(max_length=100)] = None,
+    incluir_pagos: bool = False,
 ):
     classificacao = (classificacao or '').strip() or None
     if data_inicio and data_fim and data_inicio > data_fim:
@@ -1009,6 +1020,9 @@ def listar_contas_pagar(
             data_inicio=data_inicio,
             data_fim=data_fim,
             classificacao=classificacao,
+            # Lists paid titles beside the open ones; supplier totals and
+            # the priority filters above stay on open titles only.
+            incluir_pagos=incluir_pagos,
         )
         detalhes_pagina = {
             item['codigo_fornecedor']: item['titulos']
