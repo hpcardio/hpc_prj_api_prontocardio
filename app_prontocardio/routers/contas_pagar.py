@@ -206,6 +206,7 @@ SELECT codigo_fornecedor,
        SUM(CASE WHEN data_vencimento >= TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_corrente,
        MIN(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN data_vencimento END) AS vencimento_mais_antigo,
        SUM(CASE WHEN data_vencimento BETWEEN TRUNC(SYSDATE) - 6 AND TRUNC(SYSDATE) - 1 THEN saldo ELSE 0 END) AS novos_vencidos_7d,
+       SUM(CASE WHEN data_vencimento = TRUNC(SYSDATE) - 1 THEN saldo ELSE 0 END) AS vencidos_dia_anterior,
        COUNT(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_vencidos,
        COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_correntes
   FROM saldos
@@ -360,6 +361,9 @@ def _consultar_oracle(
             'dias_atraso': dias_atraso,
             'total_dias_vencidos': dias_atraso,
             'novos_vencidos_7d': _decimal(row['novos_vencidos_7d']),
+            'vencidos_dia_anterior': _decimal(
+                row.get('vencidos_dia_anterior')
+            ),
             'titulos_vencidos': int(row['titulos_vencidos'] or 0),
             'titulos_correntes': int(row['titulos_correntes'] or 0),
             'titulos': [],
@@ -526,6 +530,7 @@ def _agrupar_fornecedores(
                 'valor_total_honrado': Decimal('0'),
                 'valor_corrente': Decimal('0'),
                 'novos_vencidos_7d': Decimal('0'),
+                'vencidos_dia_anterior': Decimal('0'),
                 'total_dias_vencidos': 0,
                 'dias_atraso': 0,
                 'vencimento_mais_antigo': None,
@@ -555,6 +560,8 @@ def _agrupar_fornecedores(
                 fornecedor['vencimento_mais_antigo'] = vencimento
             if vencimento >= hoje - timedelta(days=6):
                 fornecedor['novos_vencidos_7d'] += saldo
+            if vencimento == hoje - timedelta(days=1):
+                fornecedor['vencidos_dia_anterior'] += saldo
         elif saldo > 0:
             fornecedor['valor_corrente'] += saldo
             fornecedor['titulos_correntes'] += 1
@@ -570,6 +577,50 @@ def _agrupar_fornecedores(
             )
         )
     return resultado
+
+
+def _fornecedor_compoe(item, componente, vencidos_dia_anterior):
+    """Whether the supplier contributes to the selected summary card."""
+    if vencidos_dia_anterior and item.get(
+        'vencidos_dia_anterior', Decimal('0')
+    ) <= 0:
+        return False
+    campo = {
+        'a_pagar': 'valor_a_pagar_ate_hoje',
+        'a_vencer': 'valor_corrente',
+        'vencida': 'valor_vencido',
+        'novos_7d': 'novos_vencidos_7d',
+        'pagar_agora': 'pagamento_imediato',
+        'saldo_negociar': 'saldo_negociar',
+    }.get(componente)
+    return campo is None or item[campo] > 0
+
+
+def _titulos_do_componente(titulos, componente, vencidos_dia_anterior):
+    """Open titles that make up the selected card (same date rules)."""
+    if not componente and not vencidos_dia_anterior:
+        return titulos
+    hoje = _hoje_hospital()
+    vencido = lambda v: v is not None and v < hoje  # noqa: E731
+    regras = {
+        'a_pagar': lambda v: v is not None and v <= hoje,
+        'a_vencer': lambda v: v is None or v >= hoje,
+        'vencida': vencido,
+        'novos_7d': lambda v: vencido(v) and v >= hoje - timedelta(days=6),
+        'saldo_negociar': vencido,
+    }
+    # 'pagar_agora' is a supplier amount: every open title stays visible.
+    regra = regras.get(componente, lambda v: True)
+    return [
+        titulo
+        for titulo in titulos
+        if titulo['saldo_a_pagar'] > 0
+        and regra(titulo['data_vencimento'])
+        and (
+            not vencidos_dia_anterior
+            or titulo['data_vencimento'] == hoje - timedelta(days=1)
+        )
+    ]
 
 
 def _chave_prioridade_fornecedor(item: dict):
@@ -810,9 +861,19 @@ def _filtrar_fornecedores(
     status,
     codigos_selecionados,
     quadrante_compativel,
+    componente=None,
+    vencidos_dia_anterior=False,
 ):
     termo = (q or '').strip().casefold()
     filtrados = vencidos if quadrante_compativel else []
+    if componente or vencidos_dia_anterior:
+        # Summary card / day-before toggle: only suppliers (and their
+        # titles) that make up that amount.
+        filtrados = [
+            item
+            for item in filtrados
+            if _fornecedor_compoe(item, componente, vencidos_dia_anterior)
+        ]
     if codigos_selecionados:
         filtrados = [
             item
@@ -866,6 +927,16 @@ def listar_contas_pagar(
     incluir_titulos: bool = True,
     classificacao: Annotated[str | None, Query(max_length=100)] = None,
     incluir_pagos: bool = False,
+    componente: Literal[
+        'a_pagar',
+        'a_vencer',
+        'vencida',
+        'novos_7d',
+        'pagar_agora',
+        'saldo_negociar',
+    ]
+    | None = None,
+    vencidos_dia_anterior: bool = False,
 ):
     classificacao = (classificacao or '').strip() or None
     if data_inicio and data_fim and data_inicio > data_fim:
@@ -928,6 +999,7 @@ def listar_contas_pagar(
             'valor_total_honrado',
             'valor_corrente',
             'novos_vencidos_7d',
+            'vencidos_dia_anterior',
             'total_dias_vencidos',
             'dias_atraso',
             'vencimento_mais_antigo',
@@ -969,6 +1041,13 @@ def listar_contas_pagar(
         'novos_vencidos_7d': sum(
             (item['novos_vencidos_7d'] for item in vencidos), Decimal('0')
         ),
+        'vencidos_dia_anterior': sum(
+            (
+                item.get('vencidos_dia_anterior', Decimal('0'))
+                for item in vencidos
+            ),
+            Decimal('0'),
+        ),
         'pagamento_imediato': sum(
             (item['pagamento_imediato'] for item in vencidos), Decimal('0')
         ),
@@ -1000,6 +1079,8 @@ def listar_contas_pagar(
         status,
         codigos_selecionados,
         quadrante_compativel,
+        componente=componente,
+        vencidos_dia_anterior=vencidos_dia_anterior,
     )
     filtrados, detalhes_filtrados = _filtrar_prioridade(
         filtrados,
@@ -1046,7 +1127,11 @@ def listar_contas_pagar(
             )
         }
     for item in pagina:
-        item['titulos'] = detalhes_pagina.get(item['codigo_fornecedor'], [])
+        item['titulos'] = _titulos_do_componente(
+            detalhes_pagina.get(item['codigo_fornecedor'], []),
+            componente,
+            vencidos_dia_anterior,
+        )
         item['classificacoes'] = sorted({
             titulo.get('classificacao') or 'Sem classificação'
             for titulo in item['titulos']
@@ -1121,6 +1206,9 @@ def listar_contas_pagar(
             'valor_corrente': _serializar_decimal(item['valor_corrente']),
             'novos_vencidos_7d': _serializar_decimal(
                 item['novos_vencidos_7d']
+            ),
+            'vencidos_dia_anterior': _serializar_decimal(
+                item.get('vencidos_dia_anterior', Decimal('0'))
             ),
             'pagamento_imediato': _serializar_decimal(
                 item['pagamento_imediato']

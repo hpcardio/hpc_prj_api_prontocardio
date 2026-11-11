@@ -673,3 +673,148 @@ def test_fornecedor_so_com_pagos_aparece_por_ultimo_sem_alterar_resumo(
     ]
     assert [f['codigo_fornecedor'] for f in vencidos['fornecedores']] == [1]
     assert com_pagos['resumo'] == padrao['resumo']
+
+
+def _titulo_card(codigo, vencimento, saldo='10'):
+    return {
+        'codigo_parcela': codigo,
+        'data_vencimento': vencimento,
+        'saldo_a_pagar': Decimal(saldo),
+    }
+
+
+def test_titulos_do_componente_seguem_regras_dos_cards(monkeypatch):
+    monkeypatch.setattr(
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 11, 11)
+    )
+    titulos = [
+        _titulo_card(1, date(2026, 11, 10)),  # ontem
+        _titulo_card(2, date(2026, 11, 5)),  # 7 dias
+        _titulo_card(3, date(2026, 11, 4)),  # vencido antigo
+        _titulo_card(4, date(2026, 11, 11)),  # hoje
+        _titulo_card(5, date(2026, 12, 1)),  # futuro
+        _titulo_card(6, date(2026, 11, 10), saldo='0'),  # ontem, pago
+    ]
+
+    def codigos(componente=None, ontem=False):
+        return [
+            t['codigo_parcela']
+            for t in contas_pagar._titulos_do_componente(
+                titulos, componente, ontem
+            )
+        ]
+
+    assert codigos() == [1, 2, 3, 4, 5, 6]
+    assert codigos('a_pagar') == [1, 2, 3, 4]
+    assert codigos('a_vencer') == [4, 5]
+    assert codigos('vencida') == [1, 2, 3]
+    assert codigos('saldo_negociar') == [1, 2, 3]
+    assert codigos('novos_7d') == [1, 2]
+    assert codigos('pagar_agora') == [1, 2, 3, 4, 5]
+    assert codigos(ontem=True) == [1]
+    assert codigos('a_vencer', ontem=True) == []
+
+
+def test_agrupar_soma_vencidos_dia_anterior(monkeypatch):
+    monkeypatch.setattr(
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 11, 11)
+    )
+    base = {
+        'codigo_fornecedor': 7,
+        'nome_fornecedor': 'F',
+        'valor_total': Decimal('10'),
+        'valor_honrado_oracle': Decimal('0'),
+        'tipo_quitacao': 'previsto',
+    }
+    titulos = [
+        {**base, 'codigo_parcela': 1, 'data_vencimento': date(2026, 11, 10)},
+        {**base, 'codigo_parcela': 2, 'data_vencimento': date(2026, 11, 9)},
+        {
+            **base,
+            'codigo_parcela': 3,
+            'data_vencimento': date(2026, 11, 10),
+            'tipo_quitacao': 'quitado',
+        },
+    ]
+    (fornecedor,) = contas_pagar._agrupar_fornecedores(titulos, {})
+    assert fornecedor['vencidos_dia_anterior'] == Decimal('10')
+    assert fornecedor['novos_vencidos_7d'] == Decimal('20')
+
+
+def test_listagem_filtra_fornecedores_pelo_card_sem_alterar_resumo(
+    monkeypatch,
+):
+    def fornecedor(codigo, vencido, corrente, ontem, novos):
+        return dict(
+            codigo_fornecedor=codigo,
+            nome_fornecedor=f'Fornecedor {codigo}',
+            dias_atraso=5 if vencido else 0,
+            vencimento_mais_antigo=date(2026, 11, 1) if vencido else None,
+            titulos=[],
+            titulos_vencidos=1 if vencido else 0,
+            titulos_correntes=1 if corrente else 0,
+            valor_total=Decimal(vencido + corrente),
+            valor_total_vencido=Decimal(vencido),
+            valor_total_honrado=Decimal('0'),
+            saldo_a_pagar=Decimal(vencido + corrente),
+            valor_a_pagar_ate_hoje=Decimal(vencido),
+            valor_corrente=Decimal(corrente),
+            novos_vencidos_7d=Decimal(novos),
+            vencidos_dia_anterior=Decimal(ontem),
+        )
+
+    consulta = Mock(
+        side_effect=lambda *a, **k: [
+            fornecedor(1, 30, 0, 10, 10),  # venceu ontem
+            fornecedor(2, 50, 0, 0, 0),  # vencido antigo
+            fornecedor(3, 0, 20, 0, 0),  # só a vencer
+        ]
+    )
+    monkeypatch.setattr(contas_pagar, '_consultar_oracle', consulta)
+    monkeypatch.setattr(
+        contas_pagar, '_consultar_titulos_oracle', Mock(return_value=[])
+    )
+    monkeypatch.setattr(contas_pagar, '_pagamentos_manuais', lambda s: {})
+    monkeypatch.setattr(
+        contas_pagar,
+        '_tratamentos',
+        lambda s: {2: {'pagamento_imediato': Decimal('50')}},
+    )
+    monkeypatch.setattr(contas_pagar, '_registrar_snapshot', Mock())
+    monkeypatch.setattr(contas_pagar, '_historico', lambda s: [])
+    monkeypatch.setattr(
+        contas_pagar, '_valor_vencido_inicio_acompanhamento', lambda s: None
+    )
+    args = dict(
+        _=None,
+        session=None,
+        oracle=None,
+        q=None,
+        criticidade='todos',
+        status=None,
+        page=1,
+        page_size=20,
+        exportar=True,
+    )
+
+    def codigos(**kwargs):
+        resultado = contas_pagar.listar_contas_pagar(**args, **kwargs)
+        return sorted(
+            f['codigo_fornecedor'] for f in resultado['fornecedores']
+        )
+
+    padrao = contas_pagar.listar_contas_pagar(**args)
+    assert codigos() == [1, 2, 3]
+    assert codigos(componente='a_pagar') == [1, 2]
+    assert codigos(componente='a_vencer') == [3]
+    assert codigos(componente='vencida') == [1, 2]
+    assert codigos(componente='novos_7d') == [1]
+    assert codigos(componente='pagar_agora') == [2]
+    assert codigos(componente='saldo_negociar') == [1]
+    assert codigos(vencidos_dia_anterior=True) == [1]
+    assert codigos(componente='a_vencer', vencidos_dia_anterior=True) == []
+    filtrado = contas_pagar.listar_contas_pagar(
+        **args, componente='vencida', vencidos_dia_anterior=True
+    )
+    assert filtrado['resumo'] == padrao['resumo']
+    assert padrao['resumo']['vencidos_dia_anterior'] == '10.00'
