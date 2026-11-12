@@ -48,6 +48,44 @@ CONSULTA_ESCALA = """
 """
 
 CONSULTA_AGENDAS_ATUAIS = """
+    WITH ocupacao AS (
+        SELECT iac.CD_AGENDA_CENTRAL,
+               SUM(
+                   CASE
+                       WHEN NVL(iac.SN_ENCAIXE, 'N') <> 'S'
+                        AND NVL(iac.SN_BLOQUEADO, 'N') <> 'S'
+                        AND NVL(iac.TP_SITUACAO, 'M') <> 'C'
+                        AND (iac.CD_PACIENTE IS NOT NULL
+                             OR iac.DT_GRAVACAO IS NOT NULL)
+                       THEN 1 ELSE 0
+                   END
+               ) AS qt_marcados,
+               SUM(
+                   CASE
+                       WHEN NVL(iac.SN_BLOQUEADO, 'N') = 'S'
+                       THEN 1 ELSE 0
+                   END
+               ) AS qt_bloqueados,
+               SUM(
+                   CASE
+                       WHEN NVL(iac.SN_BLOQUEADO, 'N') <> 'S'
+                        AND NVL(iac.TP_SITUACAO, 'M') <> 'C'
+                        AND iac.CD_PACIENTE IS NULL
+                        AND iac.DT_GRAVACAO IS NULL
+                       THEN 1 ELSE 0
+                   END
+               ) AS qt_livres,
+               MIN(iac.CD_ITEM_AGENDAMENTO) AS cd_item_agendamento,
+               MIN(ia.DS_ITEM_AGENDAMENTO) KEEP (
+                   DENSE_RANK FIRST ORDER BY iac.CD_ITEM_AGENDAMENTO
+               ) AS ds_procedimento
+          FROM DBAMV.IT_AGENDA_CENTRAL iac
+          LEFT JOIN DBAMV.ITEM_AGENDAMENTO ia
+            ON ia.CD_ITEM_AGENDAMENTO = iac.CD_ITEM_AGENDAMENTO
+         WHERE iac.HR_AGENDA >= TRUNC(SYSDATE)
+           AND iac.HR_AGENDA < TRUNC(SYSDATE) + :dias + 1
+         GROUP BY iac.CD_AGENDA_CENTRAL
+    )
     SELECT a.CD_AGENDA_CENTRAL AS cd_agenda_central,
            a.CD_SETOR AS cd_setor,
            s.NM_SETOR AS nm_setor,
@@ -57,7 +95,9 @@ CONSULTA_AGENDAS_ATUAIS = """
            TO_CHAR(a.HR_INICIO, 'YYYY-MM-DD"T"HH24:MI:SS') AS hr_inicio,
            TO_CHAR(a.HR_FIM, 'YYYY-MM-DD"T"HH24:MI:SS') AS hr_fim,
            a.QT_ATENDIMENTO AS qt_atendimento,
-           a.QT_MARCADOS AS qt_marcados,
+           NVL(o.QT_MARCADOS, 0) AS qt_marcados,
+           NVL(o.QT_BLOQUEADOS, 0) AS qt_bloqueados,
+           NVL(o.QT_LIVRES, 0) AS qt_livres,
            a.QT_ENCAIXES AS qt_encaixes,
            a.QT_ENCAIXES_MARCADOS AS qt_encaixes_marcados,
            a.SN_AGENDA_PUBLICA AS sn_agenda_publica,
@@ -68,7 +108,9 @@ CONSULTA_AGENDAS_ATUAIS = """
            u.DS_UNIDADE_ATENDIMENTO AS ds_unidade_atendimento,
            u.DS_LOCAL_UNIDADE_ATENDIMENTO AS ds_local_unidade_atendimento,
            r.CD_RECURSO_CENTRAL AS cd_recurso_central,
-           r.DS_RECURSO_CENTRAL AS ds_recurso_central
+           r.DS_RECURSO_CENTRAL AS ds_recurso_central,
+           o.CD_ITEM_AGENDAMENTO AS cd_item_agendamento,
+           o.DS_PROCEDIMENTO AS ds_procedimento
       FROM DBAMV.AGENDA_CENTRAL a
       LEFT JOIN DBAMV.PRESTADOR p ON p.CD_PRESTADOR = a.CD_PRESTADOR
       LEFT JOIN DBAMV.UNIDADE_ATENDIMENTO u
@@ -76,6 +118,7 @@ CONSULTA_AGENDAS_ATUAIS = """
       LEFT JOIN DBAMV.RECURSO_CENTRAL r
         ON r.CD_RECURSO_CENTRAL = a.CD_RECURSO_CENTRAL
       LEFT JOIN DBAMV.SETOR s ON s.CD_SETOR = a.CD_SETOR
+      LEFT JOIN ocupacao o ON o.CD_AGENDA_CENTRAL = a.CD_AGENDA_CENTRAL
      WHERE a.DT_AGENDA >= TRUNC(SYSDATE)
        AND a.DT_AGENDA < TRUNC(SYSDATE) + :dias + 1
        AND NVL(a.SN_ATIVO, 'S') = 'S'
@@ -83,6 +126,69 @@ CONSULTA_AGENDAS_ATUAIS = """
             SELECT g.CD_PRESTADOR FROM DBAMV.PRESTADOR g
              WHERE UPPER(g.NM_PRESTADOR) LIKE '%GENERIC%')
      ORDER BY a.DT_AGENDA, a.HR_INICIO, a.CD_AGENDA_CENTRAL
+"""
+
+CONSULTA_HORARIOS_AGENDA = """
+    WITH contatos AS (
+        SELECT rc.CD_REGISTRO_VINCULADO,
+               rc.DS_ASSUNTO,
+               rc.DS_CONTATO,
+               ROW_NUMBER() OVER (
+                   PARTITION BY rc.CD_REGISTRO_VINCULADO
+                   ORDER BY TRUNC(rc.DT_CONTATO)
+                            + (rc.HR_CONTATO - TRUNC(rc.HR_CONTATO)) DESC,
+                            rc.CD_REGISTRO_CONTATO DESC
+               ) AS ordem
+          FROM DBAMV.REGISTRO_CONTATO rc
+         WHERE rc.TP_ACAO = 'AS'
+           AND EXISTS (
+               SELECT 1
+                 FROM DBAMV.IT_AGENDA_CENTRAL alvo
+                WHERE alvo.CD_AGENDA_CENTRAL = :cd_agenda_central
+                  AND alvo.CD_IT_AGENDA_CENTRAL = rc.CD_REGISTRO_VINCULADO
+           )
+    )
+    SELECT iac.CD_IT_AGENDA_CENTRAL AS cd_it_agenda_central,
+           TO_CHAR(iac.HR_AGENDA, 'YYYY-MM-DD"T"HH24:MI:SS') AS horario,
+           iac.CD_PACIENTE AS cd_paciente,
+           pac.NM_PACIENTE AS nm_paciente,
+           iac.CD_ITEM_AGENDAMENTO AS cd_item_agendamento,
+           ia.DS_ITEM_AGENDAMENTO AS ds_item_agendamento,
+           iac.TP_SITUACAO AS tp_situacao,
+           NVL(iac.SN_BLOQUEADO, 'N') AS sn_bloqueado,
+           NVL(iac.SN_ENCAIXE, 'N') AS sn_encaixe,
+           rc.DS_ASSUNTO AS assunto_confirmacao,
+           CASE
+               WHEN rc.CD_REGISTRO_VINCULADO IS NULL THEN 'NAO_CONFIRMADO'
+               WHEN UPPER(rc.DS_ASSUNTO) LIKE '%NÃO CONFIRM%'
+                 OR UPPER(rc.DS_ASSUNTO) LIKE '%NAO CONFIRM%'
+                   THEN 'NAO_CONFIRMADO'
+               WHEN UPPER(rc.DS_ASSUNTO) LIKE '%CONFIRM%'
+                   THEN 'CONFIRMADO'
+               ELSE 'NAO_CONFIRMADO'
+           END AS status_confirmacao,
+           CASE
+               WHEN UPPER(rc.DS_ASSUNTO) LIKE '%CONFIRM%'
+                AND UPPER(rc.DS_ASSUNTO) NOT LIKE '%NÃO CONFIRM%'
+                AND UPPER(rc.DS_ASSUNTO) NOT LIKE '%NAO CONFIRM%'
+                   THEN 'S' ELSE 'N'
+           END AS confirmado,
+           CASE
+               WHEN NVL(iac.SN_BLOQUEADO, 'N') = 'S' THEN 'BLOQUEADO'
+               WHEN NVL(iac.TP_SITUACAO, 'M') = 'C' THEN 'CANCELADO'
+               WHEN iac.CD_PACIENTE IS NOT NULL OR iac.DT_GRAVACAO IS NOT NULL
+               THEN 'OCUPADO'
+               ELSE 'LIVRE'
+           END AS status_horario
+      FROM DBAMV.IT_AGENDA_CENTRAL iac
+      LEFT JOIN DBAMV.PACIENTE pac ON pac.CD_PACIENTE = iac.CD_PACIENTE
+      LEFT JOIN DBAMV.ITEM_AGENDAMENTO ia
+        ON ia.CD_ITEM_AGENDAMENTO = iac.CD_ITEM_AGENDAMENTO
+      LEFT JOIN contatos rc
+        ON rc.CD_REGISTRO_VINCULADO = iac.CD_IT_AGENDA_CENTRAL
+       AND rc.ordem = 1
+     WHERE iac.CD_AGENDA_CENTRAL = :cd_agenda_central
+     ORDER BY iac.HR_AGENDA, iac.CD_IT_AGENDA_CENTRAL
 """
 
 
@@ -452,6 +558,13 @@ class AgendaMedicaSoulMV:
     def agendas_atuais(self, dias: int) -> list[dict]:
         """Agendas ativas lidas no momento da requisição, sem pacientes."""
         return self._varias(CONSULTA_AGENDAS_ATUAIS, {'dias': dias})
+
+    def horarios_agenda(self, cd_agenda_central: int) -> list[dict]:
+        """Horários atuais da agenda, incluindo o paciente quando ocupado."""
+        return self._varias(
+            CONSULTA_HORARIOS_AGENDA,
+            {'cd_agenda_central': cd_agenda_central},
+        )
 
     def prestador(self, cd_prestador: int) -> dict | None:
         return self._uma(

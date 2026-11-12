@@ -761,6 +761,39 @@ def _texto_maiusculo(valor: str | None, limite: int | None = None) -> str | None
     return texto[:limite] if limite else texto
 
 
+def _parametros_update_endereco(
+    parametros_endereco: dict,
+    *,
+    cd_endereco: int,
+) -> dict:
+    return {
+        'nr_cep': parametros_endereco['nr_cep'],
+        'ds_endereco': parametros_endereco['ds_endereco'],
+        'nr_endereco': parametros_endereco['nr_endereco'],
+        'ds_complemento': parametros_endereco['ds_complemento'],
+        'nm_bairro': parametros_endereco['nm_bairro'],
+        'cd_cidade': parametros_endereco['cd_cidade'],
+        'cd_endereco': cd_endereco,
+    }
+
+
+def _parametros_update_endereco_legado(
+    parametros_endereco: dict,
+    *,
+    nr_fone: str | None,
+    cd_endereco: int,
+) -> dict:
+    return {
+        'nr_cep': parametros_endereco['nr_cep'],
+        'ds_endereco': parametros_endereco['ds_endereco'],
+        'nr_endereco': parametros_endereco['nr_endereco'],
+        'ds_complemento': parametros_endereco['ds_complemento'],
+        'nm_bairro': parametros_endereco['nm_bairro'],
+        'nr_fone': nr_fone,
+        'cd_endereco': cd_endereco,
+    }
+
+
 def _erro_oracle_resumido(exc: Exception) -> str:
     texto = ' '.join(str(exc).split())
     for marcador in ('ORA-', 'DPY-', 'DPI-'):
@@ -3798,10 +3831,10 @@ def atualizar_paciente(
                            SN_PADRAO = 'S'
                      WHERE CD_ENDERECO_PACIENTE = :cd_endereco
                     """,
-                    {
-                        **parametros_endereco,
-                        'cd_endereco': endereco_paciente[0],
-                    },
+                    _parametros_update_endereco(
+                        parametros_endereco,
+                        cd_endereco=endereco_paciente[0],
+                    ),
                 )
             else:
                 cursor.execute(
@@ -3845,7 +3878,11 @@ def atualizar_paciente(
                            SN_PADRAO = 'S'
                      WHERE CD_ENDERECO = :cd_endereco
                     """,
-                    {**parametros_legado, 'cd_endereco': endereco_legado[0]},
+                    _parametros_update_endereco_legado(
+                        parametros_endereco,
+                        nr_fone=celular,
+                        cd_endereco=endereco_legado[0],
+                    ),
                 )
             else:
                 cursor.execute(
