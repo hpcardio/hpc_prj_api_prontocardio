@@ -9,6 +9,7 @@ import os
 from datetime import date, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -63,6 +64,7 @@ def cancelamento_soulmv_habilitado() -> bool:
 
 
 MOTIVO_MINIMO = 5
+FUSO_HORARIO_BRASIL = ZoneInfo('America/Sao_Paulo')
 
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
@@ -288,24 +290,51 @@ def listar_agendas_atuais(
     agendas = soulmv.agendas_atuais(dias)
     vagas = sum(int(item.get('qt_atendimento') or 0) for item in agendas)
     marcados = sum(int(item.get('qt_marcados') or 0) for item in agendas)
-    livres = sum(
-        max(
-            int(item.get('qt_atendimento') or 0)
-            - int(item.get('qt_marcados') or 0),
-            0,
-        )
-        for item in agendas
-    )
+    livres = sum(int(item.get('qt_livres') or 0) for item in agendas)
+    bloqueados = sum(int(item.get('qt_bloqueados') or 0) for item in agendas)
     return {
-        'consultado_em': datetime.now().isoformat(),
+        'consultado_em': datetime.now(FUSO_HORARIO_BRASIL).isoformat(),
         'dias': dias,
         'summary': {
             'agendas': len(agendas),
             'vagas_configuradas': vagas,
             'horarios_marcados': marcados,
             'vagas_livres': livres,
+            'horarios_bloqueados': bloqueados,
         },
         'agendas': agendas,
+    }
+
+
+@router.get('/agendas/{cd_agenda_central}/horarios')
+def detalhar_horarios_agenda(
+    cd_agenda_central: int,
+    _: Leitor,
+    soulmv: SoulMV,
+):
+    """Detalhamento analítico e atual dos horários de uma agenda do SoulMV."""
+    horarios = soulmv.horarios_agenda(cd_agenda_central)
+    if not horarios:
+        raise _nao_encontrado('Agenda não encontrada ou sem horários.')
+    resumo = {
+        'total': len(horarios),
+        'ocupados': 0,
+        'livres': 0,
+        'bloqueados': 0,
+    }
+    for horario in horarios:
+        status = horario.get('status_horario')
+        if status == 'OCUPADO':
+            resumo['ocupados'] += 1
+        elif status == 'LIVRE':
+            resumo['livres'] += 1
+        else:
+            resumo['bloqueados'] += 1
+    return {
+        'consultado_em': datetime.now(FUSO_HORARIO_BRASIL).isoformat(),
+        'cd_agenda_central': cd_agenda_central,
+        'resumo': resumo,
+        'horarios': horarios,
     }
 
 
