@@ -152,6 +152,8 @@ CONSULTA_HORARIOS_AGENDA = """
            TO_CHAR(iac.HR_AGENDA, 'YYYY-MM-DD"T"HH24:MI:SS') AS horario,
            iac.CD_PACIENTE AS cd_paciente,
            pac.NM_PACIENTE AS nm_paciente,
+           NVL(pac.NR_DDD_CELULAR, iac.NR_DDD_CELULAR) AS nr_ddd_celular,
+           NVL(pac.NR_CELULAR, iac.NR_CELULAR) AS nr_celular,
            iac.CD_ITEM_AGENDAMENTO AS cd_item_agendamento,
            ia.DS_ITEM_AGENDAMENTO AS ds_item_agendamento,
            iac.TP_SITUACAO AS tp_situacao,
