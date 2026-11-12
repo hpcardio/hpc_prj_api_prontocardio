@@ -71,6 +71,8 @@ class SoulMVFalso:
                 'hr_fim': f'{DATA_FUTURA.isoformat()}T12:00:00',
                 'qt_atendimento': 8,
                 'qt_marcados': 3,
+                'qt_livres': 4,
+                'qt_bloqueados': 1,
                 'cd_prestador': CD_PRESTADOR,
                 'nm_prestador': 'DR TESTE',
                 'cd_unidade_atendimento': 1,
@@ -232,7 +234,8 @@ def test_agendas_sao_consultadas_no_momento_da_requisicao(cliente, perfis):
         'agendas': 1,
         'vagas_configuradas': 8,
         'horarios_marcados': 3,
-        'vagas_livres': 5,
+        'vagas_livres': 4,
+        'horarios_bloqueados': 1,
     }
     assert dados['agendas'][0]['cd_agenda_central'] == CD_AGENDA
 
