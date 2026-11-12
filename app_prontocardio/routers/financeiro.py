@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from functools import wraps
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -51,6 +51,7 @@ from app_prontocardio.models import (
 from app_prontocardio.schema import (
     AssociacaoItemIpmManualCreate,
     AssociacaoItemIpmManualUpdate,
+    AssociacaoItemMaidaCreate,
     AssociacaoRemessaIpmManualCreate,
     AssociacaoRemessaIpmManualUpdate,
     ConciliacaoAlteracaoPublic,
@@ -78,7 +79,7 @@ from app_prontocardio.schema import (
     RemessasFaturamentoList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
-from app_prontocardio.services import followup_cache
+from app_prontocardio.services import associacao_maida, followup_cache
 from app_prontocardio.services.importacao_glosas_ipm import (
     indexar_itens_oracle,
     resolver_correspondencia_item_oracle,
@@ -3464,6 +3465,7 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 SELECT UPPER(BTRIM(numero_processo)), competencia_producao,
                        UPPER(BTRIM(nr))
                   FROM api_prontocardio.associacoes_itens_ipm_manuais
+                 WHERE nr <> 'MAIDA'
             ), chaves AS (
                 SELECT * FROM chaves_pendentes AS chave
                 {clausula_filtros}
@@ -3779,7 +3781,11 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 len(registro['correspondencias_oracle']) == 1
             )
     codigos_associados_itens = (
-        set(session.scalars(select(AssociacaoItemIpmManual.cd_remessa)))
+        set(session.scalars(
+            select(AssociacaoItemIpmManual.cd_remessa).where(
+                AssociacaoItemIpmManual.nr != associacao_maida.NR_MAIDA
+            )
+        ))
         if hasattr(session, 'scalars')
         else set()
     )
@@ -4168,6 +4174,82 @@ def excluir_associacao_remessa_ipm(
     session.commit()
 
 
+@router.get('/associacoes-maida')
+def listar_associacoes_maida(  # noqa: PLR0913
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    lote: Annotated[str | None, Query(max_length=50)] = None,
+    guia: Annotated[str | None, Query(max_length=50)] = None,
+    situacao: Annotated[
+        Literal['pendentes', 'associadas', 'todas'], Query()
+    ] = 'pendentes',
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Itens glosados da Maida (ISSEC) sem atendimento do MV."""
+    return associacao_maida.listar_itens(
+        session, lote=lote, guia=guia, situacao=situacao,
+        limit=limit, offset=offset,
+    )
+
+
+@router.get('/associacoes-maida/lancamentos')
+def lancamentos_associacao_maida(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    id_registro: Annotated[str, Query(min_length=1, max_length=255)],
+    cd_atendimento: Annotated[int, Query(ge=1)],
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    """Lançamentos do atendimento informado, marcando os selecionáveis."""
+    item = associacao_maida.buscar_item(session, id_registro)
+    lancamentos = associacao_maida.lancamentos_atendimento(
+        session_oracle, cd_atendimento
+    )
+    return {
+        'item': item,
+        'cd_atendimento': cd_atendimento,
+        'lancamentos': associacao_maida.marcar_candidatos(
+            session, item, lancamentos
+        ),
+    }
+
+
+@router.post('/associacoes-maida', status_code=HTTPStatus.CREATED)
+def criar_associacao_maida(
+    payload: AssociacaoItemMaidaCreate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    try:
+        return associacao_maida.associar(
+            session,
+            session_oracle,
+            id_registro=payload.glosa_id_registro,
+            cd_atendimento=payload.cd_atendimento,
+            cd_remessa=payload.cd_remessa,
+            conta=payload.conta,
+            cd_lancamento=payload.cd_lancamento,
+            usuario_id=usuario_atual.id,
+        )
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='O item ou o lançamento já foi associado.',
+        ) from exc
+
+
+@router.delete('/associacoes-maida/{associacao_id}')
+def excluir_associacao_maida(
+    associacao_id: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    return associacao_maida.excluir(session, associacao_id)
+
+
 @router.post('/associacoes-itens-ipm', status_code=HTTPStatus.CREATED)
 def criar_associacao_item_ipm(
     payload: AssociacaoItemIpmManualCreate,
@@ -4218,7 +4300,7 @@ def editar_associacao_item_ipm(
     session_oracle: Session = Depends(get_session_oracle),
 ):
     associacao = session.get(AssociacaoItemIpmManual, associacao_id)
-    if associacao is None:
+    if associacao is None or associacao.nr == associacao_maida.NR_MAIDA:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
             detail='Associação manual do item não encontrada.',
@@ -4262,7 +4344,7 @@ def excluir_associacao_item_ipm(
     session: SessionPostgres,
 ):
     associacao = session.get(AssociacaoItemIpmManual, associacao_id)
-    if associacao is None:
+    if associacao is None or associacao.nr == associacao_maida.NR_MAIDA:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
             detail='Associação manual do item não encontrada.',
@@ -7114,6 +7196,7 @@ def _linhas_associacoes_itens_manuais_follow_up(
                 ON tiss.codigo_termo = pendencia.codigo_glosa
              WHERE UPPER(BTRIM(proc.status_processo))
                    IN ('FINALIZADO', 'TRAMITANDO')
+               AND associacao.nr <> 'MAIDA'
             """
         )
     ).mappings().all()

@@ -131,6 +131,14 @@ FILTRO_CLASSIFICACAO_SQL = (
     + SEM_CLASSIFICACAO
     + "') = :classificacao)"
 )
+# Purchase-order provisions (MV "Previsao de Materiais": every one is tied to
+# PREVISAO.CD_ORD_COM). Operacao hides them on request; document provisions
+# ("Geradas pela Previsao") stay.
+PROCESSO_PROVISAO_OC = 'Contas a Pagar de Previsão de Materiais'
+FILTRO_PROVISAO_OC_SQL = (
+    "(:excluir_provisoes_oc = 0"
+    " OR NVL(p.processo_provisao, '-') <> :processo_provisao_oc)"
+)
 
 
 def _identidade_fornecedor(row):
@@ -165,7 +173,8 @@ parcelas AS (
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao,
-           MAX(v.classificacao) AS classificacao
+           MAX(v.classificacao) AS classificacao,
+           MAX(v.descricao_do_processo_prov) AS processo_provisao
       FROM dbamv.HPC_V_CONTAS_A_PAGAR v
      GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,
               {REFERENCIA_SEM_CADASTRO_SQL}
@@ -194,6 +203,7 @@ saldos AS (
        AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
        AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
        AND {FILTRO_CLASSIFICACAO_SQL}
+       AND {FILTRO_PROVISAO_OC_SQL}
 )
 SELECT codigo_fornecedor,
        referencia_sem_cadastro,
@@ -249,6 +259,7 @@ parcelas AS (
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao,
            MAX(v.classificacao) AS classificacao,
+           MAX(v.descricao_do_processo_prov) AS processo_provisao,
            -- The view defines the payment date; it may exist without a
            -- registered payment row, so it is read from every row of the
            -- installment (reversed payments excluded).
@@ -290,6 +301,7 @@ SELECT p.codigo_fornecedor,
    AND (:data_inicio IS NULL OR p.data_vencimento >= :data_inicio)
    AND (:data_fim IS NULL OR p.data_vencimento <= :data_fim)
    AND {FILTRO_CLASSIFICACAO_SQL}
+   AND {FILTRO_PROVISAO_OC_SQL}
  ORDER BY p.codigo_fornecedor, p.data_vencimento, p.codigo_parcela_pk
 """).bindparams(
     bindparam('codigos_fornecedor', expanding=True),
@@ -322,6 +334,7 @@ def _consultar_oracle(
     data_fim: date | None = None,
     classificacao: str | None = None,
     incluir_pagos: bool = False,
+    excluir_provisoes_oc: bool = False,
 ) -> list[dict]:
     try:
         rows = read_payables_rows(
@@ -333,6 +346,8 @@ def _consultar_oracle(
                 'hoje': _hoje_hospital(),
                 'classificacao': classificacao,
                 'incluir_pagos': 1 if incluir_pagos else 0,
+                'excluir_provisoes_oc': 1 if excluir_provisoes_oc else 0,
+                'processo_provisao_oc': PROCESSO_PROVISAO_OC,
             },
         )
     except SQLAlchemyError as exc:
@@ -378,6 +393,7 @@ def _consultar_titulos_oracle(
     data_fim: date | None = None,
     classificacao: str | None = None,
     incluir_pagos: bool = False,
+    excluir_provisoes_oc: bool = False,
 ) -> list[dict]:
     if not codigos_fornecedor:
         return []
@@ -407,6 +423,8 @@ def _consultar_titulos_oracle(
                     'data_fim': data_fim,
                     'classificacao': classificacao,
                     'incluir_pagos': 1 if incluir_pagos else 0,
+                    'excluir_provisoes_oc': 1 if excluir_provisoes_oc else 0,
+                    'processo_provisao_oc': PROCESSO_PROVISAO_OC,
                 },
             ))
     except SQLAlchemyError as exc:
@@ -753,6 +771,7 @@ def _filtrar_prioridade(
     data_inicio,
     data_fim,
     classificacao=None,
+    excluir_provisoes_oc=False,
 ):
     if somente_vencidos:
         filtrados = [
@@ -776,6 +795,7 @@ def _filtrar_prioridade(
             data_inicio=data_inicio,
             data_fim=data_fim,
             classificacao=classificacao,
+            excluir_provisoes_oc=excluir_provisoes_oc,
         )
         detalhes_filtrados = {
             item['codigo_fornecedor']: [
@@ -937,6 +957,7 @@ def listar_contas_pagar(
     ]
     | None = None,
     vencidos_dia_anterior: bool = False,
+    excluir_provisoes_oc: bool = False,
 ):
     classificacao = (classificacao or '').strip() or None
     if data_inicio and data_fim and data_inicio > data_fim:
@@ -955,11 +976,16 @@ def listar_contas_pagar(
         data_fim=data_fim,
         classificacao=classificacao,
         incluir_pagos=incluir_pagos,
+        excluir_provisoes_oc=excluir_provisoes_oc,
     )
     opcoes = []
     if incluir_opcoes:
         base_opcoes = (
-            _consultar_oracle(oracle, incluir_pagos=incluir_pagos)
+            _consultar_oracle(
+                oracle,
+                incluir_pagos=incluir_pagos,
+                excluir_provisoes_oc=excluir_provisoes_oc,
+            )
             if data_inicio or data_fim or classificacao
             else fornecedores
         )
@@ -986,6 +1012,7 @@ def listar_contas_pagar(
             data_inicio=data_inicio,
             data_fim=data_fim,
             classificacao=classificacao,
+            excluir_provisoes_oc=excluir_provisoes_oc,
         )
         fornecedores_manuais = {
             item['codigo_fornecedor']: item
@@ -1092,6 +1119,7 @@ def listar_contas_pagar(
         data_inicio,
         data_fim,
         classificacao,
+        excluir_provisoes_oc,
     )
     if ordenar == 'maior_valor_vencido':
         filtrados.sort(
@@ -1119,6 +1147,7 @@ def listar_contas_pagar(
             # Lists paid titles beside the open ones; supplier totals and
             # the priority filters above stay on open titles only.
             incluir_pagos=incluir_pagos,
+            excluir_provisoes_oc=excluir_provisoes_oc,
         )
         detalhes_pagina = {
             item['codigo_fornecedor']: item['titulos']
