@@ -14,6 +14,7 @@ from app_prontocardio.permissions import TELAS_PADRAO
 from app_prontocardio.routers.agenda_medica import get_soulmv_agenda_medica
 from app_prontocardio.security import gera_hash_senha
 from app_prontocardio.services.agenda_medica_soulmv import (
+    CONSULTA_HORARIOS_AGENDA,
     BloqueioAgendaErro,
     GeracaoAgendaErro,
     dias_geracao,
@@ -689,3 +690,39 @@ def test_evolucoes_so_de_paciente_da_triagem_e_auditadas(
         .one()
     )
     assert str(CD_PACIENTE_TRIAGEM) in evento.detalhe
+
+
+def test_horarios_da_agenda_trazem_contato_do_paciente(
+    cliente, soulmv, perfis
+):
+    soulmv.horarios_agenda = lambda cd: [
+        {
+            'cd_it_agenda_central': 1,
+            'horario': f'{DATA_FUTURA.isoformat()}T08:00:00',
+            'cd_paciente': 777,
+            'nm_paciente': 'PACIENTE FICTICIO',
+            'nr_ddd_celular': '85',
+            'nr_celular': '999990000',
+            'status_horario': 'OCUPADO',
+        },
+        {'cd_it_agenda_central': 2, 'status_horario': 'LIVRE'},
+    ]
+    resposta = cliente.get(
+        f'/agenda-medica/agendas/{CD_AGENDA}/horarios',
+        headers=perfis['medico'],
+    )
+    assert resposta.status_code == HTTPStatus.OK
+    corpo = resposta.json()
+    assert corpo['resumo'] == {
+        'total': 2,
+        'ocupados': 1,
+        'livres': 1,
+        'bloqueados': 0,
+    }
+    assert corpo['horarios'][0]['nr_ddd_celular'] == '85'
+    assert corpo['horarios'][0]['nr_celular'] == '999990000'
+
+
+def test_consulta_de_horarios_seleciona_celular_do_paciente():
+    assert 'AS nr_ddd_celular' in CONSULTA_HORARIOS_AGENDA
+    assert 'AS nr_celular' in CONSULTA_HORARIOS_AGENDA
