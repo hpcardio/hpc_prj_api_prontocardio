@@ -1699,6 +1699,14 @@ class AssociacaoItemIpmManualCreate(BaseModel):
     cd_lancamento: int = Field(ge=1)
 
 
+class AssociacaoItemMaidaCreate(BaseModel):
+    glosa_id_registro: str = Field(min_length=1, max_length=255)
+    cd_atendimento: int = Field(ge=1)
+    cd_remessa: int = Field(ge=1)
+    conta: int = Field(ge=1)
+    cd_lancamento: int = Field(ge=1)
+
+
 class AssociacaoItemIpmManualUpdate(BaseModel):
     cd_remessa: int = Field(ge=1)
     conta: int = Field(ge=1)
