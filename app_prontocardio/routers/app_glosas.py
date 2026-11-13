@@ -538,6 +538,62 @@ def _desfazer_tratativa_glosa_conciliada(
     registro_glosa.sn_ativo = 'true'
 
 
+def _desfazer_tratativa_glosa_independente(
+    registro_glosa: RegistroGlosa,
+    session: Session,
+) -> None:
+    """Desfaz só o acato/recurso; o item glosado continua tratável.
+
+    O item permanece ativo como pendente no processo original. Ele só é
+    inativado quando já está pendente (exclusão do lançamento) ou quando
+    outro registro ativo do mesmo item continua representando a glosa.
+    """
+    if any(
+        value is not None
+        for value in (
+            registro_glosa.dt_recebimento,
+            registro_glosa.valor_recebido,
+            registro_glosa.qtd_recebida,
+            registro_glosa.observacao_recebimento,
+        )
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'Nao e possivel desfazer uma glosa com recebimento '
+                'registrado.'
+            ),
+        )
+    tipo_tratativa = registro_glosa.status_tratativa
+    outro_registro_ativo = any(
+        item.id != registro_glosa.id and item.sn_ativo == 'true'
+        for item in _registros_do_mesmo_item(registro_glosa, session)
+    )
+    if tipo_tratativa == 'pendente' or outro_registro_ativo:
+        registro_glosa.sn_ativo = 'not'
+        return
+
+    descricao_item = str(
+        registro_glosa.descricao_item
+        or registro_glosa.procedimento
+        or 'Item glosado'
+    ).strip()
+    registro_glosa.processo_recurso = None
+    registro_glosa.qtd_recursado = None
+    registro_glosa.valor_recursado = None
+    registro_glosa.dt_recurso = None
+    registro_glosa.descricao_glosa_agrupada = None
+    if tipo_tratativa == 'recurso':
+        registro_glosa.descricao_recurso_agrupada = None
+    else:
+        registro_glosa.descricao_acato_agrupada = None
+    registro_glosa.descricao_glosa = (
+        f'{descricao_item}. Pendente de tratativa.'
+    )
+    registro_glosa.sn_glosado = 'true'
+    registro_glosa.sn_ativo = 'true'
+
+
 def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     for chave, valor in filtros.items():
         if chave == 'escopo_lote':
@@ -1741,7 +1797,7 @@ def deletar_glosa(
             conciliacao_remessa.valor_glosado,
         )
     else:
-        registro_glosa.sn_ativo = 'not'
+        _desfazer_tratativa_glosa_independente(registro_glosa, session)
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
     session.commit()
 
