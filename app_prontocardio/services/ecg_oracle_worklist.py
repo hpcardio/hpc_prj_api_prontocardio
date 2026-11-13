@@ -13,6 +13,10 @@ from app_prontocardio.ecg_worklist_schema import (
     WorklistSearchRequest,
     WorklistSector,
 )
+from app_prontocardio.inbody_worklist_schema import (
+    WorklistItemStatus,
+    WorklistItemStatusRequest,
+)
 
 MAX_RESULTS = 10
 MAX_ORDER_RESULTS = 500
@@ -25,9 +29,16 @@ class OracleWorklistError(RuntimeError):
 
 
 class OracleWorklistClient:
-    def __init__(self, engine: Engine, procedure_code: int):
+    def __init__(
+        self,
+        engine: Engine,
+        procedure_code: int,
+        *,
+        reject_invalid_rows: bool = False,
+    ):
         self.engine = engine
         self.procedure_code = procedure_code
+        self.reject_invalid_rows = reject_invalid_rows
 
     def search(self, request: WorklistSearchRequest) -> list[WorklistItem]:
         if not request.identifier.isdecimal():
@@ -95,7 +106,94 @@ class OracleWorklistClient:
         except SQLAlchemyError as exc:
             raise OracleWorklistError('MV_UNAVAILABLE') from exc
 
-        return [item for row in rows if (item := self._normalizar(row))]
+        items = []
+        for row in rows:
+            item = self._normalizar(row)
+            if item is None:
+                if self.reject_invalid_rows:
+                    raise OracleWorklistError('MV_INVALID_RESULT')
+                continue
+            items.append(item)
+        return items
+
+    def get_item_status(
+        self,
+        order_number: str,
+        order_item_id: str,
+        attendance_number: str,
+    ) -> WorklistItemStatus:
+        """Read exactly one MV order item without changing its state."""
+        try:
+            request = WorklistItemStatusRequest(
+                orderNumber=order_number,
+                orderItemId=order_item_id,
+                attendanceNumber=attendance_number,
+            )
+        except ValidationError as exc:
+            raise OracleWorklistError('MV_INVALID_IDENTIFIER') from exc
+
+        identifiers = {
+            name: int(value) for name, value in request.model_dump().items()
+        }
+        statement = text(
+            """
+            SELECT TO_CHAR(p.cd_ped_rx) AS order_number,
+                   TO_CHAR(i.cd_itped_rx) AS order_item_id,
+                   TO_CHAR(p.cd_atendimento) AS attendance_number,
+                   TO_CHAR(a.cd_paciente) AS patient_id,
+                   TO_CHAR(i.cd_exa_rx) AS procedure_code,
+                   CASE
+                       WHEN NVL(i.sn_realizado, 'N') = 'S'
+                       THEN 1 ELSE 0
+                   END AS realized,
+                   CASE
+                       WHEN NVL(i.sn_realizado, 'N') <> 'S'
+                        AND i.dt_realizado IS NULL
+                       THEN 1 ELSE 0
+                   END AS pending,
+                   i.dt_realizado AS realized_at
+              FROM dbamv.ped_rx p
+              JOIN dbamv.atendime a
+                ON a.cd_atendimento = p.cd_atendimento
+              JOIN dbamv.itped_rx i
+                ON i.cd_ped_rx = p.cd_ped_rx
+             WHERE p.cd_ped_rx = :order_number
+               AND i.cd_itped_rx = :order_item_id
+               AND p.cd_atendimento = :attendance_number
+               AND i.cd_exa_rx = :procedure_code
+            """
+        )
+        try:
+            with self.engine.connect() as connection:
+                rows = (
+                    connection
+                    .execute(
+                        statement,
+                        {
+                            **identifiers,
+                            'procedure_code': self.procedure_code,
+                        },
+                    )
+                    .mappings()
+                    .all()
+                )
+        except TimeoutError as exc:
+            raise OracleWorklistError('MV_TIMEOUT') from exc
+        except SQLAlchemyError as exc:
+            raise OracleWorklistError('MV_UNAVAILABLE') from exc
+
+        if len(rows) != 1:
+            raise OracleWorklistError('MV_INVALID_RESULT')
+        try:
+            result = WorklistItemStatus.model_validate(rows[0])
+        except ValidationError as exc:
+            raise OracleWorklistError('MV_INVALID_RESULT') from exc
+        if any(
+            int(getattr(result, name)) != value
+            for name, value in identifiers.items()
+        ):
+            raise OracleWorklistError('MV_INVALID_RESULT')
+        return result
 
     def health(self) -> None:
         try:
