@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_postgres
+from app_prontocardio.director_bridge import route_director_envelope
 from app_prontocardio.models import WhatsappEnvioIdempotente
 from app_prontocardio.routers.agendamentos import ValidaUsuarioAtual
 from app_prontocardio.settings import Settings
@@ -285,7 +286,7 @@ async def receber_webhook_whatsapp(
     Falhas no envio da resposta nao devem fazer a Meta retentar o webhook.
     """
 
-    payload = await request.json()
+    payload, director_messages = await route_director_envelope(request)
     mensagem_auto = (
         getattr(settings, 'WHATSAPP_AUTO_REPLY_TEXT', None)
         or MENSAGEM_RESPOSTA_AUTOMATICA_PADRAO
@@ -293,10 +294,14 @@ async def receber_webhook_whatsapp(
     respostas_enviadas = 0
     respostas_com_erro = 0
 
-    for entry in payload.get('entry', []) or []:
-        for change in entry.get('changes', []) or []:
+    for entry_index, entry in enumerate(payload.get('entry', []) or []):
+        for change_index, change in enumerate(entry.get('changes', []) or []):
             value = change.get('value') or {}
-            for message in value.get('messages', []) or []:
+            mensagens = value.get('messages', []) or []
+            for message_index, message in enumerate(mensagens):
+                posicao = (entry_index, change_index, message_index)
+                if posicao in director_messages:
+                    continue
                 telefone = message.get('from')
                 if not telefone:
                     continue
