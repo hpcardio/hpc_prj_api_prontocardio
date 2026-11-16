@@ -33,6 +33,7 @@ from app_prontocardio.routers.app_glosas import (
     salvar_descricoes_agrupadas_glosa,
     salvar_prazos_recurso_convenio,
 )
+from app_prontocardio.routers.financeiro import _item_follow_up_glosa
 from app_prontocardio.schema import (
     Atendimento,
     FilterSearch,
@@ -462,7 +463,59 @@ def test_pdf_da_triagem_consolida_processos_do_mesmo_paciente(
     )
 
 
-def test_desfazer_registro_independente_mantem_exclusao_logica(
+@pytest.mark.parametrize('sn_glosado', ['true', 'not'])
+def test_desfazer_tratativa_independente_volta_item_para_pendente(
+    session,
+    usuario_teste,
+    sn_glosado,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                sn_glosado=sn_glosado,
+                descricao_item='CLORIDRATO DE DEXMEDETOMIDINA',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    registro.descricao_recurso_agrupada = 'justificativa recurso'
+    registro.descricao_acato_agrupada = 'justificativa acato'
+    registro.descricao_glosa_agrupada = 'justificativa'
+    session.commit()
+
+    response = deletar_glosa(registro.id, usuario_teste, session)
+    session.refresh(registro)
+
+    assert response == {'message': 'Registro de glosa desfeito!'}
+    assert registro.sn_ativo == 'true'
+    assert registro.sn_glosado == 'true'
+    assert registro.status_tratativa == 'pendente'
+    assert registro.processo_recurso is None
+    assert registro.qtd_recursado is None
+    assert registro.valor_recursado is None
+    assert registro.dt_recurso is None
+    assert registro.descricao_glosa_agrupada is None
+    assert registro.descricao_glosa == (
+        'CLORIDRATO DE DEXMEDETOMIDINA. Pendente de tratativa.'
+    )
+    # Identificação do item e do processo original permanecem.
+    assert registro.processo_controle_fatura_gab == 'xptou xptou'
+    assert registro.motivo_glosa == '1008'
+    assert registro.valor == Decimal('103.45')
+    # No Follow-Up o item volta a aparecer com o valor integralmente pendente.
+    item = _item_follow_up_glosa([registro], {}, {})
+    assert item['valor_total_tratado'] == Decimal('0.00')
+    assert item['valor_pendente'] == Decimal('103.45')
+    if sn_glosado == 'true':
+        assert registro.descricao_recurso_agrupada is None
+        assert registro.descricao_acato_agrupada == 'justificativa acato'
+    else:
+        assert registro.descricao_acato_agrupada is None
+        assert registro.descricao_recurso_agrupada == 'justificativa recurso'
+
+
+def test_item_desfeito_pode_ser_recursado_novamente_no_mesmo_registro(
     session,
     usuario_teste,
 ):
@@ -471,12 +524,92 @@ def test_desfazer_registro_independente_mantem_exclusao_logica(
         usuario_teste,
         session,
     )
+    deletar_glosa(registro.id, usuario_teste, session)
 
-    response = deletar_glosa(registro.id, usuario_teste, session)
+    novo = editar_glosa(
+        registro.id,
+        RegistroGlosaCreate(
+            **registro_glosa_payload(processo_recurso='2600044786')
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert novo.id == registro.id
+    assert novo.sn_ativo == 'true'
+    assert novo.status_tratativa == 'recurso'
+    assert novo.processo_recurso == '2600044786'
+
+
+def test_desfazer_item_ja_pendente_mantem_exclusao_logica(
+    session,
+    usuario_teste,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(**registro_glosa_payload()),
+        usuario_teste,
+        session,
+    )
+    deletar_glosa(registro.id, usuario_teste, session)
+
+    deletar_glosa(registro.id, usuario_teste, session)
     session.refresh(registro)
 
-    assert response == {'message': 'Registro de glosa desfeito!'}
     assert registro.sn_ativo == 'not'
+
+
+def test_desfazer_com_outra_tratativa_ativa_do_item_inativa_registro(
+    session,
+    usuario_teste,
+):
+    recurso = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(qtd_glosada='1', valor_glosado='60.00')
+        ),
+        usuario_teste,
+        session,
+    )
+    acato = editar_glosa(
+        recurso.id,
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                sn_glosado='not',
+                processo_recurso=None,
+                qtd_glosada='1',
+                valor_glosado='43.45',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    deletar_glosa(acato.id, usuario_teste, session)
+    session.refresh(acato)
+    session.refresh(recurso)
+
+    assert acato.sn_ativo == 'not'
+    assert recurso.sn_ativo == 'true'
+    assert recurso.status_tratativa == 'recurso'
+
+
+def test_desfazer_tratativa_independente_com_recebimento_e_bloqueado(
+    session,
+    usuario_teste,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(**registro_glosa_payload()),
+        usuario_teste,
+        session,
+    )
+    registro.valor_recebido = Decimal('10.00')
+    session.commit()
+
+    with pytest.raises(HTTPException, match='recebimento registrado'):
+        deletar_glosa(registro.id, usuario_teste, session)
+    session.refresh(registro)
+
+    assert registro.sn_ativo == 'true'
+    assert registro.status_tratativa == 'recurso'
 
 
 def test_filtra_glosas_de_convenio_desabilitado(session):
