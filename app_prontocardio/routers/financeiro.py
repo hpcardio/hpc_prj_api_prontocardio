@@ -5048,7 +5048,11 @@ def _duplicatas_maida_pendentes(session, ids_registros):
 
 
 def _processos_lotes_maida_follow_up(session):
-    """Resolve lot placeholders only when their remittance has one portal process."""
+    """Resolve lot placeholders only when their remittance has one portal process.
+
+    Unmatched Maida items (provisional remittance = lot, attendance 0) follow
+    the single portal process of their lot, so they can be treated by process.
+    """
     if not all(_tabela_ipm_existe(session, name) for name in (
         'demonstrativo_conta_ipm', 'registros_glosa_demonstrativo_ipm',
     )) or not _tabela_schema_existe(session, 'raw_issec_portal', 'processos'):
@@ -5084,6 +5088,28 @@ def _processos_lotes_maida_follow_up(session):
                             WHERE BTRIM(p.processo) = t.processo)
              GROUP BY t.cd_remessa, t.lote
             HAVING COUNT(DISTINCT t.processo) = 1
+        ), canonical_lote AS (
+            -- A lot whose matched items all lead to one portal process.
+            SELECT c.lote, MIN(c.processo) AS processo
+              FROM canonical c
+             GROUP BY c.lote
+            HAVING COUNT(DISTINCT c.processo) = 1
+        ), provisional AS (
+            -- Maida items without an MV match keep a provisional context
+            -- (remittance = lot, attendance 0) until the manual association.
+            -- They belong to the same process as the rest of their lot.
+            SELECT DISTINCT g.id, BTRIM(d.numero_lote) AS lote
+              FROM api_prontocardio.registros_glosa g
+              JOIN api_prontocardio.registros_glosa_demonstrativo_ipm x
+                ON x.registro_glosa_id = g.id
+              JOIN api_prontocardio.demonstrativo_conta_ipm d
+                ON d.id_registro = x.id_registro
+             WHERE g.sn_ativo = 'true' AND UPPER(BTRIM(g.convenio)) = 'ISSEC'
+               AND COALESCE(g.cd_atendimento, 0) = 0
+               AND d.origem_maida IS NOT NULL
+               AND NULLIF(BTRIM(d.numero_lote), '') IS NOT NULL
+               AND BTRIM(g.processo_controle_fatura_gab) IN (
+                   BTRIM(d.numero_lote), 'MAIDA-' || BTRIM(d.numero_lote))
         )
         SELECT t.id, MIN(c.processo) AS processo
           FROM traced t JOIN canonical c
@@ -5091,6 +5117,11 @@ def _processos_lotes_maida_follow_up(session):
          WHERE t.processo = t.lote OR t.processo = c.processo
          GROUP BY t.id
         HAVING COUNT(DISTINCT c.processo) = 1
+        UNION
+        SELECT p.id, MIN(cl.processo) AS processo
+          FROM provisional p JOIN canonical_lote cl ON cl.lote = p.lote
+         GROUP BY p.id
+        HAVING COUNT(DISTINCT cl.processo) = 1
     """)).mappings()
     return {int(row['id']): str(row['processo']) for row in rows}
 
