@@ -397,14 +397,98 @@ def test_exportacao_completa_preserva_filtros_e_nao_registra_snapshot(
     snapshot.assert_called_once()
 
 
+def _linha_titulo(codigo_fornecedor, parcela, referencia=None):
+    return {
+        'codigo_fornecedor': codigo_fornecedor,
+        'referencia_sem_cadastro': referencia,
+        'nome_fornecedor': 'Fornecedor',
+        'codigo_parcela_pk': parcela,
+        'codigo_contas_pagar': parcela,
+        'numero_documento': f'NF-{parcela}',
+        'descricao_conta': 'Medicamentos',
+        'numero_parcela': 1,
+        'data_lancamento': datetime(2026, 5, 20, 0, 0),
+        'data_emissao': datetime(2026, 5, 18, 0, 0),
+        'valor_duplicata': Decimal('500'),
+        'data_vencimento': datetime(2026, 6, 9, 0, 0),
+        'tipo_quitacao': 'quitado',
+        'valor_honrado_oracle': Decimal('500'),
+    }
+
+
 def test_titulos_exportacao_respeita_limite_oracle():
-    oracle = FakeSession([[], []])
+    oracle = FakeSession([[]])
+    assert (
+        contas_pagar._consultar_titulos_oracle(oracle, list(range(1000))) == []
+    )
+    # Up to 1000 suppliers: one filtered statement, IN list within the limit.
+    assert len(oracle.executions) == 1
+    _, params = oracle.executions[0]
+    assert len(params['codigos_fornecedor']) == 1000
+
+    oracle = FakeSession([[]])
     assert (
         contas_pagar._consultar_titulos_oracle(oracle, list(range(1001))) == []
     )
-    assert [
-        len(params['codigos_fornecedor']) for _, params in oracle.executions
-    ] == [1000, 1]
+    # More than 1000: a single scan without any IN list (no block rescans).
+    assert len(oracle.executions) == 1
+    sql, params = oracle.executions[0]
+    assert 'codigos_fornecedor' not in params
+    assert 'referencias_sem_cadastro' not in params
+    assert ':codigos_fornecedor' not in sql
+    assert ':referencias_sem_cadastro' not in sql
+
+
+def test_exportacao_ampla_filtra_fornecedores_em_python_com_sem_cadastro():
+    sem_cadastro = contas_pagar._identidade_fornecedor({
+        'codigo_fornecedor': None, 'referencia_sem_cadastro': 'nome:ACME',
+    })
+    solicitados = [*range(1, 1001), sem_cadastro]
+    oracle = FakeSession([[
+        _linha_titulo(5, 50),
+        _linha_titulo(5000, 51),  # not requested
+        _linha_titulo(None, 52, referencia='nome:ACME'),
+        _linha_titulo(None, 53, referencia='nome:OUTRO'),  # not requested
+        _linha_titulo(7, None),  # no installment key: skipped
+    ]])
+
+    titulos = contas_pagar._consultar_titulos_oracle(
+        oracle, solicitados, incluir_pagos=True, excluir_provisoes_oc=True,
+        classificacao='Medicamentos', data_inicio=date(2026, 1, 1),
+    )
+
+    assert [t['codigo_parcela'] for t in titulos] == [50, 52]
+    assert titulos[1]['codigo_fornecedor'] == sem_cadastro
+    assert titulos[1]['sem_cadastro'] is True
+    _, params = oracle.executions[0]
+    assert params == {
+        'data_inicio': date(2026, 1, 1),
+        'data_fim': None,
+        'classificacao': 'Medicamentos',
+        'incluir_pagos': 1,
+        'excluir_provisoes_oc': 1,
+        'processo_provisao_oc': contas_pagar.PROCESSO_PROVISAO_OC,
+    }
+
+
+def test_consulta_sem_filtro_de_fornecedor_so_remove_o_where_de_fornecedor():
+    filtrada = contas_pagar.ORACLE_TITULOS_QUERY.text
+    todos = contas_pagar.ORACLE_TITULOS_TODOS_QUERY.text
+    inicio = filtrada.index(contas_pagar._FILTRO_FORNECEDORES_TITULOS)
+    fim = filtrada.index(contas_pagar._GROUP_BY_TITULOS)
+    # Exactly the supplier condition (codes and unregistered references).
+    assert filtrada[inicio:fim] == (
+        '     WHERE v.codigo_do_fornecedor IN :codigos_fornecedor\n'
+        f'        OR ({contas_pagar.REFERENCIA_SEM_CADASTRO_SQL})'
+        ' IN :referencias_sem_cadastro\n'
+    )
+    assert filtrada[:inicio] + filtrada[fim:] == todos
+    for trecho in (
+        ':incluir_pagos', ':data_inicio', ':data_fim', ':classificacao',
+        ':excluir_provisoes_oc', 'LEFT JOIN pagamentos pg',
+        'ORDER BY p.codigo_fornecedor',
+    ):
+        assert trecho in todos
 
 
 def test_total_ate_hoje_inclui_hoje_exclui_futuro_e_desconta_pagamentos(
