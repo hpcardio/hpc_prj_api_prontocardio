@@ -307,6 +307,27 @@ SELECT p.codigo_fornecedor,
     bindparam('codigos_fornecedor', expanding=True),
     bindparam('referencias_sem_cadastro', expanding=True),
 )
+# Oracle supports at most 1000 expressions per IN list.
+LIMITE_LISTA_IN = 1000
+_FILTRO_FORNECEDORES_TITULOS = (
+    '     WHERE v.codigo_do_fornecedor IN :codigos_fornecedor\n'
+)
+_GROUP_BY_TITULOS = (
+    '     GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,\n'
+)
+
+
+def _sem_filtro_fornecedor(sql: str) -> str:
+    inicio = sql.index(_FILTRO_FORNECEDORES_TITULOS)
+    return sql[:inicio] + sql[sql.index(_GROUP_BY_TITULOS):]
+
+
+# Same titles query without the supplier filter. With more than one IN block
+# (a full export), each block rescanned the MV view (~17 s per 1000
+# suppliers); one scan filtered in Python returns the same titles.
+ORACLE_TITULOS_TODOS_QUERY = text(
+    _sem_filtro_fornecedor(ORACLE_TITULOS_QUERY.text)
+)
 
 
 def _decimal(value) -> Decimal:
@@ -397,21 +418,43 @@ def _consultar_titulos_oracle(
 ) -> list[dict]:
     if not codigos_fornecedor:
         return []
+    filtros = {
+        'data_inicio': data_inicio,
+        'data_fim': data_fim,
+        'classificacao': classificacao,
+        'incluir_pagos': 1 if incluir_pagos else 0,
+        'excluir_provisoes_oc': 1 if excluir_provisoes_oc else 0,
+        'processo_provisao_oc': PROCESSO_PROVISAO_OC,
+    }
     try:
-        rows = []
-        # Oracle supports at most 1000 expressions per IN list.
-        for inicio in range(0, len(codigos_fornecedor), 1000):
-            lote = codigos_fornecedor[inicio : inicio + 1000]
-            codigos = [codigo for codigo in lote if isinstance(codigo, int)]
+        if len(codigos_fornecedor) > LIMITE_LISTA_IN:
+            solicitados = set(codigos_fornecedor)
+            rows = [
+                row
+                for row in read_payables_rows(
+                    session,
+                    ORACLE_TITULOS_TODOS_QUERY.execution_options(
+                        prontoglosa_fetch_rows=1000
+                    ),
+                    filtros,
+                )
+                if row['codigo_parcela_pk'] is not None
+                and _identidade_fornecedor(row) in solicitados
+            ]
+        else:
+            codigos = [
+                codigo for codigo in codigos_fornecedor
+                if isinstance(codigo, int)
+            ]
             referencias = [
                 urlsafe_b64decode(
                     codigo.removeprefix(SEM_CADASTRO_PREFIX) + '==='
                 ).decode('utf-8')
-                for codigo in lote
+                for codigo in codigos_fornecedor
                 if isinstance(codigo, str)
                 and codigo.startswith(SEM_CADASTRO_PREFIX)
             ]
-            rows.extend(read_payables_rows(
+            rows = read_payables_rows(
                 session,
                 ORACLE_TITULOS_QUERY.execution_options(
                     prontoglosa_fetch_rows=1000
@@ -419,14 +462,9 @@ def _consultar_titulos_oracle(
                 {
                     'codigos_fornecedor': codigos,
                     'referencias_sem_cadastro': referencias,
-                    'data_inicio': data_inicio,
-                    'data_fim': data_fim,
-                    'classificacao': classificacao,
-                    'incluir_pagos': 1 if incluir_pagos else 0,
-                    'excluir_provisoes_oc': 1 if excluir_provisoes_oc else 0,
-                    'processo_provisao_oc': PROCESSO_PROVISAO_OC,
+                    **filtros,
                 },
-            ))
+            )
     except SQLAlchemyError as exc:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
