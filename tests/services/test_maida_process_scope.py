@@ -81,3 +81,71 @@ def test_grouped_process_keeps_source_amounts_and_saved_treatment(monkeypatch):
     assert records[2].processo_controle_fatura_gab=='31644'
     query=session.scalars.call_args_list[0].args[0]
     assert [1,2,3,4] in query.compile().params.values()
+
+
+def _scope_db(conn):
+    conn.connection.create_function('BTRIM', 1, lambda v: v.strip() if v else v)
+    for schema in ('api_prontocardio', 'raw_issec_portal'):
+        conn.exec_driver_sql(f"ATTACH DATABASE ':memory:' AS {schema}")
+    conn.exec_driver_sql("CREATE TABLE raw_issec_portal.processos (processo TEXT)")
+    conn.exec_driver_sql("INSERT INTO raw_issec_portal.processos VALUES ('2600040124'), ('2600099999')")
+    conn.exec_driver_sql("CREATE TABLE api_prontocardio.registros_glosa (id INTEGER, cd_remessa INTEGER, cd_atendimento INTEGER, conta INTEGER, cd_lancamento INTEGER, motivo_glosa TEXT, guia TEXT, procedimento TEXT, sn_ativo TEXT, convenio TEXT, processo_controle_fatura_gab TEXT)")
+    conn.exec_driver_sql("CREATE TABLE api_prontocardio.registros_glosa_demonstrativo_ipm (registro_glosa_id INTEGER, id_registro TEXT)")
+    conn.exec_driver_sql("CREATE TABLE api_prontocardio.demonstrativo_conta_ipm (id_registro TEXT, numero_lote TEXT, origem_maida TEXT)")
+
+
+def _add(conn, ident, remessa, atendimento, process, lote, active='true'):
+    conn.execute(text(
+        "INSERT INTO api_prontocardio.registros_glosa VALUES "
+        "(:id,:remessa,:atend,:id,:id,'1705','G','P',:active,'ISSEC',:process)"
+    ), dict(id=ident, remessa=remessa, atend=atendimento, process=process, active=active))
+    conn.execute(text("INSERT INTO api_prontocardio.registros_glosa_demonstrativo_ipm VALUES (:id,:id)"), {'id': ident})
+    conn.execute(text("INSERT INTO api_prontocardio.demonstrativo_conta_ipm VALUES (:id,:lote,'lotes')"), {'id': ident, 'lote': lote})
+
+
+def test_unmatched_maida_item_follows_the_single_process_of_its_lot(monkeypatch):
+    monkeypatch.setattr(f, '_tabela_ipm_existe', lambda *a: True)
+    monkeypatch.setattr(f, '_tabela_schema_existe', lambda *a: True)
+    with create_engine('sqlite://').connect() as conn:
+        _scope_db(conn)
+        # Matched item of lot 33209 already treated in process 2600040124.
+        _add(conn, 1, 20482, 354532, '2600040124', '33209')
+        # Pending matched items keep the lot as provisional process.
+        _add(conn, 2, 20482, 354532, '33209', '33209')
+        # Unmatched items: provisional remittance = lot, attendance 0.
+        _add(conn, 3, 33209, 0, 'MAIDA-33209', '33209')
+        _add(conn, 4, 33209, 0, '33209', '33209')
+        # Inactive and other-lot provisional items are not touched.
+        _add(conn, 5, 33209, 0, 'MAIDA-33209', '33209', active='not')
+        _add(conn, 6, 40000, 0, 'MAIDA-40000', '40000')
+        with Session(conn) as session:
+            assert f._processos_lotes_maida_follow_up(session) == {
+                1: '2600040124', 2: '2600040124',
+                3: '2600040124', 4: '2600040124',
+            }
+
+
+def test_unmatched_maida_item_stays_out_when_lot_has_two_processes(monkeypatch):
+    monkeypatch.setattr(f, '_tabela_ipm_existe', lambda *a: True)
+    monkeypatch.setattr(f, '_tabela_schema_existe', lambda *a: True)
+    with create_engine('sqlite://').connect() as conn:
+        _scope_db(conn)
+        _add(conn, 1, 20482, 354532, '2600040124', '33209')
+        _add(conn, 2, 20999, 360000, '2600099999', '33209')
+        _add(conn, 3, 33209, 0, 'MAIDA-33209', '33209')
+        with Session(conn) as session:
+            mapping = f._processos_lotes_maida_follow_up(session)
+        assert mapping == {1: '2600040124', 2: '2600099999'}
+        assert 3 not in mapping
+
+
+def test_matched_item_never_inherits_process_from_another_remittance(monkeypatch):
+    monkeypatch.setattr(f, '_tabela_ipm_existe', lambda *a: True)
+    monkeypatch.setattr(f, '_tabela_schema_existe', lambda *a: True)
+    with create_engine('sqlite://').connect() as conn:
+        _scope_db(conn)
+        _add(conn, 1, 20482, 354532, '2600040124', '33209')
+        # Same lot, real MV attendance in another remittance: unchanged rule.
+        _add(conn, 2, 20999, 360000, '33209', '33209')
+        with Session(conn) as session:
+            assert 2 not in f._processos_lotes_maida_follow_up(session)
