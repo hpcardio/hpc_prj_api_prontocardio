@@ -20,6 +20,15 @@ ALARM_LABELS = {
 }
 
 
+def normalize_integrated_evolution_text(
+    text: str,
+    line_code: str | None,
+) -> str | None:
+    if line_code != 'LC-MULTI':
+        return None
+    return text.strip()
+
+
 def _text(value: Any) -> str:
     if value is None or isinstance(value, (dict, list)):
         return ''
