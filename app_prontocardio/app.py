@@ -30,6 +30,7 @@ from app_prontocardio.routers import (
     faturamento_rede,
     financeiro,
     institucional,
+    mv_identidade,
     livre,
     operacional,
     origens_mv,
@@ -130,6 +131,7 @@ app.include_router(financeiro.router)
 app.include_router(contas_pagar.router)
 app.include_router(contas_pagar_nfse.router)
 app.include_router(contas_pagar_boletos.router)
+app.include_router(mv_identidade.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
 app.include_router(agenda_medica.router)
