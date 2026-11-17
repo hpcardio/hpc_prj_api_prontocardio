@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     ALGORITHM: str
     FRONTEND_BASE_URL: str = 'http://localhost:8080'
     FRONTEND_PASSWORD_RESET_URL: str | None = None
+    # Login MV pelo CAS da MV e sessão Oracle por proxy (Contas a Pagar).
+    MV_CAS_BASE_URL: str = 'http://2361prd.cloudmv.com.br/mvautenticador-cas'
+    MV_CAS_SERVICE_URL: str | None = None
+    MV_CAS_TIMEOUT_SECONDS: float = 15
+    MV_PROXY_USER: str = 'RC_PROXY'
+    MV_PROXY_PASSWORD: str | None = None
     CORS_ALLOWED_ORIGINS: str = ''
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
