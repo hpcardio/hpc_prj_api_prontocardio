@@ -369,7 +369,7 @@ def listar_recebidas(
     usuario: AcessoFila,
     session: SessionPostgres,
     oracle: SessionOracle,
-    situacao: Literal['pendente', 'a_classificar', 'lancada', 'todas'] = 'pendente',
+    situacao: Literal['pendente', 'pronta', 'a_classificar', 'lancada', 'todas'] = 'pendente',
     cd_oficina: int | None = None,
     desde: Annotated[date | None, Query()] = None,
 ):
@@ -378,6 +378,8 @@ def listar_recebidas(
     ``pendente``: oficina definida e ainda sem entrada/título no MV.
     ``a_classificar``: fornecedor sem regra possível (só o financeiro vê).
     ``lancada``: já existe ENT_SERV ou CON_PAG no MV para fornecedor+número.
+    ``pronta``: pendente com boleto(s) anexado(s) e sem divergência — os
+    títulos que o financeiro pode importar.
     """
     if not session.execute(SQL_TABELA_NFSE).scalar_one():
         return {
@@ -404,6 +406,11 @@ def listar_recebidas(
     cnpjs = [somente_digitos(n['prestador_cnpj']) for n in notas if n['prestador_cnpj']]
     lancadas = _lancadas_mv(oracle, cnpjs) if cnpjs else {}
     empresas = _empresas_mv(oracle)
+    # Import local: contas_pagar_boletos importa este módulo.
+    from app_prontocardio.routers.contas_pagar_boletos import (  # noqa: PLC0415
+        boletos_por_nota,
+    )
+    boletos = boletos_por_nota(session, cnpjs)
 
     itens = []
     for nota in notas:
@@ -423,7 +430,16 @@ def listar_recebidas(
         oficina_nota = regra['cd_oficina'] if regra and status_regra == STATUS_DEFINIDA else None
         if permitidas is not None and oficina_nota not in permitidas:
             continue
-        if situacao not in ('todas', situacao_nota):
+        resumo_boletos = boletos.get((cnpj, nota['numero_nfse']))
+        pronta = (
+            situacao_nota == 'pendente'
+            and resumo_boletos is not None
+            and not resumo_boletos['com_divergencia']
+        )
+        if situacao == 'pronta':
+            if not pronta:
+                continue
+        elif situacao not in ('todas', situacao_nota):
             continue
         if cd_oficina is not None and oficina_nota != cd_oficina:
             continue
@@ -448,6 +464,13 @@ def listar_recebidas(
             'situacao': situacao_nota,
             'motivo': motivo if situacao_nota == 'a_classificar' else None,
             'mv': mv,
+            'boletos': {
+                'quantidade': int(resumo_boletos['quantidade']),
+                'soma': resumo_boletos['soma'],
+                'primeiro_vencimento': resumo_boletos['primeiro_vencimento'],
+                'com_divergencia': bool(resumo_boletos['com_divergencia']),
+            } if resumo_boletos else None,
+            'pronta': pronta,
         })
 
     por_oficina: dict[int | None, dict] = {}
