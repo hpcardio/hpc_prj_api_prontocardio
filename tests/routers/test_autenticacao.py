@@ -1,3 +1,4 @@
+from http import HTTPStatus
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -154,3 +155,44 @@ def test_link_receita_certa_entrega_token_por_query(monkeypatch):
     assert link.path == '/redefinir-senha/'
     assert parse_qs(link.query) == {'token': ['token+teste/=']}
     assert not link.fragment
+
+
+TOKEN_TESTE = 'token-de-teste-com-mais-de-32-caracteres-123'
+
+
+def test_redefinir_senha_por_email_encerra_a_troca_obrigatoria(
+    cliente, session, usuario_teste
+):
+    """Quem redefine pelo link do e-mail já escolheu a própria senha.
+
+    17/11/2026: usuário com senha temporária ficava travado mesmo depois de
+    redefinir pelo e-mail.
+    """
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+    from hashlib import sha256  # noqa: PLC0415
+
+    from app_prontocardio.models import (  # noqa: PLC0415
+        TokenRedefinicaoSenha,
+    )
+
+    usuario_teste.troca_senha_obrigatoria = True
+    session.add(TokenRedefinicaoSenha(
+        usuario_id=usuario_teste.id,
+        token_hash=sha256(TOKEN_TESTE.encode()).hexdigest(),
+        expira_em=datetime.now(timezone.utc) + timedelta(hours=1),
+    ))
+    session.commit()
+
+    resposta = cliente.post(
+        '/autenticacao/redefinir-senha',
+        json={'token': TOKEN_TESTE, 'nova_senha': 'NovaSenha#2026'},
+    )
+    assert resposta.status_code == HTTPStatus.OK
+
+    session.refresh(usuario_teste)
+    assert usuario_teste.troca_senha_obrigatoria is False
+    login = cliente.post(
+        '/autenticacao/token',
+        data={'username': usuario_teste.email, 'password': 'NovaSenha#2026'},
+    )
+    assert login.status_code == HTTPStatus.OK

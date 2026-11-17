@@ -237,6 +237,9 @@ def confirmar_redefinicao_senha(
             HTTPStatus.BAD_REQUEST, 'Link inválido ou expirado.'
         )
     usuario.senha = gera_hash_senha(payload.nova_senha)
+    # A senha foi escolhida pelo próprio usuário (link do e-mail): deixa de
+    # ser temporária.
+    usuario.troca_senha_obrigatoria = False
     session.execute(
         update(TokenRedefinicaoSenha)
         .where(TokenRedefinicaoSenha.usuario_id == usuario.id)
