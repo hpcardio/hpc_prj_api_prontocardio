@@ -130,8 +130,10 @@ def test_filtro_padrao_mostra_so_pendentes_agrupadas_por_oficina():
     assert [i['chave'] for i in resposta['itens']] == ['11111111000111-0000123']
     assert resposta['oficinas'] == [{
         'cd_oficina': 2, 'ds_oficina': 'TECNOLOGIA DA INFORMACAO',
+        'cd_multi_empresa': 1, 'empresa': 'HOSPITAL',
         'quantidade': 1, 'valor': Decimal('1500.50'),
     }]
+    assert resposta['itens'][0]['empresa'] == 'HOSPITAL'
 
 
 def test_setor_ve_so_as_proprias_oficinas_e_nao_ve_a_classificar():
@@ -233,3 +235,37 @@ def test_data_emissao_aceita_timestamptz_texto_e_nulo():
 def test_filtro_por_data_usa_timestamp():
     assert "AT TIME ZONE 'America/Sao_Paulo')::date >= CAST(:desde AS date)" in str(rota.SQL_NFSE_RECEBIDAS)
     assert 'left(coalesce(data_hora' not in str(rota.SQL_NFSE_RECEBIDAS)
+
+
+def test_nota_lancada_sem_regra_nao_entra_no_grupo_a_classificar():
+    sem_regra_lancada = {**NOTA_TI, 'prestador_cnpj': '44444444000144', 'numero_nfse': '7'}
+    lancadas = LANCADAS_MV + [{'cnpj': '44444444000144', 'nr_documento': '7', 'cd_ent_serv': 1,
+                               'cd_con_pag': None, 'origem': 'ENT_SERV'}]
+    postgres = FakeSession([[True], [NOTA_NOVA, sem_regra_lancada], REGRAS])
+    oracle = FakeSession([lancadas, [HOSPITAL]])
+
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='todas')
+
+    grupos = {g['ds_oficina']: g['quantidade'] for g in resposta['oficinas']}
+    assert grupos == {rota.GRUPO_A_CLASSIFICAR: 1, rota.GRUPO_SEM_SETOR_LANCADA: 1}
+
+
+def test_oficinas_homonimas_de_empresas_diferentes_ficam_separadas():
+    pa = {'cd_multi_empresa': 2, 'ds_multi_empresa': 'PRONTO ATENDIMENTO', 'cnpj': '05613278000158'}
+    nota_pa = {**NOTA_TI, 'prestador_cnpj': '55555555000155', 'numero_nfse': '8',
+               'tomador_cnpj': '05613278000158'}
+    nota_hosp = {**NOTA_TI, 'prestador_cnpj': '66666666000166', 'numero_nfse': '9'}
+    regra = {**REGRAS[0], 'ds_oficina': 'CENTRAL DE RECEBIMENTO FISCAL'}
+    regras = [
+        {**regra, 'cnpj': '55555555000155', 'cd_multi_empresa': 2, 'cd_oficina': 12},
+        {**regra, 'cnpj': '66666666000166', 'cd_multi_empresa': 1, 'cd_oficina': 5},
+    ]
+    postgres = FakeSession([[True], [nota_pa, nota_hosp], regras])
+    oracle = FakeSession([[], [HOSPITAL, pa]])
+
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='todas')
+
+    assert [(g['ds_oficina'], g['empresa']) for g in resposta['oficinas']] == [
+        ('CENTRAL DE RECEBIMENTO FISCAL', 'HOSPITAL'),
+        ('CENTRAL DE RECEBIMENTO FISCAL', 'PRONTO ATENDIMENTO'),
+    ]
