@@ -16,6 +16,8 @@ TELAS_SISTEMA = (
     'contas_pagar_operacao',
     'contas_pagar_acompanhamento',
     'contas_pagar_gestao',
+    'contas_pagar_nfse_setor',
+    'contas_pagar_nfse_regras',
     'solicitar_nota',
     'solicitacoes_cadastradas',
     'solicitacoes_recusas',
@@ -42,6 +44,8 @@ TELAS_RESTRITAS = {
     'agenda_medica_evolucoes',
     'pronto_escala_medico',
     'pronto_escala_validador',
+    'contas_pagar_nfse_setor',
+    'contas_pagar_nfse_regras',
 }
 TELAS_PADRAO = tuple(
     tela for tela in TELAS_SISTEMA if tela not in TELAS_RESTRITAS
