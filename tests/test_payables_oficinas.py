@@ -1,4 +1,4 @@
-# ruff: noqa: PLR2004
+# ruff: noqa: PLR2004, PLR0913, E501
 from decimal import Decimal
 
 from app_prontocardio.services.payables_oficinas import (
