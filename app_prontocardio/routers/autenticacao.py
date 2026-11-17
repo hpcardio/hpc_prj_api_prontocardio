@@ -9,13 +9,14 @@ from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_postgres
 from app_prontocardio.models import TokenRedefinicaoSenha, Usuario
 from app_prontocardio.schema import (
     Message,
+    FirstAccessPasswordChange,
     PasswordResetConfirm,
     PasswordResetRequest,
     Token,
@@ -35,15 +36,25 @@ OAuthForm = Annotated[OAuth2PasswordRequestForm, Depends()]
 settings = Settings()
 
 
+def _usuario_por_login(session: Session, login: str) -> Usuario | None:
+    login_normalizado = login.strip().lower()
+    return session.scalar(
+        select(Usuario).where(
+            or_(
+                func.lower(Usuario.email) == login_normalizado,
+                func.lower(Usuario.nome_usuario) == login_normalizado,
+            )
+        )
+    )
+
+
 @router.post('/token', status_code=HTTPStatus.OK, response_model=Token)
 def autenticar_usuario_para_acesso(
     form_data: OAuthForm, session: SessionPostgres
 ):
     """Gera token para usuário logado"""
 
-    usuario_banco = session.scalar(
-        select(Usuario).where(Usuario.email == form_data.username)
-    )
+    usuario_banco = _usuario_por_login(session, form_data.username)
 
     excessao_autenticacao = HTTPException(
         status_code=HTTPStatus.UNAUTHORIZED, detail='Email ou Senha incorretos'
@@ -57,9 +68,45 @@ def autenticar_usuario_para_acesso(
     ):
         raise excessao_autenticacao
 
+    if usuario_banco.troca_senha_obrigatoria:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail={
+                'codigo': 'TROCA_SENHA_OBRIGATORIA',
+                'mensagem': 'Defina uma nova senha para continuar.',
+            },
+        )
+
     token = criar_token_usuario(usuario_banco)
 
     return {'access_token': token, 'token_type': 'Bearer'}
+
+
+@router.post('/primeiro-acesso', status_code=HTTPStatus.OK, response_model=Message)
+def concluir_primeiro_acesso(
+    payload: FirstAccessPasswordChange, session: SessionPostgres
+):
+    usuario = _usuario_por_login(session, payload.usuario)
+    if (
+        not usuario
+        or not usuario.ativo
+        or not usuario.troca_senha_obrigatoria
+        or not valida_senha_cru_x_senha_hash_db(
+            payload.senha_temporaria, usuario.senha
+        )
+    ):
+        raise HTTPException(
+            HTTPStatus.UNAUTHORIZED, 'Usuário ou senha temporária incorretos.'
+        )
+    if payload.nova_senha == payload.senha_temporaria:
+        raise HTTPException(
+            HTTPStatus.BAD_REQUEST,
+            'A nova senha deve ser diferente da senha temporária.',
+        )
+    usuario.senha = gera_hash_senha(payload.nova_senha)
+    usuario.troca_senha_obrigatoria = False
+    session.commit()
+    return {'message': 'Senha definida com sucesso. Entre com a nova senha.'}
 
 
 @router.post(

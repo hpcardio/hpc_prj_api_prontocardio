@@ -10,7 +10,7 @@ migrations não rodam no startup. O mesmo SQL está em
 from alembic import op
 
 revision = '20261117_067'
-down_revision = '20261104_065'
+down_revision = '20261117_066'
 branch_labels = None
 depends_on = None
 

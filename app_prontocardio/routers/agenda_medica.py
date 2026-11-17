@@ -38,6 +38,7 @@ from app_prontocardio.services.agenda_medica_soulmv import (
 router = APIRouter(prefix='/agenda-medica', tags=['agenda-medica'])
 
 TELA_MEDICO = 'agenda_medica_medico'
+TELA_ATENDENTE = 'agenda_medica_atendente'
 TELA_ADMIN = 'agenda_medica_admin'
 TELA_RESPONSAVEL = 'agenda_medica_responsavel'
 TELA_EVOLUCOES = 'agenda_medica_evolucoes'
@@ -105,7 +106,7 @@ def acesso_responsavel(usuario: UsuarioAtual) -> Usuario:
 
 
 def acesso_leitura(usuario: UsuarioAtual) -> Usuario:
-    telas = (TELA_MEDICO, TELA_ADMIN, TELA_RESPONSAVEL)
+    telas = (TELA_MEDICO, TELA_ATENDENTE, TELA_ADMIN, TELA_RESPONSAVEL)
     if not any(_tem_tela(usuario, tela) for tela in telas):
         raise _proibido('Sem acesso à Agenda Médica.')
     return usuario
@@ -239,6 +240,7 @@ def quem_sou(usuario: Leitor, session: SessionPostgres):
         papel
         for papel, tela in (
             ('medico', TELA_MEDICO),
+            ('atendente', TELA_ATENDENTE),
             ('admin', TELA_ADMIN),
             ('responsavel', TELA_RESPONSAVEL),
         )

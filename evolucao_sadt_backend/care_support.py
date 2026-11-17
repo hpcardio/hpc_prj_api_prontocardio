@@ -326,6 +326,13 @@ def _generic_support(
     for source_name, value in (raw.get('exames_protocolares') or {}).items():
         item = _exam(value)
         target = aliases.get(source_name)
+        if not target and isinstance(value, dict):
+            protocol_label = _normalized_report_text(
+                f'{source_name} {value.get("exame", "")} '
+                f'{value.get("campo", "")}'
+            )
+            if 'POTASSIO' in protocol_label:
+                target = 'potassio'
         if item and target and target not in exams:
             exams[target] = item
 
@@ -386,7 +393,11 @@ def load_care_support(
     except Exception:
         cal_origin = None
     if line_code == 'LC-DAC':
-        result = {**raw, 'cal_origem': cal_origin}
+        result = {
+            **raw,
+            **_generic_support(raw, line_code),
+            'cal_origem': cal_origin,
+        }
         return _with_consultation_type(result, consultation)
     if line_code in {'LC-IC', 'LC-PREVENCAO'}:
         raw = {**raw, 'itens_ultima_prescricao': []}

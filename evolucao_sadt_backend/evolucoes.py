@@ -22,6 +22,9 @@ from evolucao_sadt_backend.evolucao_schema import (
 )
 from evolucao_sadt_backend.care_support import load_care_support
 from evolucao_sadt_backend.care_enrollment import default_enrollment_store
+from evolucao_sadt_backend.integrated_forms import (
+    normalize_integrated_evolution_text,
+)
 from evolucao_sadt_backend.mv_identity import (
     EvolutionOwnershipError,
     assert_evolution_ownership,
@@ -536,6 +539,9 @@ _MARCADOR_LINHA_CUIDADO = re.compile(
 def _normalizar_linha_cuidado(texto: str, codigo: str | None) -> str:
     if not codigo:
         return texto.strip()
+    integrated_text = normalize_integrated_evolution_text(texto, codigo)
+    if integrated_text is not None:
+        return integrated_text
     linha = next(
         (
             item

@@ -28,6 +28,9 @@ class UserSchema(BaseModel):
     nome: str
     email: EmailStr
     senha: str = Field(min_length=8, max_length=128)
+    nome_usuario: str | None = Field(
+        default=None, min_length=3, max_length=80, pattern=r'^[a-z0-9]+(?:[._-][a-z0-9]+)*$'
+    )
     perfil: str = Field(default='usuario', pattern='^(usuario|ti)$')
     telas_permitidas: list[str] = Field(default_factory=telas_padrao)
 
@@ -41,8 +44,10 @@ class UserPublic(BaseModel):
     id: int
     nome: str
     email: EmailStr
+    nome_usuario: str | None = None
     perfil: str
     ativo: bool
+    troca_senha_obrigatoria: bool = False
     telas_permitidas: list[str]
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,6 +62,18 @@ class UserStatusUpdate(BaseModel):
 
 class UserPasswordUpdate(BaseModel):
     senha: str = Field(min_length=8, max_length=128)
+
+
+class FirstAccessPasswordChange(BaseModel):
+    usuario: str = Field(min_length=3, max_length=254)
+    senha_temporaria: str = Field(min_length=8, max_length=128)
+    nova_senha: str = Field(min_length=8, max_length=128)
+
+
+class TemporaryPasswordPublic(BaseModel):
+    usuario_id: int
+    nome_usuario: str
+    senha_temporaria: str
 
 
 class UserPermissionsUpdate(BaseModel):

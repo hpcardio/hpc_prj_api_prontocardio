@@ -162,6 +162,8 @@ CONSULTA_HORARIOS_AGENDA = """
            rc.DS_ASSUNTO AS assunto_confirmacao,
            CASE
                WHEN rc.CD_REGISTRO_VINCULADO IS NULL THEN 'NAO_CONFIRMADO'
+               WHEN UPPER(rc.DS_ASSUNTO) LIKE '%CANCEL%'
+                   THEN 'CANCELAMENTO_SOLICITADO'
                WHEN UPPER(rc.DS_ASSUNTO) LIKE '%NÃO CONFIRM%'
                  OR UPPER(rc.DS_ASSUNTO) LIKE '%NAO CONFIRM%'
                    THEN 'NAO_CONFIRMADO'

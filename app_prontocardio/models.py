@@ -152,6 +152,12 @@ class Usuario:
     nome: Mapped[str] = mapped_column(String, unique=True)
     email: Mapped[str] = mapped_column(String, unique=True)
     senha: Mapped[str]
+    nome_usuario: Mapped[str | None] = mapped_column(
+        String(80), unique=True, nullable=True, default=None
+    )
+    troca_senha_obrigatoria: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text('false')
+    )
     perfil: Mapped[str] = mapped_column(
         String(20), default='usuario', server_default=text("'usuario'")
     )

@@ -52,6 +52,9 @@ def test_criar_usuario(cliente, token_teste):
         'perfil': 'usuario',
         'ativo': True,
         'telas_permitidas': telas_padrao(),
+        # Primeiro acesso: login nominal derivado do e-mail e troca de senha.
+        'nome_usuario': 'usuario_novo',
+        'troca_senha_obrigatoria': True,
     }
 
 
@@ -132,6 +135,8 @@ def test_alterar_usuario(cliente, usuario_teste, token_teste):
         'perfil': 'ti',
         'ativo': True,
         'telas_permitidas': telas_padrao(),
+        'nome_usuario': None,
+        'troca_senha_obrigatoria': False,
     }
 
 

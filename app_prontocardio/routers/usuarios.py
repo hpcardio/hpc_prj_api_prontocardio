@@ -1,4 +1,6 @@
 from http import HTTPStatus
+import secrets
+import string
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +19,7 @@ from app_prontocardio.schema import (
     UserPublic,
     UserSchema,
     UserStatusUpdate,
+    TemporaryPasswordPublic,
 )
 from app_prontocardio.security import (
     gera_hash_senha,
@@ -25,6 +28,22 @@ from app_prontocardio.security import (
 )
 
 router = APIRouter(prefix='/usuarios', tags=['usuarios'])
+
+
+def _senha_temporaria() -> str:
+    grupos = (
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice('!@#$%'),
+    )
+    restante = ''.join(
+        secrets.choice(string.ascii_letters + string.digits + '!@#$%')
+        for _ in range(4)
+    )
+    caracteres = list(''.join(grupos) + restante)
+    secrets.SystemRandom().shuffle(caracteres)
+    return ''.join(caracteres)
 
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 Filter_Users = Annotated[FilterPage, Query()]
@@ -65,6 +84,7 @@ def criar_usuario(
         select(Usuario).where(
             (Usuario.nome == usuario_input.nome)
             | (Usuario.email == usuario_input.email)
+            | (Usuario.nome_usuario == usuario_input.nome_usuario)
         )
     )
 
@@ -80,9 +100,12 @@ def criar_usuario(
             raise excessao_conflito_usuario
 
     senha_hasheada = gera_hash_senha(usuario_input.senha)
+    dados = usuario_input.model_dump(exclude={'senha'})
+    if not dados.get('nome_usuario'):
+        dados['nome_usuario'] = str(usuario_input.email).split('@', 1)[0].lower()
 
     usuario_banco = Usuario(
-        **usuario_input.model_dump(exclude={'senha'}), senha=senha_hasheada
+        **dados, senha=senha_hasheada, troca_senha_obrigatoria=True
     )
 
     session.add(usuario_banco)
@@ -90,6 +113,33 @@ def criar_usuario(
     session.refresh(usuario_banco)
 
     return usuario_banco
+
+
+@router.post(
+    '/{user_id}/senha-temporaria',
+    status_code=HTTPStatus.OK,
+    response_model=TemporaryPasswordPublic,
+)
+def gerar_senha_temporaria(
+    user_id: int,
+    usuario_atual: ValidaUsuarioTi,
+    session: SessionPostgres,
+):
+    usuario = session.get(Usuario, user_id)
+    if not usuario:
+        raise HTTPException(HTTPStatus.NOT_FOUND, 'Usuário não encontrado.')
+    if not usuario.nome_usuario:
+        usuario.nome_usuario = usuario.email.split('@', 1)[0].lower()
+    senha_temporaria = _senha_temporaria()
+    usuario.senha = gera_hash_senha(senha_temporaria)
+    usuario.troca_senha_obrigatoria = True
+    usuario.ativo = True
+    session.commit()
+    return {
+        'usuario_id': usuario.id,
+        'nome_usuario': usuario.nome_usuario,
+        'senha_temporaria': senha_temporaria,
+    }
 
 
 @router.patch(
@@ -128,6 +178,7 @@ def redefinir_senha_usuario(
     if not usuario:
         raise HTTPException(HTTPStatus.NOT_FOUND, 'Usuário não encontrado.')
     usuario.senha = gera_hash_senha(password_input.senha)
+    usuario.troca_senha_obrigatoria = True
     session.commit()
     return {'message': 'Senha temporária definida com sucesso.'}
 
