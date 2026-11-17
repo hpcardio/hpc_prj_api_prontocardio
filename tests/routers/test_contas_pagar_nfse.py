@@ -1,5 +1,5 @@
-# ruff: noqa: PLR2004
-from datetime import date
+# ruff: noqa: PLR2004, E501
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -54,7 +54,8 @@ HOSPITAL = {'cd_multi_empresa': 1, 'ds_multi_empresa': 'HOSPITAL', 'cnpj': '0871
 NOTA_TI = {
     'prestador_cnpj': '11111111000111', 'prestador_razao_social': 'Software SA',
     'numero_nfse': '0000123', 'codigo_verificacao_nfse': 'ABC',
-    'data_hora': '2026-11-10T09:00:00', 'competencia_nfse': '2026-11-01',
+    # timestamptz no Postgres: 02:30 UTC de 11/11 ainda é 10/11 no horário do hospital.
+    'data_hora': datetime(2026, 11, 11, 2, 30, tzinfo=timezone.utc), 'competencia_nfse': '2026-11-01',
     'valor_servicos': '1500.50', 'valor_liquido_nfse': '1400.00',
     'tomador_cnpj': '08.711.085/0001-28', 'tomador_razao_social': 'Hospital',
     'discriminacao': 'Licença',
@@ -113,6 +114,7 @@ def test_gestor_ve_pendentes_a_classificar_e_lancadas():
     assert por_chave['11111111000111-0000123']['cd_oficina'] == 2
     assert por_chave['11111111000111-0000123']['cd_multi_empresa'] == 1
     assert por_chave['11111111000111-0000123']['valor_servicos'] == Decimal('1500.50')
+    assert por_chave['11111111000111-0000123']['data_emissao'] == '2026-11-10'
     assert por_chave['22222222000122-9']['situacao'] == 'a_classificar'
     assert 'sem entradas' in por_chave['22222222000122-9']['motivo']
     # nr_documento '055' no MV casa com a NFS-e '55' (zeros à esquerda).
@@ -220,3 +222,14 @@ def test_vinculo_usuario_mv_inexistente():
         rota.vincular_usuario_mv(7, rota.UsuarioMvInput(cd_usuario_mv='XX1'),
                                  _usuario(perfil='ti'), FakeSession([]), FakeSession([[]]))
     assert 'não existe' in erro.value.detail
+
+
+def test_data_emissao_aceita_timestamptz_texto_e_nulo():
+    assert rota._data_emissao(datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)) == '2026-11-17'
+    assert rota._data_emissao('2026-11-05T10:00:00') == '2026-11-05'
+    assert rota._data_emissao(None) is None
+
+
+def test_filtro_por_data_usa_timestamp():
+    assert "AT TIME ZONE 'America/Sao_Paulo')::date >= CAST(:desde AS date)" in str(rota.SQL_NFSE_RECEBIDAS)
+    assert 'left(coalesce(data_hora' not in str(rota.SQL_NFSE_RECEBIDAS)

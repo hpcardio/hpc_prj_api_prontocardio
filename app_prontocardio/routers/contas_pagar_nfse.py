@@ -226,7 +226,8 @@ SELECT prestador_cnpj, prestador_razao_social, numero_nfse,
        valor_servicos, valor_liquido_nfse, tomador_cnpj,
        tomador_razao_social, discriminacao
   FROM api_prontocardio.nfse_xml_tomador
- WHERE left(coalesce(data_hora, ''), 10) >= :desde
+ WHERE data_hora IS NOT NULL
+   AND (data_hora AT TIME ZONE 'America/Sao_Paulo')::date >= CAST(:desde AS date)
    AND coalesce(cancelamento_data_hora, '') = ''
    AND coalesce(motivo_cancelamento_nfse, '') = ''
  ORDER BY data_hora DESC, numero_nfse
@@ -250,6 +251,17 @@ def _decimal(valor) -> Decimal | None:
         return Decimal(str(valor).replace(',', '.'))
     except InvalidOperation:
         return None
+
+
+def _data_emissao(valor) -> str | None:
+    """``data_hora`` vem do Postgres como timestamptz; o texto é aceito por segurança."""
+    if valor is None or valor == '':
+        return None
+    if isinstance(valor, datetime):
+        if valor.tzinfo is not None:
+            valor = valor.astimezone(FUSO_HOSPITAL)
+        return valor.date().isoformat()
+    return str(valor)[:10] or None
 
 
 def _inicio_padrao() -> date:
@@ -423,7 +435,7 @@ def listar_recebidas(
             'prestador': nota['prestador_razao_social'],
             'numero_nfse': nota['numero_nfse'],
             'codigo_verificacao': nota['codigo_verificacao_nfse'],
-            'data_emissao': (nota['data_hora'] or '')[:10] or None,
+            'data_emissao': _data_emissao(nota['data_hora']),
             'competencia': nota['competencia_nfse'],
             'valor_servicos': _decimal(nota['valor_servicos']),
             'valor_liquido': _decimal(nota['valor_liquido_nfse']),
