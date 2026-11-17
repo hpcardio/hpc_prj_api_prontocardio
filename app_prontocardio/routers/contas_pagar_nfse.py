@@ -404,6 +404,9 @@ def listar_recebidas(
     cnpjs = [somente_digitos(n['prestador_cnpj']) for n in notas if n['prestador_cnpj']]
     lancadas = _lancadas_mv(oracle, cnpjs) if cnpjs else {}
     empresas = _empresas_mv(oracle)
+    nomes_empresa = {
+        int(e['cd_multi_empresa']): e['ds_multi_empresa'] for e in empresas.values()
+    }
 
     itens = []
     for nota in notas:
@@ -442,6 +445,7 @@ def listar_recebidas(
             'tomador_cnpj': somente_digitos(nota['tomador_cnpj']),
             'tomador': nota['tomador_razao_social'],
             'cd_multi_empresa': cd_empresa,
+            'empresa': nomes_empresa.get(cd_empresa),
             'discriminacao': discriminacao[:TAMANHO_DISCRIMINACAO],
             'cd_oficina': oficina_nota,
             'ds_oficina': regra['ds_oficina'] if oficina_nota else None,
@@ -450,22 +454,43 @@ def listar_recebidas(
             'mv': mv,
         })
 
-    por_oficina: dict[int | None, dict] = {}
+    por_oficina: dict[tuple, dict] = {}
     for item in itens:
-        grupo = por_oficina.setdefault(
-            item['cd_oficina'],
-            {'cd_oficina': item['cd_oficina'], 'ds_oficina': item['ds_oficina'] or 'A classificar',
-             'quantidade': 0, 'valor': Decimal('0')},
-        )
+        por_oficina.setdefault(_chave_grupo(item), _novo_grupo(item))
+        grupo = por_oficina[_chave_grupo(item)]
         grupo['quantidade'] += 1
         grupo['valor'] += item['valor_servicos'] or Decimal('0')
 
     return {
         'desde': inicio,
         'situacao': situacao,
-        'oficinas': sorted(por_oficina.values(), key=lambda g: (g['cd_oficina'] is not None, g['ds_oficina'])),
+        'oficinas': sorted(
+            por_oficina.values(),
+            key=lambda g: (g['cd_oficina'] is not None, g['ds_oficina'], g['empresa'] or ''),
+        ),
         'itens': itens,
     }
+
+
+GRUPO_A_CLASSIFICAR = 'A classificar'
+GRUPO_SEM_SETOR_LANCADA = 'Sem setor (já lançada no MV)'
+
+
+def _chave_grupo(item: dict) -> tuple:
+    if item['cd_oficina'] is not None:
+        return ('oficina', item['cd_oficina'])
+    return ('sem_setor', item['situacao'] == 'a_classificar')
+
+
+def _novo_grupo(item: dict) -> dict:
+    """Grupo de oficina; a empresa distingue oficinas homônimas (ex.: Central de Recebimento Fiscal)."""
+    if item['cd_oficina'] is None:
+        rotulo = GRUPO_A_CLASSIFICAR if item['situacao'] == 'a_classificar' else GRUPO_SEM_SETOR_LANCADA
+        return {'cd_oficina': None, 'ds_oficina': rotulo, 'cd_multi_empresa': None,
+                'empresa': None, 'quantidade': 0, 'valor': Decimal('0')}
+    return {'cd_oficina': item['cd_oficina'], 'ds_oficina': item['ds_oficina'],
+            'cd_multi_empresa': item['cd_multi_empresa'], 'empresa': item['empresa'],
+            'quantidade': 0, 'valor': Decimal('0')}
 
 
 # ---------------------------------------------------------------- vínculos
