@@ -21,6 +21,7 @@ from app_prontocardio.routers import (
     biq,
     biq_admissoes_eletivas,
     contas_pagar,
+    contas_pagar_nfse,
     cuidados_paciente,
     ecg_worklist,
     evolucoes,
@@ -126,6 +127,7 @@ app.include_router(app_glosas.router)
 app.include_router(petrobras.router)
 app.include_router(financeiro.router)
 app.include_router(contas_pagar.router)
+app.include_router(contas_pagar_nfse.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
 app.include_router(agenda_medica.router)
