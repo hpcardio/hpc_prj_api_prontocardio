@@ -18,11 +18,12 @@ detalhamentos listados, até o cálculo via PRC_CALC_IMPOSTO ser tratado.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 TOLERANCIA = Decimal('0.01')
@@ -40,7 +41,17 @@ CAMPOS_DO_MODELO = (
     'cd_modelo_entrada', 'cd_id_cprb', 'tp_status_sped_terceiros', 'nr_serie', 'sn_fechado',
 )
 
-TABELAS_GRAVADAS = ('ENT_SERV', 'ITENT_SERV', 'DOCUMENTO_ENTRADA', 'DUPLICATA', 'ENT_SERV_CONCLUSAO')
+TABELAS_GRAVADAS = ('ENT_SERV', 'ITENT_SERV', 'ITENT_SERV_IMPOSTO', 'DOCUMENTO_ENTRADA', 'DUPLICATA', 'ENT_SERV_CONCLUSAO')
+
+# Retenções da NFS-e -> tipos de detalhamento (TIP_DETALHE.TP_DETALHAMENTO) do MV.
+TIPOS_POR_IMPOSTO = {
+    'iss': {'I', 'O'}, 'ir': {'J'}, 'csrf': {'S'}, 'csll': {'L'}, 'pis': {'P'}, 'cofins': {'C'}, 'inss': {'N'},
+}
+NOMES_IMPOSTO = {'iss': 'ISS', 'ir': 'IRRF', 'csrf': 'CSRF (PIS/COFINS/CSLL)', 'csll': 'CSLL', 'pis': 'PIS',
+                 'cofins': 'COFINS', 'inss': 'INSS', 'outras': 'Outras retenções'}
+ALIQUOTA_CSRF = Decimal('4.65')
+# A função de importação desconta da parcela 1 os impostos com TP_DATA E/L; os demais têm outra regra.
+TP_DATA_NA_EMISSAO = {'E', 'L'}
 
 SQL_ATRIBUI_EMPRESA = 'begin dbamv.pkg_mv2000.atribui_empresa(:empresa); end;'
 
@@ -117,7 +128,21 @@ SQL_OBRIGATORIOS = """/* rc:obrigatorios */
 select table_name, lower(column_name) as coluna
   from all_tab_columns
  where owner = 'DBAMV' and nullable = 'N'
-   and table_name in ('ENT_SERV', 'ITENT_SERV', 'DOCUMENTO_ENTRADA', 'DUPLICATA', 'ENT_SERV_CONCLUSAO')"""
+   and table_name in ('ENT_SERV', 'ITENT_SERV', 'ITENT_SERV_IMPOSTO', 'DOCUMENTO_ENTRADA', 'DUPLICATA', 'ENT_SERV_CONCLUSAO')"""
+
+SQL_TIPOS_IMPOSTO = """/* rc:tipos_imposto */
+select td.cd_detalhamento, td.ds_detalhamento, td.tp_detalhamento, td.tp_data,
+       (select max(fd.vl_percentual) from dbamv.faixa_detalhe fd where fd.cd_detalhamento = td.cd_detalhamento) as vl_percentual,
+       (select count(*) from dbamv.itent_serv_imposto i where i.cd_detalhamento = td.cd_detalhamento and i.sn_retem = 'S') as qt_uso
+  from dbamv.tip_detalhe td
+ where td.tp_detalhamento in ('I', 'O', 'J', 'S', 'L', 'P', 'C', 'N')"""
+
+SQL_IMPOSTOS_DO_FORNECEDOR = """/* rc:impostos_fornecedor */
+select distinct i.cd_detalhamento
+  from dbamv.ent_serv es
+  join dbamv.itent_serv it on it.cd_ent_serv = es.cd_ent_serv
+  join dbamv.itent_serv_imposto i on i.cd_itent_serv = it.cd_itent_serv
+ where es.cd_fornecedor = :fornecedor and i.sn_retem = 'S'"""
 
 
 @dataclass
@@ -156,6 +181,71 @@ def _dec(valor) -> Decimal:
 def retencao_da_nota(nota: dict) -> Decimal:
     """Valor retido segundo a NFS-e: serviços - líquido."""
     return _dec(nota.get('valor_servicos')) - _dec(nota.get('valor_liquido_nfse'))
+
+
+def _centavos(valor: Decimal) -> Decimal:
+    return valor.quantize(Decimal('0.01'), ROUND_HALF_UP)
+
+
+def retencoes_da_nfse(nota: dict) -> tuple[dict[str, Decimal] | None, str | None]:
+    """Impostos que a NFS-e realmente reteve: a combinação de campos que fecha serviços - líquido.
+
+    O XML às vezes traz PIS/COFINS só informativos (sem desconto no líquido),
+    por isso não basta somar todos os campos. PIS+COFINS+CSLL retidos juntos, ou
+    a CSLL com 4,65% (o ISS Fortaleza informa a CSRF no campo da CSLL), viram CSRF.
+    """
+    total = _dec(nota.get('valor_servicos'))
+    retido = retencao_da_nota(nota)
+    campos = {
+        'iss': _dec(nota.get('valor_iss_retido')) if str(nota.get('iss_retido') or '') == '1' else Decimal('0'),
+        'ir': _dec(nota.get('valor_ir')), 'pis': _dec(nota.get('valor_pis')), 'cofins': _dec(nota.get('valor_cofins')),
+        'csll': _dec(nota.get('valor_csll')), 'inss': _dec(nota.get('valor_inss')), 'outras': _dec(nota.get('outras_retencoes')),
+    }
+    campos = {k: v for k, v in campos.items() if v > 0}
+    solucoes = [
+        combinacao for tamanho in range(1, len(campos) + 1) for combinacao in itertools.combinations(sorted(campos), tamanho)
+        if abs(sum(campos[k] for k in combinacao) - retido) <= TOLERANCIA * 2
+    ]
+    if len(solucoes) != 1:
+        detalhe = ', '.join(f'{NOMES_IMPOSTO[k]} R$ {v:.2f}' for k, v in campos.items()) or 'nenhum imposto informado'
+        motivo = 'nenhuma combinação' if not solucoes else 'mais de uma combinação'
+        return None, (f'A retenção da NFS-e (R$ {retido:.2f}) não fecha com os impostos do XML ({detalhe}): '
+                      f'{motivo} soma esse valor.')
+    retidos = {k: campos[k] for k in solucoes[0]}
+    if {'pis', 'cofins', 'csll'} <= set(retidos):
+        retidos['csrf'] = retidos.pop('pis') + retidos.pop('cofins') + retidos.pop('csll')
+    elif 'csll' in retidos and abs(retidos['csll'] - _centavos(total * ALIQUOTA_CSRF / 100)) <= TOLERANCIA * 2:
+        retidos['csrf'] = retidos.pop('csll')
+    return retidos, None
+
+
+def mapear_impostos(retidos: dict[str, Decimal], total: Decimal, tipos: list[dict],
+                    historico: set[int]) -> tuple[list[dict], list[str]]:
+    """Cada retenção vira o detalhamento do MV do mesmo tipo e alíquota (preferindo o que o fornecedor já usa)."""
+    impostos, problemas = [], []
+    for categoria, valor in sorted(retidos.items()):
+        aliquota_nota = valor / total * 100 if total else Decimal('0')
+        candidatos = [
+            t for t in tipos
+            if t['tp_detalhamento'] in TIPOS_POR_IMPOSTO.get(categoria, set()) and t['vl_percentual'] is not None
+            and abs(_centavos(total * _dec(t['vl_percentual']) / 100) - valor) <= TOLERANCIA * 2
+        ]
+        if not candidatos:
+            problemas.append(f'{NOMES_IMPOSTO.get(categoria, categoria)} de R$ {valor:.2f} ({aliquota_nota:.2f}%) '
+                             'não corresponde a nenhum imposto cadastrado no MV.')
+            continue
+        candidatos.sort(key=lambda t: (t['cd_detalhamento'] not in historico, -(t['qt_uso'] or 0), t['cd_detalhamento']))
+        escolhido = candidatos[0]
+        if escolhido['tp_data'] not in TP_DATA_NA_EMISSAO:
+            problemas.append(f'O imposto {escolhido["cd_detalhamento"]} {escolhido["ds_detalhamento"]} tem outra regra de '
+                             'vencimento no MV (não é descontado na emissão); lance esta nota pelo MV.')
+            continue
+        impostos.append({
+            'categoria': categoria, 'cd_detalhamento': escolhido['cd_detalhamento'],
+            'ds_detalhamento': escolhido['ds_detalhamento'], 'vl_percentual': _dec(escolhido['vl_percentual']),
+            'valor': valor, 'do_historico': escolhido['cd_detalhamento'] in historico,
+        })
+    return sorted(impostos, key=lambda i: i['cd_detalhamento']), problemas
 
 
 def _campo(valor, origem: str) -> dict:
@@ -245,7 +335,8 @@ def _conferir_boletos(sim: Simulacao, nota: dict, boletos: list[dict], hoje: dat
 
 
 def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo: dict, fornecedor: dict,
-                      empresa: int, oficina: int, servico: int, usuario: str, agora: datetime) -> None:
+                      empresa: int, oficina: int, servico: int, usuario: str, agora: datetime,
+                      impostos: list[dict] | None = None) -> None:
     hoje = agora.date()
     origem_modelo = f'última entrada do fornecedor (ENT_SERV {modelo["cd_ent_serv"]})'
     total = _dec(nota['valor_servicos'])
@@ -277,6 +368,8 @@ def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo
     observacao = observacao_de_atraso(boletos)
     if observacao:
         ent_serv['ds_observacao'] = _campo(observacao, 'justificativa do atraso (boleto fora do prazo)')
+    impostos = impostos or []
+    total_retido = sum((i['valor'] for i in impostos), Decimal('0'))
     itent = {
         'cd_itent_serv': _campo('SEQ_ITENT_SERV.NEXTVAL', SEQUENCE),
         'cd_ent_serv': _campo('ENT_SERV.CD_ENT_SERV', 'entrada acima'),
@@ -286,10 +379,25 @@ def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo
         'vl_unitario': _campo(total, 'NFS-e'),
         'vl_total': _campo(total, 'NFS-e'),
         **{c: _campo(Decimal('0'), 'sem desconto/retenção') for c in (
-            'vl_perc_desconto', 'vl_desconto', 'vl_desconto_moeda', 'vl_imposto', 'vl_imposto_moeda',
+            'vl_perc_desconto', 'vl_desconto', 'vl_desconto_moeda', 'vl_imposto_moeda',
             'vl_perc_imposto', 'vl_imposto_nao_retido', 'vl_inss_nao_retido', 'vl_base_iss', 'vl_imposto_iss_item')},
+        'vl_imposto': _campo(total_retido, 'soma dos impostos retidos na NFS-e' if impostos else 'sem retenção'),
     }
-    soma_dup = sum((_dec(b['valor']) for b in boletos), Decimal('0'))
+    linhas_imposto = [{
+        'cd_itent_serv_imposto': _campo('SEQ_ITENT_SERV_IMPOSTO.NEXTVAL', SEQUENCE),
+        'cd_itent_serv': _campo('ITENT_SERV.CD_ITENT_SERV', 'item acima'),
+        'cd_servico': _campo(servico, origem_modelo),
+        'cd_detalhamento': _campo(i['cd_detalhamento'], f'{NOMES_IMPOSTO[i["categoria"]]} retido na NFS-e → {i["ds_detalhamento"]}'),
+        'vl_base_calculo': _campo(total, 'valor dos serviços'),
+        'vl_percentual_aliquota': _campo(i['vl_percentual'], 'alíquota do imposto no MV'),
+        'vl_total_imposto': _campo(i['valor'], 'valor retido na NFS-e'),
+        'sn_retem': _campo('S', 'retido'),
+        'vl_perc_reducao': _campo(Decimal('0'), 'fixo'),
+    } for i in impostos]
+    # A duplicata vai pelo valor bruto: a função de importação desconta os impostos da parcela 1.
+    duplicatas = [_dec(b['valor']) for b in boletos]
+    duplicatas[0] += total_retido
+    soma_dup = sum(duplicatas, Decimal('0'))
     doc = {
         'cd_fornecedor': _campo(fornecedor['cd_fornecedor'], 'fornecedor do CNPJ'),
         'nr_documento': _campo(documento, 'NFS-e'),
@@ -312,31 +420,36 @@ def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo
     }
     if observacao:
         doc['observacao'] = _campo(observacao, 'justificativa do atraso (vai para a observação do título)')
-    sim.gravacoes = [
-        {'ordem': 1, 'tabela': 'ENT_SERV', 'operacao': 'INSERT', 'campos': ent_serv},
-        {'ordem': 2, 'tabela': 'ITENT_SERV', 'operacao': 'INSERT', 'campos': itent,
+    gravacoes = [
+        {'tabela': 'ENT_SERV', 'operacao': 'INSERT', 'campos': ent_serv},
+        {'tabela': 'ITENT_SERV', 'operacao': 'INSERT', 'campos': itent,
          'observacao': 'A trigger TRG_I_ITENT_SERV preenche a natureza de despesa.'},
-        {'ordem': 3, 'tabela': 'DOCUMENTO_ENTRADA', 'operacao': 'INSERT', 'campos': doc},
+        *({'tabela': 'ITENT_SERV_IMPOSTO', 'operacao': 'INSERT', 'campos': campos,
+           'observacao': 'A função de importação cria o título do imposto e desconta o valor da parcela 1.'}
+          for campos in linhas_imposto),
+        {'tabela': 'DOCUMENTO_ENTRADA', 'operacao': 'INSERT', 'campos': doc},
     ]
-    for parcela, b in enumerate(boletos, start=1):
-        sim.gravacoes.append({'ordem': 3 + parcela, 'tabela': 'DUPLICATA', 'operacao': 'INSERT', 'campos': {
+    for parcela, (b, valor) in enumerate(zip(boletos, duplicatas, strict=True), start=1):
+        origem_valor = (f'boleto {b["id"]} + R$ {total_retido:.2f} de impostos retidos (valor bruto)'
+                        if parcela == 1 and total_retido else f'boleto {b["id"]}')
+        gravacoes.append({'tabela': 'DUPLICATA', 'operacao': 'INSERT', 'campos': {
             'cd_fornecedor': _campo(fornecedor['cd_fornecedor'], 'fornecedor do CNPJ'),
             'nr_documento': _campo(documento, 'NFS-e'),
             'nr_serie': _campo(serie, origem_modelo),
             'cd_parcela': _campo(parcela, 'ordem dos vencimentos'),
             'dt_vencimento': _campo(b['vencimento'], f'boleto {b["id"]}'),
-            'vl_parcela': _campo(_dec(b['valor']), f'boleto {b["id"]}'),
+            'vl_parcela': _campo(valor, origem_valor),
         }})
-    proxima = 4 + len(boletos)
-    sim.gravacoes += [
-        {'ordem': proxima, 'tabela': 'DOCUMENTO_ENTRADA', 'operacao': 'UPDATE', 'campos': {
+    gravacoes += [
+        {'tabela': 'DOCUMENTO_ENTRADA', 'operacao': 'UPDATE', 'campos': {
             'vl_saldo_documento': _campo(total - soma_dup, 'total - duplicatas (conclusão)')}},
-        {'ordem': proxima + 1, 'tabela': 'ENT_SERV_CONCLUSAO', 'operacao': 'INSERT', 'campos': {
+        {'tabela': 'ENT_SERV_CONCLUSAO', 'operacao': 'INSERT', 'campos': {
             'cd_ent_serv': _campo('ENT_SERV.CD_ENT_SERV', 'entrada acima'),
             'cd_usuario': _campo(usuario, 'USER da sessão'),
             'dt_conclusao_serv': _campo('SYSDATE', 'hora da importação')},
          'observacao': 'A trigger TRG_ENT_SERV_CONCLUSAO não importa sozinha (SN_IMPORT_AUT_ESTOQUE = N).'},
     ]
+    sim.gravacoes = [{'ordem': ordem, **g} for ordem, g in enumerate(gravacoes, start=1)]
     vencimento = min(b['vencimento'] for b in boletos)
     sim.importacao = {
         'chamada': 'DBAMV.FNC_IMPORTA_MGES_FNFI_SERV',
@@ -352,22 +465,53 @@ def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo
                          for i, b in enumerate(boletos, start=1)],
             'primeiro_vencimento': vencimento,
             'cd_usuario_ins': usuario,
+            'vl_liquido': total - total_retido,
+            'impostos': [{'cd_detalhamento': i['cd_detalhamento'], 'ds_detalhamento': i['ds_detalhamento'],
+                          'nr_documento': f'D-{documento}'[:15], 'valor': i['valor']} for i in impostos],
         },
     }
 
 
 def _conferir_impostos(cursor, sim: Simulacao, *, nota: dict, servico: int | None,
-                       fornecedor: int, empresa: int) -> None:
+                       fornecedor: int, empresa: int) -> list[dict]:
+    """Impostos retidos a gravar em ITENT_SERV_IMPOSTO (vazio se a nota não tem retenção)."""
     retido = retencao_da_nota(nota)
-    if retido > TOLERANCIA:
-        sim.pendencia('retencao', f'A NFS-e tem R$ {retido:.2f} de retenção. Esta versão ainda não importa notas com retenção.')
-    if servico is None:
-        return
-    detalhamentos = linhas(cursor, SQL_DETALHAMENTOS, servico=servico, fornecedor=fornecedor, empresa=empresa)
-    sim.escolhas['detalhamentos'] = detalhamentos
-    if detalhamentos:
-        nomes = ', '.join(f'{d["cd_detalhamento"]} {d["ds_detalhamento"]}' for d in detalhamentos)
-        sim.pendencia('impostos', f'O MV calcularia impostos para este serviço/fornecedor ({nomes}). Esta versão ainda não trata impostos.')
+    configurados = []
+    if servico is not None:
+        configurados = linhas(cursor, SQL_DETALHAMENTOS, servico=servico, fornecedor=fornecedor, empresa=empresa)
+        sim.escolhas['detalhamentos'] = configurados
+    nomes = ', '.join(f'{d["cd_detalhamento"]} {d["ds_detalhamento"]}' for d in configurados)
+    if retido <= TOLERANCIA:
+        # Sem linhas de imposto na entrada, a função de importação aplica os impostos do fornecedor
+        # (FORN_DETALHAMENTO): o título sairia menor que o boleto.
+        if any(d['origem'] == 'fornecedor' for d in configurados):
+            sim.pendencia('impostos', f'A NFS-e não tem retenção, mas o cadastro do fornecedor no MV retém impostos ({nomes}). '
+                                      'Confira o cadastro ou lance pelo MV.')
+        elif configurados:
+            sim.avisos.append(f'O serviço tem impostos configurados no MV ({nomes}), mas a NFS-e não tem retenção; nada será retido.')
+        return []
+
+    retidos, problema = retencoes_da_nfse(nota)
+    if problema:
+        sim.pendencia('retencao', problema)
+        return []
+    if 'outras' in retidos:
+        sim.pendencia('retencao', f'A NFS-e tem "outras retenções" (R$ {retidos["outras"]:.2f}); lance esta nota pelo MV.')
+        return []
+    tipos = linhas(cursor, SQL_TIPOS_IMPOSTO)
+    historico = {int(linha['cd_detalhamento']) for linha in linhas(cursor, SQL_IMPOSTOS_DO_FORNECEDOR, fornecedor=fornecedor)}
+    impostos, problemas = mapear_impostos(retidos, _dec(nota.get('valor_servicos')), tipos, historico)
+    for problema in problemas:
+        sim.pendencia('retencao', problema)
+    sim.escolhas['impostos_retidos'] = impostos
+    if configurados:
+        sim.avisos.append(f'O cadastro do MV tem impostos para este serviço/fornecedor ({nomes}); '
+                          'a importação usa os impostos retidos na NFS-e.')
+    novos = [i for i in impostos if not i['do_historico']]
+    if novos and historico:
+        sim.avisos.append('Imposto que o fornecedor ainda não tinha nos lançamentos anteriores: '
+                          + ', '.join(f'{i["cd_detalhamento"]} {i["ds_detalhamento"]}' for i in novos) + '.')
+    return impostos if not problemas else []
 
 
 def _conferir_obrigatorios(cursor, sim: Simulacao) -> None:
@@ -429,8 +573,8 @@ def simular_importacao(cursor, *, nota: dict, boletos: list[dict], agora: dateti
         codigo = '-20001' if linha['tabela'] == 'CON_PAG' else 'duplicidade'
         sim.pendencia(codigo, f'Já existe {linha["tabela"]} {linha["chave"]} para este fornecedor e documento.')
 
-    _conferir_impostos(cursor, sim, nota=nota, servico=servico,
-                       fornecedor=fornecedor['cd_fornecedor'], empresa=empresa)
+    impostos = _conferir_impostos(cursor, sim, nota=nota, servico=servico,
+                                  fornecedor=fornecedor['cd_fornecedor'], empresa=empresa)
 
     _conferir_boletos(sim, nota, boletos, agora.date())
 
@@ -439,7 +583,8 @@ def simular_importacao(cursor, *, nota: dict, boletos: list[dict], agora: dateti
     boletos_ordenados = sorted(boletos, key=lambda b: (b['vencimento'], b['id']))
     if boletos_ordenados:
         _montar_gravacoes(sim, nota=nota, boletos=boletos_ordenados, modelo=modelo, fornecedor=fornecedor,
-                          empresa=empresa, oficina=oficina, servico=servico, usuario=usuario, agora=agora)
+                          empresa=empresa, oficina=oficina, servico=servico, usuario=usuario, agora=agora,
+                          impostos=impostos)
         _conferir_obrigatorios(cursor, sim)
     return sim.as_dict()
 
@@ -462,6 +607,10 @@ select cd_con_pag from dbamv.con_pag
    and nr_serie = :serie and cd_multi_empresa = :empresa"""
 SQL_INDICADORES = """/* rc:indicadores */
 select sn_importada_fnfi, cd_con_pag from dbamv.ent_serv where cd_ent_serv = :ent_serv"""
+SQL_PARCELAS_DO_TITULO = """/* rc:parcelas_titulo */
+select count(*) as qt_parcelas, sum(vl_duplicata) as vl_parcelas from dbamv.itcon_pag where cd_con_pag = :con_pag"""
+SQL_TITULOS_DE_IMPOSTO = """/* rc:titulos_imposto */
+select cd_detalhamento, cd_con_pag_filho from dbamv.tip_detcon_pag where cd_con_pag_pai = :con_pag"""
 
 
 class ImportacaoFalhou(RuntimeError):
@@ -489,6 +638,8 @@ def _bind(valor, ids: dict):
         'SEQ_ENT_SERV.NEXTVAL': ids['ent_serv'],
         'ENT_SERV.CD_ENT_SERV': ids['ent_serv'],
         'SEQ_ITENT_SERV.NEXTVAL': ids['itent_serv'],
+        'ITENT_SERV.CD_ITENT_SERV': ids['itent_serv'],
+        'SEQ_ITENT_SERV_IMPOSTO.NEXTVAL': ids.get('itent_serv_imposto'),
     }.get(valor, valor) if isinstance(valor, str) else valor
 
 
@@ -523,6 +674,9 @@ def executar_importacao(cursor, resultado: dict) -> dict:
         if g['tabela'] not in TABELAS_GRAVADAS:
             raise ImportacaoFalhou(f'Tabela fora do escopo: {g["tabela"]}')
         if g['operacao'] == 'INSERT':
+            if g['tabela'] == 'ITENT_SERV_IMPOSTO':
+                ids['itent_serv_imposto'] = _nextval(cursor, 'seq_itent_serv_imposto')
+                ids.setdefault('itent_serv_impostos', []).append(ids['itent_serv_imposto'])
             _insert(cursor, g['tabela'], g['campos'], ids)
         elif g['operacao'] == 'UPDATE' and g['tabela'] == 'DOCUMENTO_ENTRADA':
             cursor.execute(
@@ -545,4 +699,21 @@ def executar_importacao(cursor, resultado: dict) -> dict:
     indicadores = linhas(cursor, SQL_INDICADORES, ent_serv=ids['ent_serv'])
     if not indicadores or indicadores[0]['sn_importada_fnfi'] != 'S':
         raise ImportacaoFalhou('A entrada não ficou marcada como importada.')
-    return {**ids, 'cd_con_pag': int(titulos[0]['cd_con_pag'])}
+    cd_con_pag = int(titulos[0]['cd_con_pag'])
+    _conferir_titulo(cursor, resultado, cd_con_pag)
+    return {'ent_serv': ids['ent_serv'], 'itent_serv': ids['itent_serv'], 'cd_con_pag': cd_con_pag}
+
+
+def _conferir_titulo(cursor, resultado: dict, cd_con_pag: int) -> None:
+    """O título gerado precisa fechar com os boletos e ter um título filho por imposto retido."""
+    previsto = resultado['importacao']['titulo_previsto']
+    esperado = sum((_dec(p['vl_duplicata']) for p in previsto['parcelas']), Decimal('0'))
+    parcelas = linhas(cursor, SQL_PARCELAS_DO_TITULO, con_pag=cd_con_pag)[0]
+    if int(parcelas['qt_parcelas'] or 0) != len(previsto['parcelas']) or abs(_dec(parcelas['vl_parcelas']) - esperado) > TOLERANCIA:
+        raise ImportacaoFalhou(
+            f'As parcelas do título somam R$ {_dec(parcelas["vl_parcelas"]):.2f} em {parcelas["qt_parcelas"]} parcela(s); '
+            f'os boletos somam R$ {esperado:.2f} em {len(previsto["parcelas"])}.')
+    impostos = {int(i['cd_detalhamento']) for i in previsto.get('impostos') or []}
+    filhos = {int(f['cd_detalhamento']) for f in linhas(cursor, SQL_TITULOS_DE_IMPOSTO, con_pag=cd_con_pag)}
+    if filhos != impostos:
+        raise ImportacaoFalhou(f'Títulos de imposto gerados {sorted(filhos)} diferentes dos retidos na NFS-e {sorted(impostos)}.')
