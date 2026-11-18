@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from app_prontocardio.routers.contas_pagar_nfse import (
     FUSO_HOSPITAL,
     SQL_OFICINAS_DO_USUARIO,
+    SQL_TABELA_SITUACAO,
     AcessoFila,
     SessionOracle,
     SessionPostgres,
@@ -27,6 +28,8 @@ from app_prontocardio.routers.contas_pagar_nfse import (
     _empresas_mv,
     _gestor,
     _regras,
+    nfse_cancelada,
+    status_nfse,
 )
 from app_prontocardio.services.payables_boleto import (
     BoletoInvalido,
@@ -54,6 +57,32 @@ SELECT prestador_cnpj, prestador_razao_social, numero_nfse, valor_servicos,
  ORDER BY data_hora DESC NULLS LAST
  LIMIT 1
 """)
+
+SQL_SITUACAO_XML = text("""
+SELECT CASE WHEN coalesce(cancelamento_data_hora, '') <> ''
+              OR coalesce(motivo_cancelamento_nfse, '') <> ''
+            THEN 'CANCELADA' END
+  FROM api_prontocardio.nfse_xml_tomador
+ WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
+ ORDER BY data_hora DESC NULLS LAST
+ LIMIT 1
+""")
+
+SQL_SITUACAO_PORTAL = text("""
+SELECT situacao FROM api_prontocardio.nfse_xml_tomador_situacao
+ WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
+""")
+
+
+def status_da_nota(session, cnpj: str, numero: str) -> str | None:
+    chave = {'cnpj': cnpj, 'numero': numero}
+    portal = (
+        session.execute(SQL_SITUACAO_PORTAL, chave).scalar_one_or_none()
+        if session.execute(SQL_TABELA_SITUACAO).scalar_one()
+        else None
+    )
+    return status_nfse(session.execute(SQL_SITUACAO_XML, chave).scalar_one_or_none(), portal)
+
 
 SQL_BOLETOS_DA_NOTA = text("""
 SELECT id, prestador_cnpj, numero_nfse, cd_multi_empresa, nome_arquivo, tipo,
@@ -169,6 +198,12 @@ async def enviar_boleto(
     """Anexa o PDF do boleto. Se o PDF for imagem (escaneado), informe a linha digitável."""
     cnpj = somente_digitos(cnpj)
     nota = _nota_ou_404(session, oracle, usuario, cnpj, numero)
+    status = status_da_nota(session, cnpj, numero)
+    if nfse_cancelada(status):
+        raise HTTPException(
+            HTTPStatus.CONFLICT,
+            f'A NFS-e {numero} está {status} no ISS Fortaleza. Peça ao fornecedor a nota correta.',
+        )
     conteudo = await arquivo.read(TAMANHO_MAXIMO_PDF + 1)
     if len(conteudo) > TAMANHO_MAXIMO_PDF:
         raise HTTPException(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, 'O PDF deve ter até 5 MB.')

@@ -220,18 +220,53 @@ SQL_TABELA_NFSE = text(
     "SELECT to_regclass('api_prontocardio.nfse_xml_tomador') IS NOT NULL AS existe"
 )
 
-SQL_NFSE_RECEBIDAS = text("""
-SELECT prestador_cnpj, prestador_razao_social, numero_nfse,
-       codigo_verificacao_nfse, data_hora, competencia_nfse,
-       valor_servicos, valor_liquido_nfse, tomador_cnpj,
-       tomador_razao_social, discriminacao
-  FROM api_prontocardio.nfse_xml_tomador
- WHERE data_hora IS NOT NULL
-   AND (data_hora AT TIME ZONE 'America/Sao_Paulo')::date >= CAST(:desde AS date)
-   AND coalesce(cancelamento_data_hora, '') = ''
-   AND coalesce(motivo_cancelamento_nfse, '') = ''
- ORDER BY data_hora DESC, numero_nfse
-""")
+SQL_TABELA_SITUACAO = text(
+    "SELECT to_regclass('api_prontocardio.nfse_xml_tomador_situacao') IS NOT NULL AS existe"
+)
+
+_SQL_NFSE_RECEBIDAS = """
+SELECT n.prestador_cnpj, n.prestador_razao_social, n.numero_nfse,
+       n.codigo_verificacao_nfse, n.data_hora, n.competencia_nfse,
+       n.valor_servicos, n.valor_liquido_nfse, n.tomador_cnpj,
+       n.tomador_razao_social, n.discriminacao,
+       -- O XML só traz o cancelamento se a nota já estava cancelada ao ser baixada.
+       CASE WHEN coalesce(n.cancelamento_data_hora, '') <> ''
+              OR coalesce(n.motivo_cancelamento_nfse, '') <> ''
+            THEN 'CANCELADA' END AS situacao_xml,
+       {situacao_portal}
+  FROM api_prontocardio.nfse_xml_tomador n
+  {join_situacao}
+ WHERE n.data_hora IS NOT NULL
+   AND (n.data_hora AT TIME ZONE 'America/Sao_Paulo')::date >= CAST(:desde AS date)
+ ORDER BY n.data_hora DESC, n.numero_nfse
+"""
+
+# Situação lida na lista de resultados do portal ISS (DAG extracao_nfse_tomador).
+SQL_NFSE_RECEBIDAS = text(_SQL_NFSE_RECEBIDAS.format(
+    situacao_portal='s.situacao AS situacao_portal, s.atualizado_em AS situacao_consultada_em',
+    join_situacao="""LEFT JOIN api_prontocardio.nfse_xml_tomador_situacao s
+         ON s.prestador_cnpj = regexp_replace(n.prestador_cnpj, '\\D', '', 'g')
+        AND s.numero_nfse = n.numero_nfse""",
+))
+
+# Enquanto a DAG nova não criar a tabela de situação.
+SQL_NFSE_RECEBIDAS_SEM_SITUACAO = text(_SQL_NFSE_RECEBIDAS.format(
+    situacao_portal='NULL AS situacao_portal, NULL AS situacao_consultada_em',
+    join_situacao='',
+))
+
+SITUACAO_NFSE_NORMAL = 'NORMAL'
+
+
+def status_nfse(situacao_xml: str | None, situacao_portal: str | None) -> str | None:
+    """Situação da NFS-e no ISS: o cancelamento no XML vale mais que a lista."""
+    if situacao_xml:
+        return situacao_xml
+    return (situacao_portal or '').strip().upper() or None
+
+
+def nfse_cancelada(status: str | None) -> bool:
+    return status is not None and status != SITUACAO_NFSE_NORMAL
 
 SQL_OFICINAS_DO_USUARIO = text("""
 SELECT cd_oficina FROM api_prontocardio.contas_pagar_usuarios_oficina
@@ -364,12 +399,32 @@ def classificar_fornecedor(
     return _regras(session)[(cnpj, cd_multi_empresa)]
 
 
+def _notas_recebidas(session: Session, inicio: date) -> list:
+    sql_notas = (
+        SQL_NFSE_RECEBIDAS
+        if session.execute(SQL_TABELA_SITUACAO).scalar_one()
+        else SQL_NFSE_RECEBIDAS_SEM_SITUACAO
+    )
+    return session.execute(sql_notas, {'desde': inicio.isoformat()}).mappings().all()
+
+
+def _situacao_na_fila(mv: dict | None, status: str | None, status_regra: str) -> str:
+    """Lançada no MV vale mais que o status do ISS (a tela mostra os dois)."""
+    if mv is not None:
+        return 'lancada'
+    if nfse_cancelada(status):
+        return 'cancelada'
+    if status_regra == STATUS_A_CLASSIFICAR:
+        return 'a_classificar'
+    return 'pendente'
+
+
 @router.get('/recebidas')
 def listar_recebidas(
     usuario: AcessoFila,
     session: SessionPostgres,
     oracle: SessionOracle,
-    situacao: Literal['pendente', 'pronta', 'a_classificar', 'lancada', 'todas'] = 'pendente',
+    situacao: Literal['pendente', 'pronta', 'a_classificar', 'lancada', 'cancelada', 'todas'] = 'pendente',
     cd_oficina: int | None = None,
     desde: Annotated[date | None, Query()] = None,
 ):
@@ -380,6 +435,7 @@ def listar_recebidas(
     ``lancada``: já existe ENT_SERV ou CON_PAG no MV para fornecedor+número.
     ``pronta``: pendente com boleto(s) anexado(s) e sem divergência — os
     títulos que o financeiro pode importar.
+    ``cancelada``: cancelada (ou substituída) no ISS e ainda não lançada no MV.
     """
     if not session.execute(SQL_TABELA_NFSE).scalar_one():
         return {
@@ -389,9 +445,7 @@ def listar_recebidas(
         }
 
     inicio = desde or _inicio_padrao()
-    notas = session.execute(
-        SQL_NFSE_RECEBIDAS, {'desde': inicio.isoformat()}
-    ).mappings().all()
+    notas = _notas_recebidas(session, inicio)
     regras = _regras(session)
     gestor = _gestor(usuario)
     permitidas: set[int] | None = None
@@ -423,12 +477,8 @@ def listar_recebidas(
         regra = regras.get((cnpj, cd_empresa)) if cd_empresa is not None else None
         status_regra, motivo = situacao_da_nota(regra, cd_empresa)
         mv = lancadas.get((cnpj, _chave_documento(nota['numero_nfse'])))
-        if mv is not None:
-            situacao_nota = 'lancada'
-        elif status_regra == STATUS_A_CLASSIFICAR:
-            situacao_nota = 'a_classificar'
-        else:
-            situacao_nota = 'pendente'
+        status = status_nfse(nota['situacao_xml'], nota['situacao_portal'])
+        situacao_nota = _situacao_na_fila(mv, status, status_regra)
 
         oficina_nota = regra['cd_oficina'] if regra and status_regra == STATUS_DEFINIDA else None
         if permitidas is not None and oficina_nota not in permitidas:
@@ -466,6 +516,8 @@ def listar_recebidas(
             'cd_oficina': oficina_nota,
             'ds_oficina': regra['ds_oficina'] if oficina_nota else None,
             'situacao': situacao_nota,
+            'status_nfse': status,
+            'status_nfse_consultado_em': nota['situacao_consultada_em'],
             'motivo': motivo if situacao_nota == 'a_classificar' else None,
             'mv': mv,
             'boletos': {
@@ -497,18 +549,23 @@ def listar_recebidas(
 
 GRUPO_A_CLASSIFICAR = 'A classificar'
 GRUPO_SEM_SETOR_LANCADA = 'Sem setor (já lançada no MV)'
+GRUPO_SEM_SETOR_CANCELADA = 'Sem setor (cancelada no ISS)'
+_ROTULO_SEM_SETOR = {
+    'a_classificar': GRUPO_A_CLASSIFICAR,
+    'cancelada': GRUPO_SEM_SETOR_CANCELADA,
+}
 
 
 def _chave_grupo(item: dict) -> tuple:
     if item['cd_oficina'] is not None:
         return ('oficina', item['cd_oficina'])
-    return ('sem_setor', item['situacao'] == 'a_classificar')
+    return ('sem_setor', _ROTULO_SEM_SETOR.get(item['situacao'], GRUPO_SEM_SETOR_LANCADA))
 
 
 def _novo_grupo(item: dict) -> dict:
     """Grupo de oficina; a empresa distingue oficinas homônimas (ex.: Central de Recebimento Fiscal)."""
     if item['cd_oficina'] is None:
-        rotulo = GRUPO_A_CLASSIFICAR if item['situacao'] == 'a_classificar' else GRUPO_SEM_SETOR_LANCADA
+        rotulo = _ROTULO_SEM_SETOR.get(item['situacao'], GRUPO_SEM_SETOR_LANCADA)
         return {'cd_oficina': None, 'ds_oficina': rotulo, 'cd_multi_empresa': None,
                 'empresa': None, 'quantidade': 0, 'valor': Decimal('0')}
     return {'cd_oficina': item['cd_oficina'], 'ds_oficina': item['ds_oficina'],
