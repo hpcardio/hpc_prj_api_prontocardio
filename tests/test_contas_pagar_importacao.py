@@ -33,6 +33,18 @@ MODELO = {
 }
 
 
+# Recorte real de TIP_DETALHE/FAIXA_DETALHE (MV de produção, 18/11/2026).
+TIPOS_IMPOSTO = [
+    {'cd_detalhamento': 2, 'ds_detalhamento': 'IRRF - P. JURÍDICA', 'tp_detalhamento': 'J', 'tp_data': 'E', 'vl_percentual': Decimal('1.5'), 'qt_uso': 300},
+    {'cd_detalhamento': 10, 'ds_detalhamento': 'IRRF - PJ GERAL 1%', 'tp_detalhamento': 'J', 'tp_data': 'E', 'vl_percentual': Decimal('1'), 'qt_uso': 20},
+    {'cd_detalhamento': 3, 'ds_detalhamento': 'ISS - TERCEIROS 2%', 'tp_detalhamento': 'I', 'tp_data': 'E', 'vl_percentual': Decimal('2'), 'qt_uso': 50},
+    {'cd_detalhamento': 9, 'ds_detalhamento': 'ISS - TERCEIROS 5%', 'tp_detalhamento': 'I', 'tp_data': 'E', 'vl_percentual': Decimal('5'), 'qt_uso': 120},
+    {'cd_detalhamento': 14, 'ds_detalhamento': 'ISS - TERCEIROS 3%', 'tp_detalhamento': 'I', 'tp_data': 'E', 'vl_percentual': Decimal('3'), 'qt_uso': 200},
+    {'cd_detalhamento': 11, 'ds_detalhamento': 'CSRF RETIDA 4,65%', 'tp_detalhamento': 'S', 'tp_data': 'E', 'vl_percentual': Decimal('4.65'), 'qt_uso': 250},
+    {'cd_detalhamento': 7, 'ds_detalhamento': 'CSLL', 'tp_detalhamento': 'L', 'tp_data': 'P', 'vl_percentual': Decimal('1'), 'qt_uso': 1},
+]
+
+
 def _respostas(**trocas):
     base = {
         'config': [{'empresa': 2, 'tp_compartilhamento': '4', 'usuario': 'RH000938'}],
@@ -48,6 +60,10 @@ def _respostas(**trocas):
                          {'table_name': 'DUPLICATA', 'coluna': 'vl_parcela'}],
         'titulo': [{'cd_con_pag': 108700}],
         'indicadores': [{'sn_importada_fnfi': 'S', 'cd_con_pag': 108700}],
+        'parcelas_titulo': [{'qt_parcelas': 1, 'vl_parcelas': Decimal('2708.73')}],
+        'titulos_imposto': [],
+        'tipos_imposto': TIPOS_IMPOSTO,
+        'impostos_fornecedor': [],
     }
     base.update(trocas)
     return base
@@ -130,13 +146,6 @@ def test_nota_sem_retencao_fica_apta_e_monta_as_gravacoes():
                                                      'p_nr_serie': 'A', 'p_cd_multi_empresa': 2}
     assert resultado['importacao']['titulo_previsto']['cd_reduzido'] == 241
     assert any('2 cadastros' in a for a in resultado['avisos'])
-
-
-def test_nota_com_retencao_fica_bloqueada():
-    resultado, _ = _simular(nota={**NOTA, 'valor_liquido_nfse': '2600.00'},
-                            boletos=[{**BOLETO, 'valor': Decimal('2600.00')}])
-    assert 'retencao' in _codigos(resultado)
-    assert resultado['apta'] is False
 
 
 def test_imposto_configurado_no_mv_bloqueia():
@@ -525,3 +534,138 @@ def test_ver_nfse_traz_campos_do_xml(monkeypatch):
     xml = rota.baixar_xml_nfse('63554067000198', '93125822', _usuario(), Sessao(), None)
     assert xml.body == b'<Nfse/>'
     assert 'nfse-63554067000198-93125822.xml' in xml.headers['content-disposition']
+
+
+# ------------------------------------------------------- retenções (casos reais da fila)
+
+# Auriocardio 45: serviços 30.487,20; líquido 27.697,63; ISS 3%, IRRF 1,5% e CSRF 4,65% (no campo da CSLL).
+AURIOCARDIO = {**NOTA, 'valor_servicos': '30487.2', 'valor_liquido_nfse': '27697.63', 'iss_retido': '1',
+               'valor_iss_retido': '914.62', 'valor_ir': '457.3', 'valor_csll': '1417.65'}
+BOLETO_LIQUIDO = {**BOLETO, 'valor': Decimal('27697.63')}
+
+
+def _simular_retencao(nota=AURIOCARDIO, boletos=(BOLETO_LIQUIDO,), **trocas):
+    trocas.setdefault('impostos_fornecedor', [{'cd_detalhamento': 2}, {'cd_detalhamento': 11}, {'cd_detalhamento': 14}])
+    return _simular(nota=nota, boletos=boletos, **trocas)
+
+
+def test_retencoes_viram_impostos_do_mv_e_duplicata_bruta():
+    resultado, _ = _simular_retencao()
+
+    assert resultado['apta'] is True, resultado['pendencias']
+    impostos = [g['campos'] for g in resultado['gravacoes'] if g['tabela'] == 'ITENT_SERV_IMPOSTO']
+    assert sorted((i['cd_detalhamento']['valor'], i['vl_total_imposto']['valor'], i['vl_percentual_aliquota']['valor']) for i in impostos) == [
+        (2, Decimal('457.3'), Decimal('1.5')), (11, Decimal('1417.65'), Decimal('4.65')), (14, Decimal('914.62'), Decimal('3'))]
+    assert all(i['vl_base_calculo']['valor'] == Decimal('30487.2') and i['sn_retem']['valor'] == 'S' for i in impostos)
+    item = next(g['campos'] for g in resultado['gravacoes'] if g['tabela'] == 'ITENT_SERV')
+    assert item['vl_imposto']['valor'] == Decimal('2789.57')
+    dup = next(g['campos'] for g in resultado['gravacoes'] if g['tabela'] == 'DUPLICATA')
+    assert dup['vl_parcela']['valor'] == Decimal('30487.20')  # bruto: a função desconta os impostos da parcela 1
+    saldo = next(g['campos'] for g in resultado['gravacoes'] if g['operacao'] == 'UPDATE')
+    assert saldo['vl_saldo_documento']['valor'] == Decimal('0')
+    titulo = resultado['importacao']['titulo_previsto']
+    assert titulo['parcelas'][0]['vl_duplicata'] == Decimal('27697.63')
+    assert titulo['vl_liquido'] == Decimal('27697.63')
+    assert [(i['cd_detalhamento'], i['nr_documento']) for i in titulo['impostos']] == [(2, 'D-93125822'), (11, 'D-93125822'), (14, 'D-93125822')]
+    ordem = [g['tabela'] for g in resultado['gravacoes']]
+    assert ordem[:5] == ['ENT_SERV', 'ITENT_SERV', 'ITENT_SERV_IMPOSTO', 'ITENT_SERV_IMPOSTO', 'ITENT_SERV_IMPOSTO']
+
+
+def test_iss_5_por_cento_usa_o_codigo_do_historico():
+    # Hiteck 2119: só ISS 5%.
+    nota = {**NOTA, 'valor_servicos': '5325.71', 'valor_liquido_nfse': '5059.42', 'iss_retido': '1', 'valor_iss_retido': '266.29'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('5059.42')}], impostos_fornecedor=[{'cd_detalhamento': 9}])
+    assert resultado['apta'] is True
+    assert [i['cd_detalhamento'] for i in resultado['escolhas']['impostos_retidos']] == [9]
+
+
+def test_pis_e_cofins_so_informativos_ficam_de_fora():
+    # G4 Flex 23275: PIS/COFINS no XML, mas o líquido só desconta CSRF (campo CSLL), IR e ISS.
+    nota = {**NOTA, 'valor_servicos': '3065.97', 'valor_liquido_nfse': '2724.11', 'iss_retido': '1', 'valor_iss_retido': '153.3',
+            'valor_pis': '19.93', 'valor_cofins': '91.98', 'valor_csll': '142.57', 'valor_ir': '45.99'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('2724.11')}],
+                                     impostos_fornecedor=[{'cd_detalhamento': 9}])
+    assert resultado['apta'] is True, resultado['pendencias']
+    assert sorted(i['cd_detalhamento'] for i in resultado['escolhas']['impostos_retidos']) == [2, 9, 11]
+
+
+def test_iss_2_por_cento_sem_historico():
+    # DB3 5744268: ISS 2%, PIS/COFINS informativos.
+    nota = {**NOTA, 'valor_servicos': '560', 'valor_liquido_nfse': '548.8', 'iss_retido': '1', 'valor_iss_retido': '11.2',
+            'valor_pis': '9.06', 'valor_cofins': '41.71'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('548.80')}], impostos_fornecedor=[])
+    assert resultado['apta'] is True
+    assert [i['cd_detalhamento'] for i in resultado['escolhas']['impostos_retidos']] == [3]
+
+
+def test_aliquota_sem_imposto_no_mv_bloqueia():
+    # B B Felix 1019: "CSLL" de 3%, que não existe no MV.
+    nota = {**NOTA, 'valor_servicos': '203940.36', 'valor_liquido_nfse': '191703.94', 'iss_retido': '1',
+            'valor_iss_retido': '6118.21', 'valor_csll': '6118.21'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('191703.94')}])
+    assert resultado['apta'] is False
+    assert any('CSLL de R$ 6118.21 (3.00%)' in p['mensagem'] for p in resultado['pendencias'])
+
+
+def test_retencao_que_nao_fecha_com_o_xml_bloqueia():
+    nota = {**AURIOCARDIO, 'valor_liquido_nfse': '27000.00'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('27000.00')}])
+    assert 'retencao' in _codigos(resultado)
+    assert 'não fecha' in resultado['pendencias'][0]['mensagem']
+
+
+def test_outras_retencoes_bloqueiam():
+    nota = {**NOTA, 'valor_liquido_nfse': '2608.73', 'outras_retencoes': '100'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('2608.73')}])
+    assert any('outras retenções' in p['mensagem'] for p in resultado['pendencias'])
+
+
+def test_imposto_com_outra_regra_de_vencimento_bloqueia():
+    tipos = [{**t, 'tp_data': 'V'} if t['cd_detalhamento'] == 14 else t for t in TIPOS_IMPOSTO]
+    resultado, _ = _simular_retencao(tipos_imposto=tipos)
+    assert any('outra regra de vencimento' in p['mensagem'] for p in resultado['pendencias'])
+
+
+def test_duas_parcelas_com_retencao_descontam_so_da_primeira():
+    boletos = [{**BOLETO, 'id': 8, 'valor': Decimal('17697.63'), 'vencimento': date(2026, 11, 25)},
+               {**BOLETO, 'id': 9, 'valor': Decimal('10000.00'), 'vencimento': date(2026, 12, 25)}]
+    resultado, _ = _simular_retencao(boletos=boletos)
+    dups = [g['campos']['vl_parcela']['valor'] for g in resultado['gravacoes'] if g['tabela'] == 'DUPLICATA']
+    assert dups == [Decimal('20487.20'), Decimal('10000.00')]
+
+
+def test_sem_retencao_mas_fornecedor_com_imposto_no_mv_bloqueia():
+    resultado, _ = _simular(detalhamentos=[{'origem': 'fornecedor', 'cd_detalhamento': 11, 'ds_detalhamento': 'CSRF', 'tp_detalhamento': 'S'}])
+    assert 'impostos' in _codigos(resultado)
+
+
+def test_sem_retencao_com_imposto_so_no_servico_e_aviso():
+    resultado, _ = _simular(detalhamentos=[{'origem': 'servico', 'cd_detalhamento': 14, 'ds_detalhamento': 'ISS 3%', 'tp_detalhamento': 'I'}])
+    assert resultado['apta'] is True
+    assert any('nada será retido' in a for a in resultado['avisos'])
+
+
+def test_executa_impostos_com_sequence_propria_e_confere_o_titulo():
+    resultado, _ = _simular_retencao()
+    cursor = FakeCursor(_respostas(parcelas_titulo=[{'qt_parcelas': 1, 'vl_parcelas': Decimal('27697.63')}],
+                                   titulos_imposto=[{'cd_detalhamento': 2, 'cd_con_pag_filho': 1},
+                                                    {'cd_detalhamento': 11, 'cd_con_pag_filho': 2},
+                                                    {'cd_detalhamento': 14, 'cd_con_pag_filho': 3}]))
+    cursor.sequences['seq_itent_serv_imposto'] = 1200
+    ids = executar_importacao(cursor, resultado)
+    assert ids['cd_con_pag'] == 108700
+    impostos = [b for sql, b in cursor.executados if sql.startswith('insert into dbamv.itent_serv_imposto ')]
+    assert len(impostos) == 3
+    assert all(b['cd_itent_serv'] == 12600 and b['cd_itent_serv_imposto'] == 1200 for b in impostos)
+
+
+@pytest.mark.parametrize(('trocas', 'mensagem'), [
+    ({'parcelas_titulo': [{'qt_parcelas': 1, 'vl_parcelas': Decimal('30487.20')}], 'titulos_imposto': []}, 'parcelas do título somam'),
+    ({'parcelas_titulo': [{'qt_parcelas': 1, 'vl_parcelas': Decimal('27697.63')}], 'titulos_imposto': [{'cd_detalhamento': 2, 'cd_con_pag_filho': 1}]}, 'Títulos de imposto'),
+])
+def test_titulo_que_nao_fecha_desfaz_a_importacao(trocas, mensagem):
+    resultado, _ = _simular_retencao()
+    cursor = FakeCursor(_respostas(**trocas))
+    cursor.sequences['seq_itent_serv_imposto'] = 1200
+    with pytest.raises(ImportacaoFalhou, match=mensagem):
+        executar_importacao(cursor, resultado)
