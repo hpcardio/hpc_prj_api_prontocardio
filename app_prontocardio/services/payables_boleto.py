@@ -33,7 +33,10 @@ RE_LINHA_ARRECADACAO = re.compile(
     r'(8\d{10})[-\s]?(\d)\s*(\d{11})[-\s]?(\d)\s*(\d{11})[-\s]?(\d)\s*(\d{11})[-\s]?(\d)'
 )
 RE_CNPJ = re.compile(r'\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b')
-RE_VALOR_DOCUMENTO = re.compile(r'Valor\s+(?:do\s+)?Documento\s*[:\n ]\s*(?:R\$\s*)?(\d+(?:\.\d{3})*,\d{2})', re.I)
+# Aceita "2.708,73", "2708,73" e o formato americano "2,708.73" (boletos da Hapvida).
+RE_VALOR_DOCUMENTO = re.compile(
+    r'Valor\s+(?:do\s+)?Documento\s*[:\n ]\s*(?:R\$\s*)?(\d[\d.,]*[.,]\d{2})(?!\d)', re.I
+)
 RE_NOSSO_NUMERO = re.compile(r'Nosso\s+N[uú]mero\s*[:\n ]\s*([0-9./\- ]{5,30})', re.I)
 
 
@@ -158,6 +161,25 @@ def extrair_texto_pdf(conteudo: bytes) -> str:
     return '\n'.join((pagina.extract_text() or '') for pagina in leitor.pages)
 
 
+def valor_impresso(texto: str) -> Decimal:
+    """Os dois últimos dígitos são os centavos; os demais separadores são de milhar."""
+    inteiro = re.sub(r'[.,]', '', texto[:-3])
+    return Decimal(f'{inteiro}.{texto[-2:]}')
+
+
+def cnpj_valido(cnpj: str) -> bool:
+    """Confere os dígitos verificadores; evita tomar trechos da linha digitável por CNPJ."""
+    if len(cnpj) != 14 or len(set(cnpj)) == 1:  # noqa: PLR2004
+        return False
+    for tamanho in (12, 13):
+        pesos = list(range(tamanho - 7, 1, -1)) + list(range(9, 1, -1))
+        soma = sum(int(d) * p for d, p in zip(cnpj[:tamanho], pesos, strict=True))
+        resto = soma % 11
+        if int(cnpj[tamanho]) != (0 if resto < 2 else 11 - resto):  # noqa: PLR2004
+            return False
+    return True
+
+
 def ler_boleto_texto(texto: str, referencia: date) -> BoletoLido:
     """Procura a linha digitável no texto; a primeira válida vence."""
     candidatos = [''.join(m.groups()) for m in RE_LINHA_BANCARIA.finditer(texto)]
@@ -169,12 +191,14 @@ def ler_boleto_texto(texto: str, referencia: date) -> BoletoLido:
         except BoletoInvalido as exc:
             erros.append(str(exc))
             continue
-        lido.cnpjs_no_texto = list(dict.fromkeys(_digitos(c) for c in RE_CNPJ.findall(texto)))
+        lido.cnpjs_no_texto = list(dict.fromkeys(
+            d for d in (_digitos(c) for c in RE_CNPJ.findall(texto)) if cnpj_valido(d)
+        ))
         nosso = RE_NOSSO_NUMERO.search(texto)
         lido.nosso_numero = nosso.group(1).strip() if nosso else None
         impresso = RE_VALOR_DOCUMENTO.search(texto)
         if impresso:
-            lido.valor_impresso = Decimal(impresso.group(1).replace('.', '').replace(',', '.'))
+            lido.valor_impresso = valor_impresso(impresso.group(1))
         return lido
     if erros:
         raise BoletoInvalido(erros[0])

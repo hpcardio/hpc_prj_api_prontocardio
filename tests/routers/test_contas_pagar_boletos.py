@@ -72,22 +72,22 @@ def _usuario(perfil='usuario', telas=(rota_nfse.TELA_SETOR,), uid=7):
     return SimpleNamespace(id=uid, nome='Setor', perfil=perfil, telas_permitidas=list(telas))
 
 
-NOTA = {'prestador_cnpj': '11111111000111', 'prestador_razao_social': 'Software SA',
+NOTA = {'prestador_cnpj': '11222333000181', 'prestador_razao_social': 'Software SA',
         'numero_nfse': '123', 'valor_servicos': '1600.00', 'valor_liquido_nfse': '1500.50',
         'tomador_cnpj': '08711085000128'}
 EMPRESAS = [{'cd_multi_empresa': 1, 'ds_multi_empresa': 'HOSPITAL', 'cnpj': '08711085000128'}]
-REGRAS = [{'cnpj': '11111111000111', 'cd_multi_empresa': 1, 'cd_oficina': 2, 'ds_oficina': 'TI',
+REGRAS = [{'cnpj': '11222333000181', 'cd_multi_empresa': 1, 'cd_oficina': 2, 'ds_oficina': 'TI',
            'status': 'definida', 'motivo': 'ok'}]
 
 
-def _pdf(valor=Decimal('1500.50'), dias=15, cnpj='11.111.111/0001-11', impresso='1500,50'):
+def _pdf(valor=Decimal('1500.50'), dias=15, cnpj='11.222.333/0001-81', impresso='1500,50'):
     linha = gerar_linha_bancaria(valor=valor, fator=FATOR_HOJE + dias)
     return gerar_pdf(f'CNPJ: {cnpj}', 'Valor do Documento', impresso, formatar(linha)), linha
 
 
 def _enviar(postgres, oracle, conteudo, usuario=None, **kwargs):
     arquivo = UploadFile(BytesIO(conteudo), filename='boleto.pdf')
-    return asyncio.run(rota.enviar_boleto('11.111.111/0001-11', '123', usuario or _usuario(),
+    return asyncio.run(rota.enviar_boleto('11.222.333/0001-81', '123', usuario or _usuario(),
                                           postgres, oracle, arquivo, **kwargs))
 
 
@@ -121,7 +121,7 @@ def test_setor_da_oficina_anexa_boleto_sem_divergencia():
 
 
 def test_divergencias_ficam_registradas():
-    pdf, _ = _pdf(valor=Decimal('1700.00'), dias=-2, cnpj='99.999.999/0001-99', impresso='1600,00')
+    pdf, _ = _pdf(valor=Decimal('1700.00'), dias=-2, cnpj='63.554.067/0001-98', impresso='1600,00')
     postgres = FakeSession([[NOTA], REGRAS, [2], [], [5]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf)
 
@@ -204,10 +204,10 @@ def test_fila_filtra_notas_prontas():
     nota_fila = {**NOTA, 'codigo_verificacao_nfse': 'A', 'data_hora': None, 'competencia_nfse': None,
                  'tomador_razao_social': 'Hospital', 'discriminacao': '',
                  'situacao_xml': None, 'situacao_portal': None, 'situacao_consultada_em': None}
-    sem_boleto = {**nota_fila, 'prestador_cnpj': '11111111000111', 'numero_nfse': '124'}
+    sem_boleto = {**nota_fila, 'prestador_cnpj': '11222333000181', 'numero_nfse': '124'}
     regras = [{**REGRAS[0], 'nm_fornecedor': 'Software SA', 'origem': 'historico', 'qtd_entradas': 3,
                'participacao': Decimal('1'), 'usuario_id': 1, 'atualizado_em': None, 'cd_fornecedor': 1}]
-    boletos = [{'prestador_cnpj': '11111111000111', 'numero_nfse': '123', 'quantidade': 1,
+    boletos = [{'prestador_cnpj': '11222333000181', 'numero_nfse': '123', 'quantidade': 1,
                 'soma': Decimal('1500.50'), 'primeiro_vencimento': HOJE, 'com_divergencia': False}]
     postgres = FakeSession([[True], [False], [nota_fila, sem_boleto], regras, boletos])
     oracle = FakeSession([[], EMPRESAS])
