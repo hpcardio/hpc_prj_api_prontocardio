@@ -1,7 +1,7 @@
 # ruff: noqa: PLR2004, E501
 import asyncio
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
@@ -94,6 +94,7 @@ def _enviar(postgres, oracle, conteudo, usuario=None, **kwargs):
 @pytest.fixture(autouse=True)
 def _hoje(monkeypatch):
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
+    monkeypatch.setattr(rota, '_agora_local', lambda: datetime(2026, 11, 17, 10, 0))  # terça
 
 
 @pytest.fixture(autouse=True)
@@ -123,7 +124,7 @@ def test_setor_da_oficina_anexa_boleto_sem_divergencia():
 def test_divergencias_ficam_registradas():
     pdf, _ = _pdf(valor=Decimal('1700.00'), dias=-2, cnpj='63.554.067/0001-98', impresso='1600,00')
     postgres = FakeSession([[NOTA], REGRAS, [2], [], [5]])
-    resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf)
+    resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf, justificativa_atraso='Fornecedor mandou o boleto atrasado')
 
     assert len(resposta['divergencias']) == 4
     texto = ' '.join(resposta['divergencias'])
@@ -236,3 +237,51 @@ def test_status_da_nota_combina_xml_e_portal():
     assert rota.status_da_nota(FakeSession([[True], ['CANCELADA'], [None]]), '1', '2') == 'CANCELADA'
     assert rota.status_da_nota(FakeSession([[True], ['NORMAL'], [None]]), '1', '2') == 'NORMAL'
     assert rota.status_da_nota(FakeSession([[False], [None]]), '1', '2') is None
+
+
+# ------------------------------------------------------- prazo de 3 dias úteis
+
+
+def test_boleto_dentro_do_prazo_nao_pede_justificativa():
+    # Terça 17/11 10h + 72h úteis: qua, qui, (sex 20/11 é feriado), segunda 23/11 10h.
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [5]])
+    resposta = _enviar(postgres, FakeSession([EMPRESAS]), _pdf(dias=6)[0])  # vence 23/11
+    assert resposta['fora_do_prazo'] is False
+    assert resposta['justificativa_atraso'] is None
+    gravado = postgres.executions[-1][1]
+    assert gravado['prazo_minimo'] == date(2026, 11, 23)
+    assert gravado['fora_do_prazo'] is False
+
+
+def test_boleto_fora_do_prazo_sem_justificativa_e_recusado():
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [5]])
+    with pytest.raises(HTTPException) as erro:
+        _enviar(postgres, FakeSession([EMPRESAS]), _pdf(dias=3)[0])  # vence sexta 20/11 (feriado) < segunda 23/11
+    assert erro.value.status_code == 422
+    assert '3 dias úteis' in erro.value.detail
+    assert '23/11/2026 10:00' in erro.value.detail
+    assert not any('INSERT INTO api_prontocardio.contas_pagar_boletos' in sql for sql, _ in postgres.executions)
+
+
+def test_justificativa_curta_demais_e_recusada():
+    with pytest.raises(HTTPException) as erro:
+        _enviar(FakeSession([[NOTA], REGRAS, [2], [], [5]]), FakeSession([EMPRESAS]), _pdf(dias=3)[0],
+                justificativa_atraso='  atraso ')
+    assert erro.value.status_code == 422
+
+
+def test_boleto_fora_do_prazo_com_justificativa_segue_para_o_financeiro():
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [5]])
+    resposta = _enviar(postgres, FakeSession([EMPRESAS]), _pdf(dias=3)[0],
+                       justificativa_atraso='  O fornecedor   só enviou o boleto hoje. ')
+    assert resposta['fora_do_prazo'] is True
+    gravado = postgres.executions[-1][1]
+    assert gravado['fora_do_prazo'] is True
+    assert gravado['justificativa_atraso'] == 'O fornecedor só enviou o boleto hoje.'
+    assert resposta['divergencias'] == []
+
+
+def test_listagem_informa_o_prazo_minimo_de_quem_envia_agora():
+    postgres = FakeSession([[NOTA], REGRAS, [2], []])
+    resposta = rota.listar_boletos('11.222.333/0001-81', '123', _usuario(), postgres, FakeSession([EMPRESAS]))
+    assert resposta['prazo_minimo_hoje'] == datetime(2026, 11, 23, 10, 0)

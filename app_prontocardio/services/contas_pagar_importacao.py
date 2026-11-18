@@ -26,6 +26,8 @@ from decimal import Decimal
 from typing import Any
 
 TOLERANCIA = Decimal('0.01')
+# A função de importação guarda DOCUMENTO_ENTRADA.OBSERVACAO numa variável de 500 caracteres.
+OBSERVACAO_MAXIMA = 500
 COMPARTILHAMENTO_CONTA_CUSTO = {'1', '4'}  # -20007 só vale nestes
 COMPARTILHAMENTO_CONTA_CONTABIL = {'2', '4'}  # -20003 e -20008 só valem nestes
 SEQUENCE = 'sequence'
@@ -205,6 +207,23 @@ def _conferir_cadastros(cursor, sim: Simulacao, *, fornecedor: int, empresa: int
     return ofi
 
 
+def observacao_de_atraso(boletos: list[dict]) -> str | None:
+    """Texto da justificativa dos boletos fora do prazo de 3 dias úteis, para o MV."""
+    partes = []
+    for b in boletos:
+        if not b.get('fora_do_prazo'):
+            continue
+        quem = b.get('enviado_por_nome') or 'setor'
+        envio = b.get('enviado_em')
+        quando = f' em {envio:%d/%m/%Y %H:%M}' if isinstance(envio, datetime) else ''
+        partes.append(f'Venc. {b["vencimento"]:%d/%m/%Y} fora do prazo de 3 dias úteis (enviado por {quem}{quando}). '
+                      f'Justificativa: {b.get("justificativa_atraso") or "-"}')
+    if not partes:
+        return None
+    texto = ' | '.join(partes)
+    return texto if len(texto) <= OBSERVACAO_MAXIMA else texto[:OBSERVACAO_MAXIMA - 3] + '...'
+
+
 def _conferir_boletos(sim: Simulacao, nota: dict, boletos: list[dict], hoje: date) -> None:
     if not boletos:
         sim.pendencia('-20002', 'A NFS-e não tem boleto anexado (a importação exige duplicatas).')
@@ -214,6 +233,11 @@ def _conferir_boletos(sim: Simulacao, nota: dict, boletos: list[dict], hoje: dat
             sim.pendencia('boleto', f'O boleto {b["id"]} tem divergência: {"; ".join(b["divergencias"])}')
         if b['vencimento'] < hoje:
             sim.pendencia('boleto', f'O boleto {b["id"]} venceu em {b["vencimento"]:%d/%m/%Y}.')
+        if b.get('fora_do_prazo'):
+            if b.get('justificativa_atraso'):
+                sim.avisos.append(f'Boleto {b["id"]} enviado fora do prazo de 3 dias úteis. Justificativa: {b["justificativa_atraso"]}')
+            else:
+                sim.pendencia('prazo', f'O boleto {b["id"]} foi enviado fora do prazo de 3 dias úteis e não tem justificativa.')
     soma = sum((_dec(b['valor']) for b in boletos), Decimal('0'))
     liquido = _dec(nota.get('valor_liquido_nfse'))
     if abs(soma - liquido) > TOLERANCIA:
@@ -250,6 +274,9 @@ def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo
         'hora_status_sped_terc': _campo(agora, 'hora da importação'),
         'cd_cidade': _campo(fornecedor['cd_cidade'], 'cadastro do fornecedor'),
     })
+    observacao = observacao_de_atraso(boletos)
+    if observacao:
+        ent_serv['ds_observacao'] = _campo(observacao, 'justificativa do atraso (boleto fora do prazo)')
     itent = {
         'cd_itent_serv': _campo('SEQ_ITENT_SERV.NEXTVAL', SEQUENCE),
         'cd_ent_serv': _campo('ENT_SERV.CD_ENT_SERV', 'entrada acima'),
@@ -283,6 +310,8 @@ def _montar_gravacoes(sim: Simulacao, *, nota: dict, boletos: list[dict], modelo
         'sn_importada_fnfi': _campo('N', 'fixo (a importação muda para S)'),
         'cd_cfop': _campo(modelo.get('cd_cfop'), origem_modelo),
     }
+    if observacao:
+        doc['observacao'] = _campo(observacao, 'justificativa do atraso (vai para a observação do título)')
     sim.gravacoes = [
         {'ordem': 1, 'tabela': 'ENT_SERV', 'operacao': 'INSERT', 'campos': ent_serv},
         {'ordem': 2, 'tabela': 'ITENT_SERV', 'operacao': 'INSERT', 'campos': itent,
