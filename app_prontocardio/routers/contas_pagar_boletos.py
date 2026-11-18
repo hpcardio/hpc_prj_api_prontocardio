@@ -31,6 +31,11 @@ from app_prontocardio.routers.contas_pagar_nfse import (
     nfse_cancelada,
     status_nfse,
 )
+from app_prontocardio.routers.mv_identidade import Config, _vinculo
+from app_prontocardio.services import mv_identidade as mv
+from app_prontocardio.services.contas_pagar_importacao import (
+    simular_importacao,
+)
 from app_prontocardio.services.payables_boleto import (
     BoletoInvalido,
     ler_boleto_pdf,
@@ -302,3 +307,53 @@ def boletos_por_nota(session, cnpjs: list[str]) -> dict[tuple[str, str], dict]:
         return {}
     linhas = session.execute(SQL_BOLETOS_DAS_NOTAS, {'cnpjs': sorted(set(cnpjs))}).mappings().all()
     return {(linha['prestador_cnpj'], linha['numero_nfse']): dict(linha) for linha in linhas}
+
+
+# ------------------------------------------------------------ importação (MV)
+
+SQL_NOTA_IMPORTACAO = text("""
+SELECT data_hora, valor_servicos, valor_liquido_nfse, valor_iss_retido, iss_retido,
+       valor_pis, valor_cofins, valor_inss, valor_ir, valor_csll, outras_retencoes
+  FROM api_prontocardio.nfse_xml_tomador
+ WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
+ ORDER BY data_hora DESC NULLS LAST
+ LIMIT 1
+""")
+
+
+@router.post('/recebidas/{cnpj}/{numero}/importacao/simulacao')
+def simular_importacao_mv(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgres,
+                          oracle: SessionOracle, config: Config):
+    """Mostra o que a importação gravaria no MV e o que impede a importação. Não grava nada."""
+    if not _gestor(usuario):
+        raise HTTPException(HTTPStatus.FORBIDDEN, 'Só o financeiro importa notas para o MV.')
+    cnpj = somente_digitos(cnpj)
+    nota = _nota_ou_404(session, oracle, usuario, cnpj, numero)
+    status = status_da_nota(session, cnpj, numero)
+    if nfse_cancelada(status):
+        raise HTTPException(HTTPStatus.CONFLICT, f'A NFS-e {numero} está {status} no ISS Fortaleza.')
+    vinculo = _vinculo(session, usuario.id)
+    if not vinculo['pode_gravar_no_mv']:
+        raise HTTPException(HTTPStatus.PRECONDITION_FAILED, 'Entre com o seu login MV antes.')
+    extra = session.execute(SQL_NOTA_IMPORTACAO, {'cnpj': cnpj, 'numero': numero}).mappings().first()
+    data_hora = extra['data_hora']
+    nota = {**nota, **dict(extra),
+            'data_emissao': data_hora.astimezone(FUSO_HOSPITAL).date() if data_hora else None}
+    boletos = [_serializar(b) for b in session.execute(
+        SQL_BOLETOS_DA_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().all()]
+    with mv.sessao_mv(
+        vinculo['cd_usuario_mv'],
+        proxy_user=config.MV_PROXY_USER,
+        proxy_password=config.MV_PROXY_PASSWORD,
+        dsn=mv.dsn_do_oracle(config.ORACLE_DATABASE_URL),
+        usuario_id=usuario.id,
+    ) as conexao:
+        try:
+            resultado = simular_importacao(conexao.cursor(), nota=nota, boletos=boletos,
+                                           agora=datetime.now(FUSO_HOSPITAL).replace(tzinfo=None, microsecond=0))
+        finally:
+            conexao.rollback()  # a simulação nunca grava
+    return {'nota': {k: nota.get(k) for k in ('prestador_cnpj', 'prestador_razao_social', 'numero_nfse',
+                                               'valor_servicos', 'valor_liquido_nfse', 'data_emissao',
+                                               'cd_multi_empresa', 'cd_oficina')},
+            'status_nfse': status, 'simulacao': True, **resultado}
