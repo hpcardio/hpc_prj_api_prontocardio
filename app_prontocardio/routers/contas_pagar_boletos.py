@@ -503,12 +503,20 @@ DDL_IMPORTACOES = (
     """CREATE UNIQUE INDEX IF NOT EXISTS contas_pagar_importacoes_ativa
         ON api_prontocardio.contas_pagar_importacoes (prestador_cnpj, numero_nfse)
      WHERE status IN ('em_andamento', 'importada')""",
+    # Desfazer pelo Receita Certa (migration 20261118_071).
+    """ALTER TABLE api_prontocardio.contas_pagar_importacoes
+        ADD COLUMN IF NOT EXISTS desfeita_em timestamptz,
+        ADD COLUMN IF NOT EXISTS desfeita_por integer,
+        ADD COLUMN IF NOT EXISTS cd_usuario_mv_desfazer varchar(30),
+        ADD COLUMN IF NOT EXISTS motivo_desfazer text,
+        ADD COLUMN IF NOT EXISTS desfazer_detalhe jsonb""",
 )
 
 SQL_TABELA_IMPORTACOES = text("SELECT to_regclass('api_prontocardio.contas_pagar_importacoes') IS NOT NULL")
 
 SQL_IMPORTACAO_DA_NOTA = text("""
-SELECT id, status, cd_usuario_mv, cd_ent_serv, cd_con_pag, erro, iniciado_em, concluido_em
+SELECT id, status, cd_multi_empresa, usuario_id, cd_usuario_mv, cd_ent_serv, cd_con_pag, erro,
+       iniciado_em, concluido_em, desfeita_em, desfeita_por, cd_usuario_mv_desfazer, motivo_desfazer
   FROM api_prontocardio.contas_pagar_importacoes
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
  ORDER BY id DESC LIMIT 1

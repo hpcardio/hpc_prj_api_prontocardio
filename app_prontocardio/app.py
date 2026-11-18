@@ -10,18 +10,17 @@ from app_prontocardio.database import (
     ensure_postgres_schema,
     run_postgres_migrations,
 )
-from app_prontocardio.services import followup_cache
 from app_prontocardio.routers import (
     agenda_medica,
     agendamentos,
     angio_tc,
     app_glosas,
-    petrobras,
     autenticacao,
     biq,
     biq_admissoes_eletivas,
     contas_pagar,
     contas_pagar_boletos,
+    contas_pagar_financeiro,
     contas_pagar_nfse,
     cuidados_paciente,
     ecg_worklist,
@@ -30,8 +29,8 @@ from app_prontocardio.routers import (
     faturamento_rede,
     financeiro,
     institucional,
-    mv_identidade,
     livre,
+    mv_identidade,
     operacional,
     origens_mv,
     paciente_auth,
@@ -41,6 +40,7 @@ from app_prontocardio.routers import (
     painel_senhas_soulmv,
     painel_senhas_soulmv_clinica1,
     painel_senhas_soulmv_emergencia,
+    petrobras,
     precos_rede,
     prescricoes,
     pronto_escala,
@@ -56,6 +56,7 @@ from app_prontocardio.security import (
     usuario_token_somente_leitura,
     valida_acesso_painel_leitos_medicos,
 )
+from app_prontocardio.services import followup_cache
 from app_prontocardio.settings import Settings
 from evolucao_sadt_backend.app import app as evolucao_sadt_app
 
@@ -131,6 +132,7 @@ app.include_router(financeiro.router)
 app.include_router(contas_pagar.router)
 app.include_router(contas_pagar_nfse.router)
 app.include_router(contas_pagar_boletos.router)
+app.include_router(contas_pagar_financeiro.router)
 app.include_router(mv_identidade.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
