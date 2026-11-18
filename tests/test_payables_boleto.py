@@ -10,11 +10,13 @@ from reportlab.pdfgen import canvas
 from app_prontocardio.services.payables_boleto import (
     BASE_FATOR,
     BoletoInvalido,
+    cnpj_valido,
     ler_boleto_pdf,
     ler_boleto_texto,
     ler_linha_digitavel,
     modulo10,
     modulo11_bancario,
+    valor_impresso,
     vencimento_do_fator,
 )
 
@@ -98,7 +100,7 @@ def test_leitura_do_pdf_encontra_linha_cnpj_nosso_numero_e_valor_impresso():
     fator = (hoje - date(2025, 2, 22)).days + 1000 + 15
     linha = gerar_linha_bancaria(fator=fator)
     pdf = gerar_pdf(
-        'Beneficiario: SOFTWARE SA  CNPJ: 11.111.111/0001-11',
+        'Beneficiario: SOFTWARE SA  CNPJ: 11.222.333/0001-81',
         'Nosso Numero: 109/00012345-6',
         'Valor do Documento',
         '1500,50',
@@ -110,7 +112,7 @@ def test_leitura_do_pdf_encontra_linha_cnpj_nosso_numero_e_valor_impresso():
     assert lido.linha_digitavel == linha
     assert lido.vencimento == hoje + timedelta(days=15)
     assert lido.valor_impresso == Decimal('1500.50')
-    assert '11111111000111' in lido.cnpjs_no_texto
+    assert '11222333000181' in lido.cnpjs_no_texto
     assert lido.nosso_numero.startswith('109/00012345-6')
 
 
@@ -131,3 +133,37 @@ def test_primeira_linha_valida_vence_quando_ha_lixo_antes():
     texto = formatar(''.join(invalida)) + '\n' + formatar(linha)
 
     assert ler_boleto_texto(texto, date(2026, 11, 17)).linha_digitavel == linha
+
+
+def test_valor_impresso_no_formato_americano_e_cnpj_falso_da_linha():
+    # Boleto Santander da Hapvida: "2,708.73" e um trecho de 14 dígitos da linha que parece CNPJ.
+    hoje = date(2026, 11, 17)
+    fator = (hoje - date(2025, 2, 22)).days + 1000 + 15
+    linha = gerar_linha_bancaria(fator=fator)
+    pdf = gerar_pdf(
+        'HAPVIDA ASSISTENCIA MEDICA LTDA  CNPJ: 63.554.067/0001-98',
+        'Valor do Documento',
+        '2,708.73',
+        formatar(linha),
+    )
+
+    lido = ler_boleto_pdf(pdf, hoje)
+
+    assert lido.valor_impresso == Decimal('2708.73')
+    assert lido.cnpjs_no_texto == ['63554067000198']
+
+
+@pytest.mark.parametrize(('texto', 'valor'), [
+    ('2.708,73', '2708.73'), ('2,708.73', '2708.73'), ('2708,73', '2708.73'),
+    ('2708.73', '2708.73'), ('1.234.567,89', '1234567.89'),
+])
+def test_formatos_do_valor_impresso(texto, valor):
+    assert valor_impresso(texto) == Decimal(valor)
+
+
+@pytest.mark.parametrize(('cnpj', 'valido'), [
+    ('63554067000198', True), ('11222333000181', True),
+    ('16410000270873', False), ('11111111000111', False), ('1122233300018', False),
+])
+def test_digitos_do_cnpj(cnpj, valido):
+    assert cnpj_valido(cnpj) is valido
