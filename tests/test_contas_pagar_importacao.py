@@ -461,3 +461,67 @@ def test_chave_de_desligamento(mv_fake):
                          FakeSession(), None, SimpleNamespace(**{**vars(CONFIG), 'CP_IMPORTACAO_MV_HABILITADA': False}))
     assert erro.value.status_code == 503
     assert mv_fake.eventos == []
+
+
+# ------------------------------------------------------- prazo / justificativa
+
+
+def test_boleto_fora_do_prazo_justificado_vai_para_a_observacao_do_mv():
+    atrasado = {**BOLETO, 'fora_do_prazo': True, 'justificativa_atraso': 'Fornecedor enviou o boleto hoje.',
+                'enviado_por_nome': 'Setor TI', 'enviado_em': datetime(2026, 11, 24, 9, 15)}
+    resultado, _ = _simular(boletos=[atrasado])
+
+    assert resultado['apta'] is True
+    assert any('Fornecedor enviou o boleto hoje.' in a for a in resultado['avisos'])
+    ent = resultado['gravacoes'][0]['campos']
+    doc = resultado['gravacoes'][2]['campos']
+    esperado = ('Venc. 25/11/2026 fora do prazo de 3 dias úteis (enviado por Setor TI em 24/11/2026 09:15). '
+                'Justificativa: Fornecedor enviou o boleto hoje.')
+    assert ent['ds_observacao']['valor'] == esperado
+    assert doc['observacao']['valor'] == esperado
+
+
+def test_observacao_cabe_nos_500_caracteres_da_funcao():
+    atrasado = {**BOLETO, 'fora_do_prazo': True, 'justificativa_atraso': 'x' * 400}
+    resultado, _ = _simular(boletos=[atrasado, {**atrasado, 'id': 5, 'valor': Decimal('0.00')}],
+                            nota={**NOTA})
+    texto = resultado['gravacoes'][0]['campos']['ds_observacao']['valor']
+    assert len(texto) == 500
+    assert texto.endswith('...')
+
+
+def test_fora_do_prazo_sem_justificativa_bloqueia():
+    resultado, _ = _simular(boletos=[{**BOLETO, 'fora_do_prazo': True, 'justificativa_atraso': None}])
+    assert 'prazo' in _codigos(resultado)
+
+
+def test_boleto_no_prazo_nao_mexe_na_observacao():
+    resultado, _ = _simular()
+    assert 'ds_observacao' not in resultado['gravacoes'][0]['campos']
+    assert 'observacao' not in resultado['gravacoes'][2]['campos']
+
+
+# ------------------------------------------------------- ver NFS-e
+
+
+def test_ver_nfse_traz_campos_do_xml(monkeypatch):
+    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a: dict(NOTA))
+    monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'NORMAL')
+
+    class Sessao:
+        def execute(self, sql, params=None):
+            return FakeResult([{'data_hora': datetime(2026, 11, 1, 15, 50, 46, tzinfo=rota.FUSO_HOSPITAL),
+                                'numero_nfse': '93125822', 'valor_servicos': '2708.73',
+                                'xml_campos': '{"nfse_infnfse_chaveacesso": "2304400126", "nfse_infnfse_identificacaorps_serie": "NF"}',
+                                'xml_documento': '<Nfse/>'}])
+
+    dados = rota.ver_nfse('63.554.067/0001-98', '93125822', _usuario(), Sessao(), None)
+    assert dados['chave_acesso'] == '2304400126'
+    assert dados['rps_serie'] == 'NF'
+    assert dados['status_nfse'] == 'NORMAL'
+    assert 'xml_documento' not in dados
+    assert dados['data_emissao'] == datetime(2026, 11, 1, 15, 50, 46)
+
+    xml = rota.baixar_xml_nfse('63554067000198', '93125822', _usuario(), Sessao(), None)
+    assert xml.body == b'<Nfse/>'
+    assert 'nfse-63554067000198-93125822.xml' in xml.headers['content-disposition']

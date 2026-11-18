@@ -42,6 +42,7 @@ from app_prontocardio.services.contas_pagar_importacao import (
     executar_importacao,
     simular_importacao,
 )
+from app_prontocardio.services.dias_uteis import prazo_minimo
 from app_prontocardio.services.payables_boleto import (
     BoletoInvalido,
     ler_boleto_pdf,
@@ -98,7 +99,9 @@ def status_da_nota(session, cnpj: str, numero: str) -> str | None:
 SQL_BOLETOS_DA_NOTA = text("""
 SELECT id, prestador_cnpj, numero_nfse, cd_multi_empresa, nome_arquivo, tipo,
        linha_digitavel, banco, valor, vencimento, valor_impresso, nosso_numero,
-       origem_leitura, divergencias, enviado_por, enviado_em
+       origem_leitura, divergencias, enviado_por, enviado_em,
+       prazo_minimo, fora_do_prazo, justificativa_atraso,
+       (SELECT u.nome FROM api_prontocardio.usuarios_api u WHERE u.id = enviado_por) AS enviado_por_nome
   FROM api_prontocardio.contas_pagar_boletos
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
  ORDER BY vencimento, id
@@ -107,7 +110,8 @@ SELECT id, prestador_cnpj, numero_nfse, cd_multi_empresa, nome_arquivo, tipo,
 SQL_BOLETOS_DAS_NOTAS = text("""
 SELECT prestador_cnpj, numero_nfse, count(*) AS quantidade, sum(valor) AS soma,
        min(vencimento) AS primeiro_vencimento,
-       bool_or(divergencias <> '[]') AS com_divergencia
+       bool_or(divergencias <> '[]') AS com_divergencia,
+       bool_or(coalesce(fora_do_prazo, false)) AS fora_do_prazo
   FROM api_prontocardio.contas_pagar_boletos
  WHERE prestador_cnpj = ANY(:cnpjs)
  GROUP BY prestador_cnpj, numero_nfse
@@ -117,16 +121,40 @@ SQL_INSERIR = text("""
 INSERT INTO api_prontocardio.contas_pagar_boletos
     (prestador_cnpj, numero_nfse, cd_multi_empresa, nome_arquivo, arquivo, sha256,
      tipo, linha_digitavel, codigo_barras, banco, valor, vencimento, valor_impresso,
-     nosso_numero, cnpjs_texto, origem_leitura, divergencias, enviado_por)
+     nosso_numero, cnpjs_texto, origem_leitura, divergencias, enviado_por,
+     prazo_minimo, fora_do_prazo, justificativa_atraso)
 VALUES (:cnpj, :numero, :empresa, :nome_arquivo, :arquivo, :sha256, :tipo,
         :linha_digitavel, :codigo_barras, :banco, :valor, :vencimento, :valor_impresso,
-        :nosso_numero, :cnpjs_texto, :origem_leitura, :divergencias, :enviado_por)
+        :nosso_numero, :cnpjs_texto, :origem_leitura, :divergencias, :enviado_por,
+        :prazo_minimo, :fora_do_prazo, :justificativa_atraso)
 RETURNING id
 """).bindparams(bindparam('arquivo'))
 
 
+JUSTIFICATIVA_MINIMA = 10
+JUSTIFICATIVA_MAXIMA = 400
+
+
 def _hoje() -> date:
     return datetime.now(FUSO_HOSPITAL).date()
+
+
+def _agora_local() -> datetime:
+    return datetime.now(FUSO_HOSPITAL).replace(tzinfo=None, microsecond=0)
+
+
+def conferir_prazo(vencimento: date, envio: datetime, justificativa: str | None) -> tuple[datetime, bool, str | None]:
+    """Regra das 72h em dias úteis. Fora do prazo, exige a justificativa do atraso."""
+    prazo = prazo_minimo(envio)
+    fora = vencimento < prazo.date()
+    texto = ' '.join((justificativa or '').split()) or None
+    if fora and (texto is None or len(texto) < JUSTIFICATIVA_MINIMA):
+        raise HTTPException(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            f'O boleto vence em {vencimento:%d/%m/%Y}, antes do prazo mínimo de 3 dias úteis '
+            f'({prazo:%d/%m/%Y %H:%M}). Informe a justificativa do atraso para enviar ao financeiro.',
+        )
+    return prazo, fora, texto if fora else None
 
 
 def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str) -> dict:
@@ -180,7 +208,8 @@ def listar_boletos(cnpj: str, numero: str, usuario: AcessoFila,
     nota = _nota_ou_404(session, oracle, usuario, cnpj, numero)
     boletos = [_serializar(b) for b in session.execute(
         SQL_BOLETOS_DA_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().all()]
-    return {'nota': nota, 'boletos': boletos, 'resumo': resumo_boletos(boletos, nota)}
+    return {'nota': nota, 'boletos': boletos, 'resumo': resumo_boletos(boletos, nota),
+            'prazo_minimo_hoje': prazo_minimo(_agora_local())}
 
 
 def resumo_boletos(boletos: list[dict], nota: dict) -> dict:
@@ -205,6 +234,7 @@ async def enviar_boleto(
     arquivo: Annotated[UploadFile, File()],
     linha_digitavel: Annotated[str | None, Form(max_length=60)] = None,
     vencimento: Annotated[date | None, Form()] = None,
+    justificativa_atraso: Annotated[str | None, Form(max_length=JUSTIFICATIVA_MAXIMA)] = None,
 ):
     """Anexa o PDF do boleto. Se o PDF for imagem (escaneado), informe a linha digitável."""
     cnpj = somente_digitos(cnpj)
@@ -241,6 +271,7 @@ async def enviar_boleto(
     if lido.valor is None:
         raise HTTPException(HTTPStatus.UNPROCESSABLE_ENTITY, 'O boleto não informa valor.')
 
+    prazo, fora_do_prazo, justificativa = conferir_prazo(lido.vencimento, _agora_local(), justificativa_atraso)
     existentes = session.execute(SQL_BOLETOS_DA_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().all()
     soma_outros = sum((Decimal(b['valor']) for b in existentes), Decimal('0'))
     problemas = divergencias_do_boleto(lido, nota, soma_outros, hoje)
@@ -265,13 +296,79 @@ async def enviar_boleto(
             'origem_leitura': origem,
             'divergencias': json.dumps(problemas, ensure_ascii=False),
             'enviado_por': usuario.id,
+            'prazo_minimo': prazo.date(),
+            'fora_do_prazo': fora_do_prazo,
+            'justificativa_atraso': justificativa,
         }).scalar_one()
         session.commit()
     except IntegrityError as exc:
         session.rollback()
         raise HTTPException(HTTPStatus.CONFLICT, 'Este boleto já foi anexado a esta NFS-e.') from exc
 
-    return {'id': novo_id, **lido.as_dict(), 'origem_leitura': origem, 'divergencias': problemas}
+    return {'id': novo_id, **lido.as_dict(), 'origem_leitura': origem, 'divergencias': problemas,
+            'prazo_minimo': prazo.date(), 'fora_do_prazo': fora_do_prazo, 'justificativa_atraso': justificativa}
+
+
+CAMPOS_NFSE = (
+    'numero_nfse', 'codigo_verificacao_nfse', 'competencia_nfse', 'codigo_natureza_operacao',
+    'prestador_cnpj', 'prestador_razao_social', 'prestador_nome_fantasia', 'prestador_inscricao_municipal',
+    'prestador_endereco', 'prestador_numero_endereco', 'prestador_complemento_endereco', 'prestador_bairro',
+    'prestador_cep', 'prestador_uf', 'prestador_email', 'prestador_telefone',
+    'tomador_cnpj', 'tomador_razao_social', 'tomador_endereco', 'tomador_numero_endereco', 'tomador_bairro',
+    'tomador_cep', 'tomador_uf', 'tomador_email',
+    'discriminacao', 'codigo_item_lista_servico', 'codigo_cnae', 'codigo_tributacao', 'codigo_municipio_servico',
+    'valor_servicos', 'valor_deducoes', 'valor_pis', 'valor_cofins', 'valor_inss', 'valor_ir', 'valor_csll',
+    'outras_retencoes', 'iss_retido', 'valor_iss', 'valor_iss_retido', 'base_calculo', 'aliquota',
+    'desconto_incondicionado', 'desconto_condicionado', 'valor_liquido_nfse',
+)
+
+SQL_NFSE_COMPLETA = text(f"""
+SELECT data_hora, {', '.join(CAMPOS_NFSE)}, xml_campos, xml_documento
+  FROM api_prontocardio.nfse_xml_tomador
+ WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
+ ORDER BY data_hora DESC NULLS LAST
+ LIMIT 1
+""")
+
+
+def _nfse_completa(session, oracle, usuario, cnpj: str, numero: str) -> dict:
+    cnpj = somente_digitos(cnpj)
+    _nota_ou_404(session, oracle, usuario, cnpj, numero)
+    return dict(session.execute(SQL_NFSE_COMPLETA, {'cnpj': cnpj, 'numero': numero}).mappings().first())
+
+
+@router.get('/recebidas/{cnpj}/{numero}/nfse')
+def ver_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgres, oracle: SessionOracle):
+    """Dados da NFS-e como vieram no XML do ISS Fortaleza (para o espelho da nota)."""
+    nota = _nfse_completa(session, oracle, usuario, cnpj, numero)
+    try:
+        extras = json.loads(nota.pop('xml_campos') or '{}')
+    except ValueError:
+        extras = {}
+    nota.pop('xml_documento', None)
+    data_hora = nota.pop('data_hora')
+    return {
+        **nota,
+        'data_emissao': data_hora.astimezone(FUSO_HOSPITAL).replace(tzinfo=None) if data_hora else None,
+        'chave_acesso': extras.get('nfse_infnfse_chaveacesso'),
+        'rps_numero': extras.get('nfse_infnfse_identificacaorps_numero'),
+        'rps_serie': extras.get('nfse_infnfse_identificacaorps_serie'),
+        'optante_simples': extras.get('nfse_infnfse_optantesimplesnacional'),
+        'status_nfse': status_da_nota(session, somente_digitos(cnpj), numero),
+    }
+
+
+@router.get('/recebidas/{cnpj}/{numero}/nfse/xml')
+def baixar_xml_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgres, oracle: SessionOracle):
+    nota = _nfse_completa(session, oracle, usuario, cnpj, numero)
+    if not nota.get('xml_documento'):
+        raise HTTPException(HTTPStatus.NOT_FOUND, 'O XML desta NFS-e não foi guardado.')
+    nome = f'nfse-{somente_digitos(cnpj)}-{re.sub(r"[^0-9A-Za-z]", "", numero)}.xml'
+    return Response(
+        nota['xml_documento'].encode('utf-8'),
+        media_type='application/xml',
+        headers={'Content-Disposition': f'attachment; filename="{nome}"', 'Cache-Control': 'private, no-store'},
+    )
 
 
 @router.get('/boletos/{boleto_id}/arquivo')
