@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     MV_CAS_TIMEOUT_SECONDS: float = 15
     MV_PROXY_USER: str = 'RC_PROXY'
     MV_PROXY_PASSWORD: str | None = None
+    # Desliga a importação de NFS-e no Contas a Pagar do MV.
+    CP_IMPORTACAO_MV_HABILITADA: bool = True
     CORS_ALLOWED_ORIGINS: str = ''
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
