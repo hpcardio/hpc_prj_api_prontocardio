@@ -43,6 +43,10 @@ from app_prontocardio.services.contas_pagar_importacao import (
     simular_importacao,
 )
 from app_prontocardio.services.dias_uteis import prazo_minimo
+from app_prontocardio.services.nfse_pdf_fortaleza import (
+    PdfIndisponivel,
+    baixar_pdf_oficial,
+)
 from app_prontocardio.services.payables_boleto import (
     BoletoInvalido,
     ler_boleto_pdf,
@@ -57,6 +61,8 @@ router = APIRouter(
     prefix='/app_glosas/financeiro/contas-a-pagar/nfse',
     tags=['contas-a-pagar-nfse'],
 )
+
+logger = logging.getLogger(__name__)
 
 TAMANHO_MAXIMO_PDF = 5 * 1024 * 1024
 TOLERANCIA = Decimal('0.01')
@@ -358,6 +364,57 @@ def ver_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgr
     }
 
 
+DDL_NFSE_PDF = """
+CREATE TABLE IF NOT EXISTS api_prontocardio.contas_pagar_nfse_pdf (
+    prestador_cnpj varchar(14) NOT NULL,
+    numero_nfse varchar(30) NOT NULL,
+    arquivo bytea NOT NULL,
+    sha256 char(64) NOT NULL,
+    baixado_em timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (prestador_cnpj, numero_nfse)
+)"""
+
+SQL_GUARDAR_PDF = text("""
+INSERT INTO api_prontocardio.contas_pagar_nfse_pdf (prestador_cnpj, numero_nfse, arquivo, sha256)
+VALUES (:cnpj, :numero, :arquivo, :sha256)
+ON CONFLICT (prestador_cnpj, numero_nfse) DO UPDATE
+   SET arquivo = EXCLUDED.arquivo, sha256 = EXCLUDED.sha256, baixado_em = now()
+""").bindparams(bindparam('arquivo'))
+
+SQL_PDF_GUARDADO = text("""
+SELECT arquivo, baixado_em FROM api_prontocardio.contas_pagar_nfse_pdf
+ WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
+""")
+
+
+def _resposta_pdf(conteudo: bytes, cnpj: str, numero: str, origem: str) -> Response:
+    nome = f'nfse-{cnpj}-{re.sub(r"[^0-9A-Za-z]", "", numero)}.pdf'
+    return Response(conteudo, media_type='application/pdf', headers={
+        'Content-Disposition': f'inline; filename="{nome}"', 'Cache-Control': 'private, no-store',
+        'X-NFSe-Origem': origem})
+
+
+@router.get('/recebidas/{cnpj}/{numero}/nfse/pdf')
+def baixar_pdf_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgres, oracle: SessionOracle):
+    """PDF oficial (DANFSe) da NFS-e, baixado do ISS Fortaleza; se o portal falhar, a última cópia guardada."""
+    nota = _nfse_completa(session, oracle, usuario, cnpj, numero)
+    cnpj = somente_digitos(cnpj)
+    chave = {'cnpj': cnpj, 'numero': numero}
+    session.execute(text(DDL_NFSE_PDF))
+    session.commit()
+    try:
+        conteudo = baixar_pdf_oficial(numero, nota.get('codigo_verificacao_nfse'), nota.get('prestador_inscricao_municipal'))
+    except PdfIndisponivel as exc:
+        guardado = session.execute(SQL_PDF_GUARDADO, chave).mappings().first()
+        if guardado is None:
+            raise HTTPException(HTTPStatus.BAD_GATEWAY, str(exc)) from exc
+        logger.warning('PDF da NFS-e %s/%s servido da cópia de %s: %s', cnpj, numero, guardado['baixado_em'], exc)
+        return _resposta_pdf(bytes(guardado['arquivo']), cnpj, numero, 'copia')
+    session.execute(SQL_GUARDAR_PDF, {**chave, 'arquivo': conteudo, 'sha256': sha256(conteudo).hexdigest()})
+    session.commit()
+    return _resposta_pdf(conteudo, cnpj, numero, 'iss')
+
+
 @router.get('/recebidas/{cnpj}/{numero}/nfse/xml')
 def baixar_xml_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgres, oracle: SessionOracle):
     nota = _nfse_completa(session, oracle, usuario, cnpj, numero)
@@ -414,7 +471,6 @@ def boletos_por_nota(session, cnpjs: list[str]) -> dict[tuple[str, str], dict]:
 
 # ------------------------------------------------------------ importação (MV)
 
-logger = logging.getLogger(__name__)
 
 SQL_NOTA_IMPORTACAO = text("""
 SELECT data_hora, valor_servicos, valor_liquido_nfse, valor_iss_retido, iss_retido,
