@@ -59,6 +59,7 @@ NOTA_TI = {
     'valor_servicos': '1500.50', 'valor_liquido_nfse': '1400.00',
     'tomador_cnpj': '08.711.085/0001-28', 'tomador_razao_social': 'Hospital',
     'discriminacao': 'Licença',
+    'situacao_xml': None, 'situacao_portal': 'NORMAL', 'situacao_consultada_em': None,
 }
 NOTA_NOVA = {**NOTA_TI, 'prestador_cnpj': '22222222000122', 'numero_nfse': '9'}
 NOTA_LANCADA = {**NOTA_TI, 'prestador_cnpj': '33333333000133', 'numero_nfse': '55'}
@@ -76,7 +77,7 @@ LANCADAS_MV = [
 
 
 def _sessoes(permitidas=None):
-    postgres = [[True], [NOTA_TI, NOTA_NOVA, NOTA_LANCADA], REGRAS]
+    postgres = [[True], [True], [NOTA_TI, NOTA_NOVA, NOTA_LANCADA], REGRAS]
     if permitidas is not None:
         postgres.append(permitidas)
     return FakeSession(postgres), FakeSession([LANCADAS_MV, [HOSPITAL]])
@@ -120,7 +121,7 @@ def test_gestor_ve_pendentes_a_classificar_e_lancadas():
     # nr_documento '055' no MV casa com a NFS-e '55' (zeros à esquerda).
     assert por_chave['33333333000133-55']['situacao'] == 'lancada'
     assert por_chave['33333333000133-55']['mv']['cd_ent_serv'] == 900
-    assert postgres.executions[1][1] == {'desde': '2026-11-01'}
+    assert postgres.executions[2][1] == {'desde': '2026-11-01'}
 
 
 def test_filtro_padrao_mostra_so_pendentes_agrupadas_por_oficina():
@@ -241,7 +242,7 @@ def test_nota_lancada_sem_regra_nao_entra_no_grupo_a_classificar():
     sem_regra_lancada = {**NOTA_TI, 'prestador_cnpj': '44444444000144', 'numero_nfse': '7'}
     lancadas = LANCADAS_MV + [{'cnpj': '44444444000144', 'nr_documento': '7', 'cd_ent_serv': 1,
                                'cd_con_pag': None, 'origem': 'ENT_SERV'}]
-    postgres = FakeSession([[True], [NOTA_NOVA, sem_regra_lancada], REGRAS])
+    postgres = FakeSession([[True], [True], [NOTA_NOVA, sem_regra_lancada], REGRAS])
     oracle = FakeSession([lancadas, [HOSPITAL]])
 
     resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='todas')
@@ -260,7 +261,7 @@ def test_oficinas_homonimas_de_empresas_diferentes_ficam_separadas():
         {**regra, 'cnpj': '55555555000155', 'cd_multi_empresa': 2, 'cd_oficina': 12},
         {**regra, 'cnpj': '66666666000166', 'cd_multi_empresa': 1, 'cd_oficina': 5},
     ]
-    postgres = FakeSession([[True], [nota_pa, nota_hosp], regras])
+    postgres = FakeSession([[True], [True], [nota_pa, nota_hosp], regras])
     oracle = FakeSession([[], [HOSPITAL, pa]])
 
     resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='todas')
@@ -269,3 +270,57 @@ def test_oficinas_homonimas_de_empresas_diferentes_ficam_separadas():
         ('CENTRAL DE RECEBIMENTO FISCAL', 'HOSPITAL'),
         ('CENTRAL DE RECEBIMENTO FISCAL', 'PRONTO ATENDIMENTO'),
     ]
+
+
+# ------------------------------------------------------------ situação no ISS
+
+
+def test_status_nfse_prioriza_cancelamento_do_xml():
+    assert rota.status_nfse('CANCELADA', 'NORMAL') == 'CANCELADA'
+    assert rota.status_nfse(None, ' cancelada ') == 'CANCELADA'
+    assert rota.status_nfse(None, None) is None
+    assert rota.nfse_cancelada('SUBSTITUIDA') is True
+    assert rota.nfse_cancelada('NORMAL') is False
+    assert rota.nfse_cancelada(None) is False
+
+
+def test_nota_cancelada_no_portal_sai_de_a_lancar_e_aparece_em_canceladas():
+    cancelada = {**NOTA_TI, 'numero_nfse': '388581', 'situacao_portal': 'CANCELADA'}
+
+    def sessoes():
+        return (FakeSession([[True], [True], [NOTA_TI, cancelada], REGRAS]),
+                FakeSession([[], [HOSPITAL]]))
+
+    pendentes = rota.listar_recebidas(_usuario(perfil='ti'), *sessoes(), desde=date(2026, 11, 1))
+    assert [i['numero_nfse'] for i in pendentes['itens']] == ['0000123']
+    assert pendentes['itens'][0]['status_nfse'] == 'NORMAL'
+
+    canceladas = rota.listar_recebidas(_usuario(perfil='ti'), *sessoes(), situacao='cancelada',
+                                       desde=date(2026, 11, 1))
+    assert [(i['numero_nfse'], i['situacao'], i['status_nfse']) for i in canceladas['itens']] == [
+        ('388581', 'cancelada', 'CANCELADA')]
+
+
+def test_nota_lancada_continua_lancada_mesmo_cancelada_e_mostra_status():
+    lancada_cancelada = {**NOTA_LANCADA, 'situacao_portal': 'CANCELADA'}
+    postgres = FakeSession([[True], [True], [lancada_cancelada], REGRAS])
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, FakeSession([LANCADAS_MV, [HOSPITAL]]),
+                                     situacao='todas')
+
+    assert resposta['itens'][0]['situacao'] == 'lancada'
+    assert resposta['itens'][0]['status_nfse'] == 'CANCELADA'
+
+
+def test_sem_tabela_de_situacao_usa_consulta_sem_join():
+    postgres = FakeSession([[True], [False], [{**NOTA_TI, 'situacao_portal': None}], REGRAS])
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, FakeSession([[], [HOSPITAL]]))
+
+    assert 'nfse_xml_tomador_situacao' not in postgres.executions[2][0]
+    assert resposta['itens'][0]['status_nfse'] is None
+    assert resposta['itens'][0]['situacao'] == 'pendente'
+
+
+def test_join_da_situacao_normaliza_cnpj():
+    sql = str(rota.SQL_NFSE_RECEBIDAS)
+    assert 'LEFT JOIN api_prontocardio.nfse_xml_tomador_situacao s' in sql
+    assert "regexp_replace(n.prestador_cnpj, '\\D', '', 'g')" in sql

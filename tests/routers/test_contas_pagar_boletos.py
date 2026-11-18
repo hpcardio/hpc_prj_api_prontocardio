@@ -38,6 +38,9 @@ class FakeResult:
     def scalars(self):
         return iter(self.rows)
 
+    def scalar_one_or_none(self):
+        return self.rows[0] if self.rows else None
+
     def scalar_one(self):
         if isinstance(self.rows, Exception):
             raise self.rows
@@ -91,6 +94,12 @@ def _enviar(postgres, oracle, conteudo, usuario=None, **kwargs):
 @pytest.fixture(autouse=True)
 def _hoje(monkeypatch):
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
+
+
+@pytest.fixture(autouse=True)
+def _nota_normal(monkeypatch, request):
+    if request.node.name != 'test_status_da_nota_combina_xml_e_portal':
+        monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'NORMAL')
 
 
 def test_setor_da_oficina_anexa_boleto_sem_divergencia():
@@ -193,13 +202,14 @@ def test_resumo_marca_pronta_so_sem_divergencia():
 
 def test_fila_filtra_notas_prontas():
     nota_fila = {**NOTA, 'codigo_verificacao_nfse': 'A', 'data_hora': None, 'competencia_nfse': None,
-                 'tomador_razao_social': 'Hospital', 'discriminacao': ''}
+                 'tomador_razao_social': 'Hospital', 'discriminacao': '',
+                 'situacao_xml': None, 'situacao_portal': None, 'situacao_consultada_em': None}
     sem_boleto = {**nota_fila, 'prestador_cnpj': '11111111000111', 'numero_nfse': '124'}
     regras = [{**REGRAS[0], 'nm_fornecedor': 'Software SA', 'origem': 'historico', 'qtd_entradas': 3,
                'participacao': Decimal('1'), 'usuario_id': 1, 'atualizado_em': None, 'cd_fornecedor': 1}]
     boletos = [{'prestador_cnpj': '11111111000111', 'numero_nfse': '123', 'quantidade': 1,
                 'soma': Decimal('1500.50'), 'primeiro_vencimento': HOJE, 'com_divergencia': False}]
-    postgres = FakeSession([[True], [nota_fila, sem_boleto], regras, boletos])
+    postgres = FakeSession([[True], [False], [nota_fila, sem_boleto], regras, boletos])
     oracle = FakeSession([[], EMPRESAS])
 
     resposta = rota_nfse.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='pronta')
@@ -207,3 +217,22 @@ def test_fila_filtra_notas_prontas():
     assert [i['numero_nfse'] for i in resposta['itens']] == ['123']
     assert resposta['itens'][0]['pronta'] is True
     assert resposta['itens'][0]['boletos']['soma'] == Decimal('1500.50')
+
+
+def test_nota_cancelada_no_iss_nao_aceita_boleto(monkeypatch):
+    monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'CANCELADA')
+    pdf, _ = _pdf()
+    postgres = FakeSession([[NOTA], REGRAS, [2]])
+
+    with pytest.raises(HTTPException) as erro:
+        _enviar(postgres, FakeSession([EMPRESAS]), pdf)
+
+    assert erro.value.status_code == 409
+    assert 'CANCELADA' in erro.value.detail
+    assert postgres.commits == 0
+
+
+def test_status_da_nota_combina_xml_e_portal():
+    assert rota.status_da_nota(FakeSession([[True], ['CANCELADA'], [None]]), '1', '2') == 'CANCELADA'
+    assert rota.status_da_nota(FakeSession([[True], ['NORMAL'], [None]]), '1', '2') == 'NORMAL'
+    assert rota.status_da_nota(FakeSession([[False], [None]]), '1', '2') is None
