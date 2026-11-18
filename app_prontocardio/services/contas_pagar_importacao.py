@@ -17,6 +17,9 @@ detalhamentos listados, até o cálculo via PRC_CALC_IMPOSTO ser tratado.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -129,6 +132,7 @@ class Simulacao:
     def as_dict(self) -> dict:
         return {
             'apta': not self.pendencias,
+            'assinatura': assinatura(self.gravacoes, self.importacao) if self.gravacoes else None,
             'pendencias': self.pendencias,
             'avisos': self.avisos,
             'escolhas': self.escolhas,
@@ -409,3 +413,107 @@ def simular_importacao(cursor, *, nota: dict, boletos: list[dict], agora: dateti
                           empresa=empresa, oficina=oficina, servico=servico, usuario=usuario, agora=agora)
         _conferir_obrigatorios(cursor, sim)
     return sim.as_dict()
+
+
+# --------------------------------------------------------------- gravação
+
+# Campos que mudam a cada simulação (hora) não entram na assinatura.
+CAMPOS_FORA_DA_ASSINATURA = {'hr_entrada', 'hora_status_sped_terc', 'dt_entrada', 'data_status_sped_terc'}
+RE_COLUNA = re.compile(r'^[a-z][a-z0-9_]{0,29}$')
+SQL_IMPORTAR = """
+declare
+  v_ok boolean;
+begin
+  v_ok := dbamv.fnc_importa_mges_fnfi_serv(:fornecedor, :documento, :serie, :empresa);
+  :resultado := case when v_ok then 1 else 0 end;
+end;"""
+SQL_TITULO = """/* rc:titulo */
+select cd_con_pag from dbamv.con_pag
+ where cd_fornecedor = :fornecedor and nr_documento = :documento
+   and nr_serie = :serie and cd_multi_empresa = :empresa"""
+SQL_INDICADORES = """/* rc:indicadores */
+select sn_importada_fnfi, cd_con_pag from dbamv.ent_serv where cd_ent_serv = :ent_serv"""
+
+
+class ImportacaoFalhou(RuntimeError):
+    """Erro na gravação; a transação deve ser desfeita por quem chamou."""
+
+
+def assinatura(gravacoes: list[dict], importacao: dict) -> str:
+    """Resumo do que será gravado; o financeiro confirma exatamente o que viu."""
+    conteudo = [
+        [g['tabela'], g['operacao'],
+         sorted((c, str(v['valor'])) for c, v in g['campos'].items() if c not in CAMPOS_FORA_DA_ASSINATURA)]
+        for g in sorted(gravacoes, key=lambda g: g['ordem'])
+    ]
+    conteudo.append(sorted((k, str(v)) for k, v in (importacao.get('parametros') or {}).items()))
+    return hashlib.sha256(json.dumps(conteudo, ensure_ascii=False).encode()).hexdigest()[:20]
+
+
+def _nextval(cursor, sequence: str) -> int:
+    cursor.execute(f'select dbamv.{sequence}.nextval from dual')
+    return int(cursor.fetchall()[0][0])
+
+
+def _bind(valor, ids: dict):
+    return {
+        'SEQ_ENT_SERV.NEXTVAL': ids['ent_serv'],
+        'ENT_SERV.CD_ENT_SERV': ids['ent_serv'],
+        'SEQ_ITENT_SERV.NEXTVAL': ids['itent_serv'],
+    }.get(valor, valor) if isinstance(valor, str) else valor
+
+
+def _insert(cursor, tabela: str, campos: dict, ids: dict) -> None:
+    colunas, valores, binds = [], [], {}
+    for coluna, dado in campos.items():
+        if dado['valor'] is None:
+            continue
+        if not RE_COLUNA.match(coluna):
+            raise ImportacaoFalhou(f'Coluna inválida no plano: {coluna}')
+        colunas.append(coluna)
+        if dado['valor'] == 'SYSDATE':
+            valores.append('sysdate')
+        else:
+            valores.append(f':{coluna}')
+            binds[coluna] = _bind(dado['valor'], ids)
+    cursor.execute(f'insert into dbamv.{tabela.lower()} ({", ".join(colunas)}) values ({", ".join(valores)})', binds)
+
+
+def executar_importacao(cursor, resultado: dict) -> dict:
+    """Grava o plano da simulação e chama FNC_IMPORTA_MGES_FNFI_SERV.
+
+    Não faz commit nem rollback: a transação é de quem chamou.
+    """
+    if not resultado.get('apta'):
+        raise ImportacaoFalhou('A nota não está apta para importar.')
+    parametros = resultado['importacao']['parametros']
+    chave = {'fornecedor': parametros['p_cd_fornecedor'], 'documento': parametros['p_nr_documento'],
+             'serie': parametros['p_nr_serie'], 'empresa': parametros['p_cd_multi_empresa']}
+    ids = {'ent_serv': _nextval(cursor, 'seq_ent_serv'), 'itent_serv': _nextval(cursor, 'seq_itent_serv')}
+    for g in sorted(resultado['gravacoes'], key=lambda g: g['ordem']):
+        if g['tabela'] not in TABELAS_GRAVADAS:
+            raise ImportacaoFalhou(f'Tabela fora do escopo: {g["tabela"]}')
+        if g['operacao'] == 'INSERT':
+            _insert(cursor, g['tabela'], g['campos'], ids)
+        elif g['operacao'] == 'UPDATE' and g['tabela'] == 'DOCUMENTO_ENTRADA':
+            cursor.execute(
+                'update dbamv.documento_entrada set vl_saldo_documento = :saldo'
+                ' where cd_fornecedor = :fornecedor and nr_documento = :documento'
+                ' and nr_serie = :serie and cd_multi_empresa = :empresa',
+                {'saldo': g['campos']['vl_saldo_documento']['valor'], **chave})
+            if cursor.rowcount != 1:
+                raise ImportacaoFalhou(f'O documento de entrada não foi encontrado para atualizar ({cursor.rowcount} linhas).')
+        else:
+            raise ImportacaoFalhou(f'Operação fora do escopo: {g["operacao"]} {g["tabela"]}')
+
+    retorno = cursor.var(int)
+    cursor.execute(SQL_IMPORTAR, {**chave, 'resultado': retorno})
+    if retorno.getvalue() != 1:
+        raise ImportacaoFalhou('FNC_IMPORTA_MGES_FNFI_SERV retornou falso.')
+    titulos = linhas(cursor, SQL_TITULO, **chave)
+    if len(titulos) != 1:
+        raise ImportacaoFalhou(f'Esperado 1 título no Contas a Pagar, encontrados {len(titulos)}.')
+    indicadores = linhas(cursor, SQL_INDICADORES, ent_serv=ids['ent_serv'])
+    if not indicadores or indicadores[0]['sn_importada_fnfi'] != 'S':
+        raise ImportacaoFalhou('A entrada não ficou marcada como importada.')
+    return {**ids, 'cd_con_pag': int(titulos[0]['cd_con_pag'])}
