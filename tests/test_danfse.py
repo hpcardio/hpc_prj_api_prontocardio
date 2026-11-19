@@ -19,6 +19,7 @@ from app_prontocardio.services.payables_boleto import cnpj_valido
 FIXTURES = Path(__file__).parent / 'fixtures'
 SEM_RETENCAO = (FIXTURES / 'danfse_sem_retencao.txt').read_text()  # Odontoart 3199621 (ISS Fortaleza, DANFSe v2.0)
 COM_RETENCAO = (FIXTURES / 'danfse_com_retencao.txt').read_text()  # Multimédicos 6631: ISS 3%, IRRF, CSRF retidos
+RECIFE = (FIXTURES / 'danfse_recife_v2.txt').read_text()  # Healthcare Alliance 1620 (Recife): rótulos com " / " e CSRF retida
 
 
 def test_danfse_sem_retencao_bate_com_o_xml_do_iss():
@@ -52,6 +53,26 @@ def test_danfse_com_retencoes_iss_ir_e_csrf():
     assert d['valor_csll'] == Decimal('862.64')  # CSRF (Contribuições Sociais - Retidas), como no XML do ISS
     assert d['valor_inss'] == 0
     assert (d['valor_pis'], d['valor_cofins']) == (0, 0)
+
+
+def test_danfse_de_recife_com_espacos_em_volta_da_barra():
+    leitura = ler_danfse_texto(RECIFE)
+    d = leitura.dados
+    assert leitura.avisos == []
+    assert leitura.informativos['municipio_emissor'] == 'Recife - PE'
+    assert d['numero_nfse'] == '1620'
+    assert d['prestador_cnpj'] == '32213442000102'
+    assert d['prestador_razao_social'] == 'HEALTHCARE ALLIANCE SERVICOS DE CONSULTORIA EMPRESARIAL LTDA'
+    assert d['prestador_municipio'] == 'Recife / PE'
+    assert d['prestador_codigo_municipio'] == '2611606'
+    assert d['prestador_inscricao_municipal'] == '6301037'
+    assert d['tomador_cnpj'] == '08711085000128'
+    assert d['tomador_razao_social'] == 'PRONTOCARDIO SERVICOS MEDICOS HOSPITALARES LTDA'
+    assert d['valor_servicos'] == Decimal('443.00')
+    assert d['valor_liquido_nfse'] == Decimal('422.40')
+    assert d['iss_retido'] == '2' and d['valor_iss'] == Decimal('22.15')
+    assert d['valor_csll'] == Decimal('20.60')
+    assert (d['valor_ir'], d['valor_inss']) == (0, 0)
 
 
 def test_coluna_com_traco_nao_puxa_o_valor_da_vizinha():
