@@ -607,6 +607,34 @@ def test_aliquota_sem_imposto_no_mv_bloqueia():
     assert any('CSLL de R$ 6118.21 (3.00%)' in p['mensagem'] for p in resultado['pendencias'])
 
 
+def test_irrf_acumulado_de_notas_anteriores_usa_o_imposto_do_fornecedor():
+    # Healthcare Alliance 1622 (Recife): IRRF 1,5% desta nota daria 6,76 e o da 1620, 6,65 (ambos < R$ 10);
+    # o fornecedor reteve os dois juntos (13,40). CSRF 4,65% normal.
+    nota = {**NOTA, 'valor_servicos': '450.41', 'valor_liquido_nfse': '416.07', 'valor_ir': '13.40', 'valor_csll': '20.94'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('416.07')}])
+    assert resultado['apta'] is True, resultado['pendencias']
+    impostos = {i['cd_detalhamento']: i['valor'] for i in resultado['escolhas']['impostos_retidos']}
+    assert impostos == {2: Decimal('13.40'), 11: Decimal('20.94')}
+    assert any('acumulou retenções anteriores' in a and 'R$ 6.76' in a for a in resultado['avisos'])
+    titulo = resultado['importacao']['titulo_previsto']
+    assert titulo['vl_liquido'] == Decimal('416.07')
+
+
+def test_irrf_acima_da_aliquota_sem_imposto_do_fornecedor_bloqueia():
+    nota = {**NOTA, 'valor_servicos': '450.41', 'valor_liquido_nfse': '416.07', 'valor_ir': '13.40', 'valor_csll': '20.94'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('416.07')}],
+                                     impostos_fornecedor=[{'cd_detalhamento': 11}])
+    assert resultado['apta'] is False
+    assert any('IRRF de R$ 13.40 (2.98%)' in p['mensagem'] for p in resultado['pendencias'])
+
+
+def test_irrf_abaixo_da_aliquota_continua_bloqueando():
+    nota = {**NOTA, 'valor_servicos': '450.41', 'valor_liquido_nfse': '426.47', 'valor_ir': '3.00', 'valor_csll': '20.94'}
+    resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('426.47')}])
+    assert resultado['apta'] is False
+    assert any('IRRF de R$ 3.00' in p['mensagem'] for p in resultado['pendencias'])
+
+
 def test_retencao_que_nao_fecha_com_o_xml_bloqueia():
     nota = {**AURIOCARDIO, 'valor_liquido_nfse': '27000.00'}
     resultado, _ = _simular_retencao(nota=nota, boletos=[{**BOLETO, 'valor': Decimal('27000.00')}])

@@ -52,6 +52,8 @@ NOMES_IMPOSTO = {'iss': 'ISS', 'ir': 'IRRF', 'csrf': 'CSRF (PIS/COFINS/CSLL)', '
 ALIQUOTA_CSRF = Decimal('4.65')
 # A função de importação desconta da parcela 1 os impostos com TP_DATA E/L; os demais têm outra regra.
 TP_DATA_NA_EMISSAO = {'E', 'L'}
+# Retenções abaixo de R$ 10 não são recolhidas e se somam à da nota seguinte do mesmo fornecedor.
+CATEGORIAS_ACUMULAVEIS = {'ir', 'csrf'}
 
 SQL_ATRIBUI_EMPRESA = 'begin dbamv.pkg_mv2000.atribui_empresa(:empresa); end;'
 
@@ -219,8 +221,30 @@ def retencoes_da_nfse(nota: dict) -> tuple[dict[str, Decimal] | None, str | None
     return retidos, None
 
 
+def _imposto_acumulado(categoria: str, valor: Decimal, total: Decimal, tipos: list[dict],
+                       do_fornecedor: set[int]) -> dict | None:
+    """IRRF/CSRF retido acima da alíquota: retenções anteriores abaixo de R$ 10 acumuladas nesta nota.
+
+    Só aceita quando o fornecedor tem um único imposto daquele tipo (histórico ou cadastro no MV)
+    e o valor da nota fica entre o calculado e o total. O MV usa o valor gravado em
+    ITENT_SERV_IMPOSTO.VL_TOTAL_IMPOSTO (insereimposto: pvlDetalhamento), não recalcula.
+    """
+    if categoria not in CATEGORIAS_ACUMULAVEIS or not (Decimal('0') < valor < total):
+        return None
+    proprios = {
+        t['cd_detalhamento']: t for t in tipos
+        if t['tp_detalhamento'] in TIPOS_POR_IMPOSTO[categoria] and t['vl_percentual'] is not None
+        and int(t['cd_detalhamento']) in do_fornecedor
+    }
+    if len(proprios) != 1:
+        return None
+    tipo = next(iter(proprios.values()))
+    calculado = _centavos(total * _dec(tipo['vl_percentual']) / 100)
+    return {**tipo, 'calculado': calculado} if valor > calculado + TOLERANCIA * 2 else None
+
+
 def mapear_impostos(retidos: dict[str, Decimal], total: Decimal, tipos: list[dict],
-                    historico: set[int]) -> tuple[list[dict], list[str]]:
+                    historico: set[int], configurados: set[int] = frozenset()) -> tuple[list[dict], list[str]]:
     """Cada retenção vira o detalhamento do MV do mesmo tipo e alíquota (preferindo o que o fornecedor já usa)."""
     impostos, problemas = [], []
     for categoria, valor in sorted(retidos.items()):
@@ -230,6 +254,9 @@ def mapear_impostos(retidos: dict[str, Decimal], total: Decimal, tipos: list[dic
             if t['tp_detalhamento'] in TIPOS_POR_IMPOSTO.get(categoria, set()) and t['vl_percentual'] is not None
             and abs(_centavos(total * _dec(t['vl_percentual']) / 100) - valor) <= TOLERANCIA * 2
         ]
+        acumulado = None if candidatos else _imposto_acumulado(categoria, valor, total, tipos, historico | set(configurados))
+        if acumulado is not None:
+            candidatos = [acumulado]
         if not candidatos:
             problemas.append(f'{NOMES_IMPOSTO.get(categoria, categoria)} de R$ {valor:.2f} ({aliquota_nota:.2f}%) '
                              'não corresponde a nenhum imposto cadastrado no MV.')
@@ -244,6 +271,7 @@ def mapear_impostos(retidos: dict[str, Decimal], total: Decimal, tipos: list[dic
             'categoria': categoria, 'cd_detalhamento': escolhido['cd_detalhamento'],
             'ds_detalhamento': escolhido['ds_detalhamento'], 'vl_percentual': _dec(escolhido['vl_percentual']),
             'valor': valor, 'do_historico': escolhido['cd_detalhamento'] in historico,
+            'calculado': escolhido.get('calculado'),
         })
     return sorted(impostos, key=lambda i: i['cd_detalhamento']), problemas
 
@@ -500,9 +528,16 @@ def _conferir_impostos(cursor, sim: Simulacao, *, nota: dict, servico: int | Non
         return []
     tipos = linhas(cursor, SQL_TIPOS_IMPOSTO)
     historico = {int(linha['cd_detalhamento']) for linha in linhas(cursor, SQL_IMPOSTOS_DO_FORNECEDOR, fornecedor=fornecedor)}
-    impostos, problemas = mapear_impostos(retidos, _dec(nota.get('valor_servicos')), tipos, historico)
+    configurados_cd = {int(d['cd_detalhamento']) for d in configurados}
+    impostos, problemas = mapear_impostos(retidos, _dec(nota.get('valor_servicos')), tipos, historico, configurados_cd)
     for problema in problemas:
         sim.pendencia('retencao', problema)
+    for i in impostos:
+        if i.get('calculado') is not None:
+            sim.avisos.append(
+                f'{NOMES_IMPOSTO[i["categoria"]]} retido de R$ {i["valor"]:.2f} é maior que {i["vl_percentual"]:.2f}% '
+                f'desta nota (R$ {i["calculado"]:.2f}): o fornecedor acumulou retenções anteriores abaixo de R$ 10. '
+                f'O imposto {i["cd_detalhamento"]} {i["ds_detalhamento"]} será gravado com o valor da NFS-e.')
     sim.escolhas['impostos_retidos'] = impostos
     if configurados:
         sim.avisos.append(f'O cadastro do MV tem impostos para este serviço/fornecedor ({nomes}); '
