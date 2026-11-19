@@ -1,0 +1,96 @@
+                                                                                             DANFSe v2.0                                                                Município: FORTALEZA/CE
+                                                                             Documento Auxiliar da NFS-e
+                                                                                                                                                                        Ambiente Gerador: Sistema Próprio do Município
+                                                                                                                                                                        Tipo de Ambiente: Produção
+
+CHAVE DE ACESSO DA NFS-E
+23044001207595068000100000000000663126110386618210
+NÚMERO DA NFS-E                                           COMPETÊNCIA DA NFS-E                                  DATA E HORA DA EMISSÃO DA NFS-E
+6631                                                      01/11/2026                                            06/11/2026 12:07:03
+NÚMERO DA DPS                                             SÉRIE DA DPS                                          DATA E HORA DA EMISSÃO DA DPS
+6631                                                      1                                                     06/11/2026 12:07:03
+EMITENTE DA NFS-E                                         SITUAÇÃO DA NFS-E                                     FINALIDADE                                              A autenticidade desta NFS-e pode ser verificada pela
+                                                                                                                                                                        leitura deste código QR ou pela consulta da chave de
+Prestador                                                 NFS-e Gerada                                          NFS-e Regular                                           acesso no portal nacional
+
+PRESTADOR/FORNECEDOR                                      CNPJ/CPF/NIF                                            Indicador Municipal (Inscrição)                         Telefone
+                                                          07.595.068/0001-00                                      2035731                                                 (85)3246-0917
+
+Nome/Nome Empresarial                                                                                             Município/Sigla UF                                      Código IBGE/CEP
+MULTIMEDICOS SERVICOS MEDICOS LTDA                                                                                FORTALEZA/CE                                            2304400/60025-063
+
+Endereço                                                                                                          E-mail
+R SEN POMPEU, 2874, ****, BENFICA                                                                                 adm@multimedicosservicos.com.br
+
+Simples Nacional da Data de Competência                   Regime de Apuração Tributária pelo SN
+Não Optante                                               -
+
+TOMADOR/ADQUIRENTE                                        CNPJ/CPF/NIF                                            Indicador Municipal (Inscrição)                         Telefone
+                                                          08.711.085/0001-28                                      -                                                       (85)3466-3073
+
+Nome/Nome Empresarial                                                                                             Município/Sigla UF                                      Código IBGE/CEP
+PRONTOCARDIO SERVICOS MEDICOS HOSPITALARES LTDA                                                                   FORTALEZA/CE                                            2304400/60115-280
+
+Endereço                                                                                                          E-mail
+RUA DOUTOR JOSE LOURENCO, 531, MEIRELES                                                                           financeiro@hospitalprontocardio.com.br
+
+                                                                     DESTINATÁRIO DA OPERAÇÃO NÃO IDENTIFICADO NA NFS-e
+
+                                                                    INTERMEDIÁRIO DA OPERAÇÃO NÃO IDENTIFICADO NA NFS-e
+
+SERVIÇO PRESTADO                                          Código de Tributação                                    Código da NBS                                           Local da Prestação/Sigla UF/País
+                                                          040301/004                                              123011500                                               FORTALEZA
+
+ATIVIDADES DE ATENDIMENTO EM PRONTO-SOCORRO E UNIDADES HOSPITALARES PARA ATENDIMENTO A URGÊNCIAS/ATIVIDADES DE ATENDIMENTO EM PRONTO-SOCORRO E
+UNIDADES HOSPITALARES PARA ATENDIMENTO A URGÊNCIAS
+Descrição do Serviço
+SERVIÇOS MÉDICOS PRESTADOS PELO DR. ALÍPIO MONT´ALVERNE DUARTE
+==== REFERENTE: PLANTÕES UTI - SET/2026 ====
+------ DADOS BANCÁRIOS ------
+Banco: SANTANDER
+Ag.: 3132
+C/C: 13000722-2
+PIX: 07595068000100
+TRIBUTAÇÃO MUNICIPAL (ISSQN)                              Tipo de Tributação do ISSQN                             Município/Sigla UF/País de Incidência do ISSQN
+                                                          Operação Tributável                                     FORTALEZA/CE
+
+Regime Especial de Tributaçao do ISSQN                    Tipo de Imunidade do ISSQN                              Suspensão da Exigibilidade do ISSQN                     Número Processo Suspensão
+-                                                         -                                                       -                                                       -
+
+Benefício Municipal                                       Cálculo do BM                                           Total Deduções / Reduções                               Desconto Incondicionado
+-                                                         -                                                       -                                                       -
+
+BC ISSQN                                                  Alíquota Aplicada                                       Retenção do ISSQN                                       ISSQN Apurado
+R$ 18.551,40                                              3,00                                                    Retido pelo Tomador                                     R$ 556,54
+
+TRIBUTAÇÃO FEDERAL (EXCETO CBS)                           IRRF                                                    Contribuição Previdenciária - Retida                    Contribuições Sociais - Retidas
+                                                          R$ 278,27                                               -                                                       R$ 862,64
+
+PIS - Débito Apuraçao Própria                             COFINS - Débito Apuraçao Própria                        Descrição Contrib. Sociais - Retidas
+R$ 0,00                                                   R$ 0,00                                                 3
+
+TRIBUTAÇÃO IBS/CBS                                        CST/cClassTrib                                          Indicador de Operação/Código IBGE Incidência/Município Incidência/Sigla UF
+                                                          200/200029                                              030102/2304400/FORTALEZA/CE
+
+Exclusões e Reduções da Base de Cálculo                   Base de Cálculo Após Exclusões e                        Red. Alíquota IBS/Red. Alíquota CBS                     Alíquota - IBS UF/IBS Mun
+R$ 556,54                                                 R$ 17.994,86                                            60,00% / 60,00% / 60,00%                                0,10
+
+Aliq. Efetiva Municipal - IBS                             Valor Apurado Municipal - IBS                           Aliq Efetiva Estadual - IBS                             Valor Apurado Estadual - IBS
+0,00                                                      R$ 0,00                                                 0,04                                                    R$ 7,20
+
+Valor Total Apurado - IBS                                 Alíquota - CBS                                          Alíquota Efetiva - CBS                                  Valor Total Apurado - CBS
+R$ 7,20                                                   0,90                                                    0,36                                                    R$ 64,78
+
+VALOR TOTAL DA NFS-E                                      VALOR DA OPERAÇÃO/SERVIÇO                               Desconto Incondicionado                               Desconto Condicionado
+                                                          R$ 18.551,40                                            -                                                     -
+
+Total das Retenções (ISSQN/Federais)                      VALOR LÍQUIDO DA NFS-e                                  Total do IBS/CBS                                   VALOR LÍQUIDO DA NFS-e + IBS/CBS
+R$ 1.697,45                                               R$ 16.853,95                                            R$ 71,98                                           R$ 16.925,93
+
+INFORMAÇÕES COMPLEMENTARES
+1- Uma via desta Nota Fiscal será enviada através do e-mail fornecido pelo Tomador dos Serviços, no sítio http://iss.fortaleza.ce.gov.br
+2- A autenticidade desta Nota Fiscal poderá ser validada no site http://iss.fortaleza.ce.gov.br/, com a utilização do Código de Verificação.
+Totais Aproximados dos Tributos cfe. Lei nº 12.741/2012: Federais: R$ 1.140,91 ; Estaduais: R$ 0,00 ; Municipais: R$ 556,54
+
+DATA DA CIENTIFICAÇÃO:                                   IDENTIFICAÇÃO E ASSINATURA:                              Nº NFS-e/CHAVE NFS-e:
+                                                                                                                  6631/23044001207595068000100000000000663126110386618210

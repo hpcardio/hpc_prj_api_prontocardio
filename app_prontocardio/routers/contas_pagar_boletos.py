@@ -43,6 +43,10 @@ from app_prontocardio.services.contas_pagar_importacao import (
     simular_importacao,
 )
 from app_prontocardio.services.dias_uteis import prazo_minimo
+from app_prontocardio.services.nfse_manuais import (
+    CAMPOS_NFSE,
+    FONTE_NFSE_RECEBIDAS,
+)
 from app_prontocardio.services.nfse_pdf_fortaleza import (
     PdfIndisponivel,
     baixar_pdf_oficial,
@@ -67,20 +71,20 @@ logger = logging.getLogger(__name__)
 TAMANHO_MAXIMO_PDF = 5 * 1024 * 1024
 TOLERANCIA = Decimal('0.01')
 
-SQL_NOTA = text("""
+SQL_NOTA = text(f"""
 SELECT prestador_cnpj, prestador_razao_social, numero_nfse, valor_servicos,
        valor_liquido_nfse, tomador_cnpj
-  FROM api_prontocardio.nfse_xml_tomador
+  FROM {FONTE_NFSE_RECEBIDAS} n
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
  ORDER BY data_hora DESC NULLS LAST
  LIMIT 1
 """)
 
-SQL_SITUACAO_XML = text("""
+SQL_SITUACAO_XML = text(f"""
 SELECT CASE WHEN coalesce(cancelamento_data_hora, '') <> ''
               OR coalesce(motivo_cancelamento_nfse, '') <> ''
             THEN 'CANCELADA' END
-  FROM api_prontocardio.nfse_xml_tomador
+  FROM {FONTE_NFSE_RECEBIDAS} n
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
  ORDER BY data_hora DESC NULLS LAST
  LIMIT 1
@@ -315,22 +319,10 @@ async def enviar_boleto(
             'prazo_minimo': prazo.date(), 'fora_do_prazo': fora_do_prazo, 'justificativa_atraso': justificativa}
 
 
-CAMPOS_NFSE = (
-    'numero_nfse', 'codigo_verificacao_nfse', 'competencia_nfse', 'codigo_natureza_operacao',
-    'prestador_cnpj', 'prestador_razao_social', 'prestador_nome_fantasia', 'prestador_inscricao_municipal',
-    'prestador_endereco', 'prestador_numero_endereco', 'prestador_complemento_endereco', 'prestador_bairro',
-    'prestador_cep', 'prestador_uf', 'prestador_email', 'prestador_telefone',
-    'tomador_cnpj', 'tomador_razao_social', 'tomador_endereco', 'tomador_numero_endereco', 'tomador_bairro',
-    'tomador_cep', 'tomador_uf', 'tomador_email',
-    'discriminacao', 'codigo_item_lista_servico', 'codigo_cnae', 'codigo_tributacao', 'codigo_municipio_servico',
-    'valor_servicos', 'valor_deducoes', 'valor_pis', 'valor_cofins', 'valor_inss', 'valor_ir', 'valor_csll',
-    'outras_retencoes', 'iss_retido', 'valor_iss', 'valor_iss_retido', 'base_calculo', 'aliquota',
-    'desconto_incondicionado', 'desconto_condicionado', 'valor_liquido_nfse',
-)
 
 SQL_NFSE_COMPLETA = text(f"""
-SELECT data_hora, {', '.join(CAMPOS_NFSE)}, xml_campos, xml_documento
-  FROM api_prontocardio.nfse_xml_tomador
+SELECT data_hora, {', '.join(CAMPOS_NFSE)}, xml_campos, xml_documento, origem_nfse, nfse_manual_id
+  FROM {FONTE_NFSE_RECEBIDAS} n
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
  ORDER BY data_hora DESC NULLS LAST
  LIMIT 1
@@ -361,6 +353,7 @@ def ver_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: SessionPostgr
         'rps_serie': extras.get('nfse_infnfse_identificacaorps_serie'),
         'optante_simples': extras.get('nfse_infnfse_optantesimplesnacional'),
         'status_nfse': status_da_nota(session, somente_digitos(cnpj), numero),
+        'origem_nfse': nota.get('origem_nfse'),
     }
 
 
@@ -381,6 +374,8 @@ ON CONFLICT (prestador_cnpj, numero_nfse) DO UPDATE
    SET arquivo = EXCLUDED.arquivo, sha256 = EXCLUDED.sha256, baixado_em = now()
 """).bindparams(bindparam('arquivo'))
 
+SQL_PDF_MANUAL = text('SELECT arquivo FROM api_prontocardio.contas_pagar_nfse_manuais WHERE id = :id')
+
 SQL_PDF_GUARDADO = text("""
 SELECT arquivo, baixado_em FROM api_prontocardio.contas_pagar_nfse_pdf
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
@@ -400,6 +395,10 @@ def baixar_pdf_nfse(cnpj: str, numero: str, usuario: AcessoFila, session: Sessio
     nota = _nfse_completa(session, oracle, usuario, cnpj, numero)
     cnpj = somente_digitos(cnpj)
     chave = {'cnpj': cnpj, 'numero': numero}
+    if nota.get('origem_nfse') == 'pdf':
+        # NFS-e de outro município: o PDF é o que o usuário enviou no cadastro.
+        arquivo = session.execute(SQL_PDF_MANUAL, {'id': nota['nfse_manual_id']}).scalar_one()
+        return _resposta_pdf(bytes(arquivo), cnpj, numero, 'cadastro')
     session.execute(text(DDL_NFSE_PDF))
     session.commit()
     try:
@@ -472,10 +471,10 @@ def boletos_por_nota(session, cnpjs: list[str]) -> dict[tuple[str, str], dict]:
 # ------------------------------------------------------------ importação (MV)
 
 
-SQL_NOTA_IMPORTACAO = text("""
+SQL_NOTA_IMPORTACAO = text(f"""
 SELECT data_hora, valor_servicos, valor_liquido_nfse, valor_iss_retido, iss_retido,
        valor_pis, valor_cofins, valor_inss, valor_ir, valor_csll, outras_retencoes
-  FROM api_prontocardio.nfse_xml_tomador
+  FROM {FONTE_NFSE_RECEBIDAS} n
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
  ORDER BY data_hora DESC NULLS LAST
  LIMIT 1

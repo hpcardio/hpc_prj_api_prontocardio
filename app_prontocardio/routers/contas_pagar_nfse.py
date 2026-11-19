@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import Usuario
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.nfse_manuais import FONTE_NFSE_RECEBIDAS
 from app_prontocardio.services.payables_mv import read_payables_rows
 from app_prontocardio.services.payables_oficinas import (
     MESES_HISTORICO,
@@ -228,13 +229,13 @@ _SQL_NFSE_RECEBIDAS = """
 SELECT n.prestador_cnpj, n.prestador_razao_social, n.numero_nfse,
        n.codigo_verificacao_nfse, n.data_hora, n.competencia_nfse,
        n.valor_servicos, n.valor_liquido_nfse, n.tomador_cnpj,
-       n.tomador_razao_social, n.discriminacao,
+       n.tomador_razao_social, n.discriminacao, n.origem_nfse, n.nfse_manual_id,
        -- O XML só traz o cancelamento se a nota já estava cancelada ao ser baixada.
        CASE WHEN coalesce(n.cancelamento_data_hora, '') <> ''
               OR coalesce(n.motivo_cancelamento_nfse, '') <> ''
             THEN 'CANCELADA' END AS situacao_xml,
        {situacao_portal}
-  FROM api_prontocardio.nfse_xml_tomador n
+  FROM {fonte} n
   {join_situacao}
  WHERE n.data_hora IS NOT NULL
    AND (n.data_hora AT TIME ZONE 'America/Sao_Paulo')::date >= CAST(:desde AS date)
@@ -243,6 +244,7 @@ SELECT n.prestador_cnpj, n.prestador_razao_social, n.numero_nfse,
 
 # Situação lida na lista de resultados do portal ISS (DAG extracao_nfse_tomador).
 SQL_NFSE_RECEBIDAS = text(_SQL_NFSE_RECEBIDAS.format(
+    fonte=FONTE_NFSE_RECEBIDAS,
     situacao_portal='s.situacao AS situacao_portal, s.atualizado_em AS situacao_consultada_em',
     join_situacao="""LEFT JOIN api_prontocardio.nfse_xml_tomador_situacao s
          ON s.prestador_cnpj = regexp_replace(n.prestador_cnpj, '\\D', '', 'g')
@@ -251,6 +253,7 @@ SQL_NFSE_RECEBIDAS = text(_SQL_NFSE_RECEBIDAS.format(
 
 # Enquanto a DAG nova não criar a tabela de situação.
 SQL_NFSE_RECEBIDAS_SEM_SITUACAO = text(_SQL_NFSE_RECEBIDAS.format(
+    fonte=FONTE_NFSE_RECEBIDAS,
     situacao_portal='NULL AS situacao_portal, NULL AS situacao_consultada_em',
     join_situacao='',
 ))
@@ -517,6 +520,8 @@ def listar_recebidas(
             'ds_oficina': regra['ds_oficina'] if oficina_nota else None,
             'situacao': situacao_nota,
             'status_nfse': status,
+            'origem_nfse': nota.get('origem_nfse') or 'iss',
+            'nfse_manual_id': nota.get('nfse_manual_id'),
             'status_nfse_consultado_em': nota['situacao_consultada_em'],
             'motivo': motivo if situacao_nota == 'a_classificar' else None,
             'mv': mv,
