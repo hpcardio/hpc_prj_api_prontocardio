@@ -74,7 +74,9 @@ def data_hora(texto: str | None) -> datetime | None:
 
 
 def _normalizar(texto: str) -> str:
-    return re.sub(r'\s+', ' ', texto or '').strip().upper()
+    # Os emissores variam o espaço em volta da barra ("CNPJ/CPF/NIF" em Fortaleza,
+    # "CNPJ / CPF / NIF" em Recife): compara sem ele.
+    return re.sub(r'\s*/\s*', '/', re.sub(r'\s+', ' ', texto or '')).strip().upper()
 
 
 class Grade:
@@ -169,7 +171,7 @@ def _ler_participantes(g: Grade, d: dict) -> None:
         d['prestador_razao_social'] = g.valor('Nome/Nome Empresarial', ini_prest, ini_tom)
         d['prestador_municipio'] = g.valor('Município/Sigla UF', ini_prest, ini_tom)
         ibge = g.valor('Código IBGE/CEP', ini_prest, ini_tom) or ''
-        d['prestador_codigo_municipio'] = ibge.split('/')[0].strip() or None
+        d['prestador_codigo_municipio'] = somente_digitos(ibge.split('/')[0]) or None  # Recife escreve "26.11606"
         d['prestador_cep'] = somente_digitos(ibge.split('/')[1]) if '/' in ibge else None
         d['prestador_endereco'] = g.valor('Endereço', ini_prest, ini_tom)
         d['prestador_email'] = g.valor('E-mail', ini_prest, ini_tom)
