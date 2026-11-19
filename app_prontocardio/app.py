@@ -22,6 +22,7 @@ from app_prontocardio.routers import (
     contas_pagar_boletos,
     contas_pagar_financeiro,
     contas_pagar_nfse,
+    contas_pagar_nfse_manual,
     cuidados_paciente,
     ecg_worklist,
     evolucoes,
@@ -133,6 +134,7 @@ app.include_router(contas_pagar.router)
 app.include_router(contas_pagar_nfse.router)
 app.include_router(contas_pagar_boletos.router)
 app.include_router(contas_pagar_financeiro.router)
+app.include_router(contas_pagar_nfse_manual.router)
 app.include_router(mv_identidade.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
