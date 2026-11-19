@@ -525,6 +525,7 @@ def listar_recebidas(
                 'soma': resumo_boletos['soma'],
                 'primeiro_vencimento': resumo_boletos['primeiro_vencimento'],
                 'com_divergencia': bool(resumo_boletos['com_divergencia']),
+                'fora_do_prazo': bool(resumo_boletos.get('fora_do_prazo')),
             } if resumo_boletos else None,
             'pronta': pronta,
         })
