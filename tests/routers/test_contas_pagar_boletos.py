@@ -209,7 +209,7 @@ def test_fila_filtra_notas_prontas():
     regras = [{**REGRAS[0], 'nm_fornecedor': 'Software SA', 'origem': 'historico', 'qtd_entradas': 3,
                'participacao': Decimal('1'), 'usuario_id': 1, 'atualizado_em': None, 'cd_fornecedor': 1}]
     boletos = [{'prestador_cnpj': '11222333000181', 'numero_nfse': '123', 'quantidade': 1,
-                'soma': Decimal('1500.50'), 'primeiro_vencimento': HOJE, 'com_divergencia': False}]
+                'soma': Decimal('1500.50'), 'primeiro_vencimento': HOJE, 'com_divergencia': False, 'fora_do_prazo': True}]
     postgres = FakeSession([[True], [False], [nota_fila, sem_boleto], regras, boletos])
     oracle = FakeSession([[], EMPRESAS])
 
@@ -218,6 +218,7 @@ def test_fila_filtra_notas_prontas():
     assert [i['numero_nfse'] for i in resposta['itens']] == ['123']
     assert resposta['itens'][0]['pronta'] is True
     assert resposta['itens'][0]['boletos']['soma'] == Decimal('1500.50')
+    assert resposta['itens'][0]['boletos']['fora_do_prazo'] is True  # a fila mostra "fora do prazo · justificado"
 
 
 def test_nota_cancelada_no_iss_nao_aceita_boleto(monkeypatch):
