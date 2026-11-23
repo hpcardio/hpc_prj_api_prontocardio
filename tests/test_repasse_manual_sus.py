@@ -49,3 +49,35 @@ def test_manual_repass_date_is_not_used_as_attendance_date():
 
     assert "'data_atendimento': None" in source
     assert "'data_repasse': row.get('dt_repasse_manual')" in source
+
+
+def test_accepts_other_insurances_and_optional_month():
+    assert parse('CONSULTA EM CONSULTORIO-PACIENTE FICTICIO QUATRO-CAMED') == {
+        'procedimento': 'CONSULTA EM CONSULTORIO',
+        'paciente': 'PACIENTE FICTICIO QUATRO',
+        'convenio': 'CAMED',
+    }
+    assert parse(
+        'PACIENTE FICTICIO CINCO-HOLTER 24H-PARTICULAR-OUTUBRO'
+    )['convenio'] == 'PARTICULAR'
+
+
+def test_accepts_underscore_and_monitorizacao():
+    assert parse(
+        'PACIENTE FICTICIO SEIS_MONITORIZAÇÃO AMBULATORIAL_SUS_NOVEMBRO'
+    ) == {
+        'procedimento': 'MONITORIZAÇÃO AMBULATORIAL',
+        'paciente': 'PACIENTE FICTICIO SEIS',
+        'convenio': 'SUS',
+    }
+
+
+def test_unparseable_description_is_kept_whole():
+    sem_convenio = 'ECOCARDIOGRAMA-PACIENTE FICTICIO SETE-OUTRO PLANO'
+    assert parse(sem_convenio) == {
+        'procedimento': sem_convenio,
+        'paciente': None,
+        'convenio': None,
+    }
+    ambigua = 'PACIENTE FICTICIO OITO-SEM PROCEDIMENTO CONHECIDO-SUS'
+    assert parse(ambigua)['paciente'] is None

@@ -524,8 +524,10 @@ def _decimal(valor) -> Decimal:
     return Decimal(str(valor or 0)).quantize(Decimal('0.01'))
 
 
-# Descrição manual: ao menos procedimento e paciente separados por hífen.
-MINIMO_PARTES_DESCRICAO_MANUAL = 2
+# Descrição manual: procedimento, paciente e convênio separados por hífen
+# (o mês no fim é opcional).
+MINIMO_PARTES_DESCRICAO_MANUAL = 3
+MINIMO_PARTES_SEM_CONVENIO = 2
 
 
 def _parse_manual_repasse_description(descricao: str | None) -> dict:
@@ -546,6 +548,8 @@ def _parse_manual_repasse_description(descricao: str | None) -> dict:
             'HOLTER',
             'IMPLANTE',
             'MAPA',
+            'MONITORIZACAO',
+            'MONITORIZAÇÃO',
             'PARECER',
             'TESTE ERGOMETRICO',
             'TESTE ERGOMÉTRICO',
@@ -556,41 +560,65 @@ def _parse_manual_repasse_description(descricao: str | None) -> dict:
         return any(item in texto_normalizado for item in marcadores)
 
     texto = ' '.join(str(descricao or '').strip().lstrip(':').split())
-    prefixo, separador, sufixo = texto.rpartition('-')
-    if not separador:
-        return {
-            'procedimento': texto or 'Sem detalhamento',
-            'paciente': None,
-            'convenio': None,
-        }
-    corpo, separador, convenio = prefixo.rpartition('-')
-    if not separador or convenio.strip().upper() != 'SUS':
-        return {
-            'procedimento': texto or 'Sem detalhamento',
-            'paciente': None,
-            'convenio': None,
-        }
-    partes = [parte.strip() for parte in corpo.split('-') if parte.strip()]
+    partes = [
+        parte.strip()
+        for parte in texto.replace('_', '-').split('-')
+        if parte.strip()
+    ]
     if len(partes) < MINIMO_PARTES_DESCRICAO_MANUAL:
         return {
-            'procedimento': corpo.strip() or 'Sem detalhamento',
+            'procedimento': texto or 'Sem detalhamento',
             'paciente': None,
-            'convenio': 'SUS',
+            'convenio': None,
+        }
+
+    meses = (
+        'JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT',
+        'NOV', 'DEZ',
+    )
+    if partes[-1].upper().startswith(meses):
+        partes.pop()
+
+    convenios = {
+        'SUS', 'PARTICULAR', 'CAMED', 'IPM', 'ISSEC', 'FUSMA', 'CAPESPE',
+        'CAPESP', 'BRADESCO', 'UNIMED', 'HAPVIDA', 'FUNSA', 'ASSEFAZ',
+        'SAUDE CAIXA', 'GEAP',
+    }
+    convenio = partes[-1].upper() if partes else ''
+    if convenio not in convenios:
+        return {
+            'procedimento': texto or 'Sem detalhamento',
+            'paciente': None,
+            'convenio': None,
+        }
+    partes.pop()
+    if len(partes) < MINIMO_PARTES_SEM_CONVENIO:
+        return {
+            'procedimento': '-'.join(partes).strip() or 'Sem detalhamento',
+            'paciente': None,
+            'convenio': convenio,
         }
     primeira_parte = partes[0]
     ultima_parte = partes[-1]
-    if parece_procedimento(ultima_parte) and not parece_procedimento(
+    restante = '-'.join(partes[1:])
+    if parece_procedimento(restante) and not parece_procedimento(
         primeira_parte
     ):
-        procedimento = ultima_parte
-        paciente = '-'.join(partes[:-1])
+        procedimento = restante
+        paciente = primeira_parte
+    elif parece_procedimento(primeira_parte):
+        procedimento = '-'.join(partes[:-1])
+        paciente = ultima_parte
     else:
-        procedimento = primeira_parte
-        paciente = '-'.join(partes[1:])
+        return {
+            'procedimento': texto or 'Sem detalhamento',
+            'paciente': None,
+            'convenio': None,
+        }
     return {
         'procedimento': procedimento.strip() or 'Sem detalhamento',
         'paciente': paciente.strip() or None,
-        'convenio': 'SUS',
+        'convenio': convenio,
     }
 
 
