@@ -524,7 +524,37 @@ def _decimal(valor) -> Decimal:
     return Decimal(str(valor or 0)).quantize(Decimal('0.01'))
 
 
+# Descrição manual: ao menos procedimento e paciente separados por hífen.
+MINIMO_PARTES_DESCRICAO_MANUAL = 2
+
+
 def _parse_manual_repasse_description(descricao: str | None) -> dict:
+    def parece_procedimento(valor: str) -> bool:
+        texto_normalizado = valor.upper()
+        marcadores = (
+            'ANESTESIA',
+            'ANGIOPLASTIA',
+            'ANGIOTOMOGRAFIA',
+            'CATETERISMO',
+            'CIRURGIA',
+            'CONSULTA',
+            'DOPPLER',
+            'ECOCARDIO',
+            'ECODOPPLER',
+            'ELETROCARDIOGRAMA',
+            'EXAME',
+            'HOLTER',
+            'IMPLANTE',
+            'MAPA',
+            'PARECER',
+            'TESTE ERGOMETRICO',
+            'TESTE ERGOMÉTRICO',
+            'TRATAMENTO',
+            'ULTRASSOM',
+            'VISITA',
+        )
+        return any(item in texto_normalizado for item in marcadores)
+
     texto = ' '.join(str(descricao or '').strip().lstrip(':').split())
     prefixo, separador, sufixo = texto.rpartition('-')
     if not separador:
@@ -540,13 +570,23 @@ def _parse_manual_repasse_description(descricao: str | None) -> dict:
             'paciente': None,
             'convenio': None,
         }
-    procedimento, separador, paciente = corpo.partition('-')
-    if not separador:
+    partes = [parte.strip() for parte in corpo.split('-') if parte.strip()]
+    if len(partes) < MINIMO_PARTES_DESCRICAO_MANUAL:
         return {
             'procedimento': corpo.strip() or 'Sem detalhamento',
             'paciente': None,
             'convenio': 'SUS',
         }
+    primeira_parte = partes[0]
+    ultima_parte = partes[-1]
+    if parece_procedimento(ultima_parte) and not parece_procedimento(
+        primeira_parte
+    ):
+        procedimento = ultima_parte
+        paciente = '-'.join(partes[:-1])
+    else:
+        procedimento = primeira_parte
+        paciente = '-'.join(partes[1:])
     return {
         'procedimento': procedimento.strip() or 'Sem detalhamento',
         'paciente': paciente.strip() or None,
@@ -696,7 +736,8 @@ def montar_preview(  # noqa: PLR0912
                 'prestador': row.get('nm_prestador_destino'),
                 'codigo_atendimento': None,
                 'paciente': manual_info['paciente'],
-                'data_atendimento': row.get('dt_repasse_manual'),
+                'data_atendimento': None,
+                'data_repasse': row.get('dt_repasse_manual'),
                 'codigo_procedimento': None,
                 'procedimento': procedimento,
                 'codigo_convenio': None,
