@@ -82,8 +82,9 @@ select * from (
 ) where rownum = 1"""
 
 SQL_OFICINA = """/* rc:oficina */
-select cd_oficina, ds_oficina, cd_setor, cd_multi_empresa
-  from dbamv.oficina where cd_oficina = :oficina"""
+select o.cd_oficina, o.ds_oficina, o.cd_setor, o.cd_multi_empresa,
+       (select s.nm_setor from dbamv.setor s where s.cd_setor = o.cd_setor) as nm_setor
+  from dbamv.oficina o where o.cd_oficina = :oficina"""
 
 SQL_SERVICO = """/* rc:servico */
 select cd_servico, nm_servico, cd_reduzido, cd_item_res,
