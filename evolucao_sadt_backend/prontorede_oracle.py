@@ -1,4 +1,5 @@
 import os
+import re
 from collections.abc import Callable, Mapping
 
 from sqlalchemy import text
@@ -17,18 +18,31 @@ OracleConnectionFactory = Callable[[], object]
 _AUTHORIZED_CONTEXT_QUERY = text(
     """
     SELECT A.CD_ATENDIMENTO AS cd_atendimento,
-           U.CD_USUARIO AS cd_usuario,
-           P.CD_PRESTADOR AS cd_prestador,
+           ID.CD_USUARIO AS cd_usuario,
+           ID.CD_PRESTADOR AS cd_prestador,
            CO.DS_CONSELHO AS ds_conselho,
-           P.DS_CODIGO_CONSELHO AS ds_codigo_conselho,
-           P.CD_UF_ORGAO_EMISSOR AS cd_uf_orgao_emissor
+           ID.DS_CODIGO_CONSELHO AS ds_codigo_conselho,
+           ID.CD_UF_ORGAO_EMISSOR AS cd_uf_orgao_emissor,
+           COUNT(*) OVER () AS match_count
       FROM DBAMV.ATENDIME A
-      JOIN DBASGU.USUARIOS U ON U.CD_USUARIO = :cd_usuario
-      JOIN DBAMV.PRESTADOR P ON P.CD_PRESTADOR = U.CD_PRESTADOR
-      LEFT JOIN DBAMV.CONSELHO CO ON CO.CD_CONSELHO = P.CD_CONSELHO
+      JOIN (
+            SELECT U.CD_USUARIO,
+                   P.CD_PRESTADOR,
+                   P.CD_CONSELHO,
+                   P.DS_CODIGO_CONSELHO,
+                   P.CD_UF_ORGAO_EMISSOR
+              FROM DBASGU.USUARIOS U
+              JOIN DBAMV.PRESTADOR P
+                ON P.CD_PRESTADOR = U.CD_PRESTADOR
+             WHERE (
+                    UPPER(U.CD_USUARIO) = :identity
+                    OR UPPER(P.NM_PRESTADOR) = :identity
+                   )
+               AND NVL(P.TP_SITUACAO, 'A') = 'A'
+           ) ID ON 1 = 1
+      LEFT JOIN DBAMV.CONSELHO CO ON CO.CD_CONSELHO = ID.CD_CONSELHO
      WHERE A.CD_ATENDIMENTO = :cd_atendimento
        AND A.DT_ALTA IS NULL
-       AND NVL(P.TP_SITUACAO, 'A') = 'A'
     """
 )
 
@@ -41,8 +55,8 @@ def resolve_authorized_mv_context(
 ) -> VerifiedMvContext:
     '''Revalidate an authorized CRM provider through a read-only query.'''
     attendance = _normalize_attendance(cd_atendimento)
-    user = _normalize_user(cd_usuario)
-    if user not in _allowed_users():
+    identity = _normalize_identity(cd_usuario)
+    if not _allowed_users():
         raise MvContextAuthorizationError('Contexto MV não autorizado.')
 
     with connection_factory() as connection:
@@ -50,11 +64,14 @@ def resolve_authorized_mv_context(
             _AUTHORIZED_CONTEXT_QUERY,
             {
                 'cd_atendimento': attendance,
-                'cd_usuario': user,
+                'identity': identity,
             },
         ).mappings().first()
 
-    return _verified_context(row, attendance, user)
+    context = _verified_context(row, attendance)
+    if not _is_user_allowed(context.cd_usuario):
+        raise MvContextAuthorizationError('Contexto MV não autorizado.')
+    return context
 
 
 def _normalize_attendance(value: int) -> int:
@@ -63,11 +80,11 @@ def _normalize_attendance(value: int) -> int:
     return value
 
 
-def _normalize_user(value: str) -> str:
+def _normalize_identity(value: str) -> str:
     if not isinstance(value, str):
         raise MvContextAuthorizationError('Contexto MV não autorizado.')
     normalized = value.strip().upper()
-    if not normalized:
+    if not re.fullmatch(r"[A-ZÀ-ÖØ-Ý0-9_. '\-]{2,120}", normalized):
         raise MvContextAuthorizationError('Contexto MV não autorizado.')
     return normalized
 
@@ -81,17 +98,23 @@ def _allowed_users() -> set[str]:
     }
 
 
+def _is_user_allowed(user: str) -> bool:
+    allowed_users = _allowed_users()
+    return '*' in allowed_users or user in allowed_users
+
+
 def _verified_context(
     row: Mapping[str, object] | None,
     attendance: int,
-    user: str,
 ) -> VerifiedMvContext:
     if not isinstance(row, Mapping):
         raise MvContextAuthorizationError('Contexto MV não autorizado.')
     if row.get('cd_atendimento') != attendance:
         raise MvContextAuthorizationError('Contexto MV não autorizado.')
-    if _normalize_row_user(row.get('cd_usuario')) != user:
+    if row.get('match_count') != 1:
         raise MvContextAuthorizationError('Contexto MV não autorizado.')
+
+    user = _normalize_row_user(row.get('cd_usuario'))
 
     provider = row.get('cd_prestador')
     if (
