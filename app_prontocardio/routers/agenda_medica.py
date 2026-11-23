@@ -149,7 +149,22 @@ class OfertaInput(BaseModel):
     cd_escala_modelo: int = Field(gt=0)
     data_agenda: date
     especialidade: str = Field(min_length=2, max_length=120)
+    prazo_interesse: datetime
     observacao: str | None = Field(default=None, max_length=1000)
+
+
+class InteresseAdministrativoInput(BaseModel):
+    cd_prestador: int = Field(gt=0)
+
+
+class PropostaGradeInput(BaseModel):
+    cd_escala_modelo: int = Field(gt=0)
+    data_agenda: date
+    hr_inicio: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    hr_fim: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    especialidade: str = Field(min_length=2, max_length=120)
+    observacao: str | None = Field(default=None, max_length=1000)
+    cd_prestador: int | None = Field(default=None, gt=0)
 
 
 class CancelamentoInput(BaseModel):
@@ -196,6 +211,11 @@ def _oferta_dict(oferta: AgendaMedicaOferta) -> dict:
         'cd_unidade_atendimento': oferta.cd_unidade_atendimento,
         'ds_unidade_atendimento': oferta.ds_unidade_atendimento,
         'observacao': oferta.observacao,
+        'prazo_interesse': (
+            oferta.prazo_interesse.isoformat()
+            if oferta.prazo_interesse
+            else None
+        ),
         'status': oferta.status,
         'criado_por': oferta.criado_por_nome,
     }
@@ -274,7 +294,7 @@ def status_agenda_medica(_: Leitor):
 
 @router.get('/escalas-modelo')
 def listar_escalas_modelo(
-    _: Admin,
+    _: Leitor,
     soulmv: SoulMV,
     cd_unidade: int | None = Query(default=None, gt=0),
     tp_dia_semana: int | None = Query(default=None, ge=1, le=7),
@@ -418,6 +438,18 @@ def criar_oferta(
     escala = soulmv.escala_modelo(payload.cd_escala_modelo)
     if escala is None:
         raise _nao_encontrado('Escala-modelo não encontrada no SoulMV.')
+    agora = datetime.now(FUSO_HORARIO_BRASIL).replace(tzinfo=None)
+    prazo = payload.prazo_interesse.replace(tzinfo=None)
+    inicio_grade = datetime.combine(
+        payload.data_agenda,
+        datetime.strptime(escala['hr_inicio'], '%H:%M').time(),
+    )
+    if prazo <= agora:
+        raise _conflito('O prazo para interesse precisa ser futuro.')
+    if prazo >= inicio_grade:
+        raise _conflito(
+            'O prazo para interesse precisa terminar antes do início da grade.'
+        )
     dia = tp_dia_semana_de(payload.data_agenda)
     if escala['tp_dia_semana'] != dia:
         esperado = DIAS_SEMANA.get(escala['tp_dia_semana'], '?')
@@ -438,6 +470,7 @@ def criar_oferta(
         ).strip()
         or None,
         observacao=payload.observacao,
+        prazo_interesse=prazo,
     )
     session.add(oferta)
     session.flush()
@@ -503,6 +536,144 @@ def manifestar_interesse(
     )
     session.commit()
     return _solicitacao_dict(pedido)
+
+
+@router.post(
+    '/ofertas/{oferta_id}/interesse-administrativo',
+    status_code=HTTPStatus.CREATED,
+)
+def manifestar_interesse_administrativo(
+    oferta_id: int,
+    payload: InteresseAdministrativoInput,
+    usuario: Admin,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    """Registra, com auditoria, o interesse lançado por um administrador."""
+    oferta = session.get(AgendaMedicaOferta, oferta_id)
+    if oferta is None:
+        raise _nao_encontrado('Oferta não encontrada.')
+    if oferta.status != 'ABERTA':
+        raise _conflito('Esta grade não está mais aberta.')
+    if soulmv.prestador(payload.cd_prestador) is None:
+        raise _nao_encontrado('Prestador não encontrado no SoulMV.')
+    repetido = session.scalar(
+        select(AgendaMedicaSolicitacao).where(
+            AgendaMedicaSolicitacao.oferta_id == oferta_id,
+            AgendaMedicaSolicitacao.cd_prestador == payload.cd_prestador,
+            AgendaMedicaSolicitacao.status.in_(('PENDENTE', 'APROVADA')),
+        )
+    )
+    if repetido is not None:
+        raise _conflito('Este médico já tem um pedido para esta grade.')
+    pedido = AgendaMedicaSolicitacao(
+        tipo='INTERESSE',
+        cd_prestador=payload.cd_prestador,
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+        oferta_id=oferta_id,
+    )
+    session.add(pedido)
+    session.flush()
+    _registrar(
+        session,
+        usuario,
+        'INTERESSE_ADMINISTRATIVO',
+        'interesse lançado pelo administrador para prestador '
+        f'{payload.cd_prestador}',
+        oferta_id=oferta_id,
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    return _solicitacao_dict(pedido)
+
+
+@router.post('/propostas-grade', status_code=HTTPStatus.CREATED)
+def propor_grade(
+    payload: PropostaGradeInput,
+    usuario: UsuarioAtual,
+    session: SessionPostgres,
+    soulmv: SoulMV,
+):
+    """Registra uma sugestão do médico sem gravar nada no SoulMV."""
+    if payload.cd_prestador is not None and _tem_tela(usuario, TELA_ADMIN):
+        cd_prestador = payload.cd_prestador
+    else:
+        _, cd_prestador = medico_atual(usuario, session)
+    if payload.data_agenda <= date.today():
+        raise _conflito('A data sugerida precisa ser futura.')
+    if payload.hr_fim <= payload.hr_inicio:
+        raise _conflito('O horário final precisa ser posterior ao inicial.')
+    escala = soulmv.escala_modelo(payload.cd_escala_modelo)
+    if escala is None:
+        raise _nao_encontrado('Escala-modelo não encontrada no SoulMV.')
+    dia = tp_dia_semana_de(payload.data_agenda)
+    if escala['tp_dia_semana'] != dia:
+        esperado = DIAS_SEMANA.get(escala['tp_dia_semana'], '?')
+        raise _conflito(
+            f'A escala-modelo é de {esperado}; escolha uma data nesse dia.'
+        )
+    if soulmv.prestador(cd_prestador) is None:
+        raise _nao_encontrado('Prestador não encontrado no SoulMV.')
+    repetida = session.scalar(
+        select(AgendaMedicaSolicitacao)
+        .join(
+            AgendaMedicaOferta,
+            AgendaMedicaOferta.id == AgendaMedicaSolicitacao.oferta_id,
+        )
+        .where(
+            AgendaMedicaSolicitacao.cd_prestador == cd_prestador,
+            AgendaMedicaSolicitacao.status == 'PENDENTE',
+            AgendaMedicaOferta.status == 'PROPOSTA',
+            AgendaMedicaOferta.data_agenda == payload.data_agenda,
+        )
+    )
+    if repetida is not None:
+        raise _conflito('Já existe uma sugestão pendente para esta data.')
+    oferta = AgendaMedicaOferta(
+        cd_escala_modelo=payload.cd_escala_modelo,
+        data_agenda=payload.data_agenda,
+        especialidade=payload.especialidade.strip().upper(),
+        hr_inicio=payload.hr_inicio,
+        hr_fim=payload.hr_fim,
+        cd_unidade_atendimento=escala['cd_unidade_atendimento'],
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+        ds_unidade_atendimento=(
+            escala.get('ds_unidade_atendimento') or ''
+        ).strip()
+        or None,
+        observacao=(payload.observacao or '').strip() or None,
+        prazo_interesse=None,
+        status='PROPOSTA',
+    )
+    session.add(oferta)
+    session.flush()
+    pedido = AgendaMedicaSolicitacao(
+        tipo='INTERESSE',
+        cd_prestador=cd_prestador,
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+        oferta_id=oferta.id,
+        motivo='Sugestão de nova grade enviada pelo médico.',
+    )
+    session.add(pedido)
+    session.flush()
+    _registrar(
+        session,
+        usuario,
+        'PROPOSTA_GRADE_CRIADA',
+        f'prestador {cd_prestador}; escala-modelo '
+        f'{payload.cd_escala_modelo}; data {payload.data_agenda}',
+        oferta_id=oferta.id,
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    return {
+        'oferta': _oferta_dict(oferta),
+        'solicitacao': _solicitacao_dict(pedido),
+        'escala': escala,
+    }
 
 
 # ---------------------------------------------------------------- pedidos
@@ -603,12 +774,21 @@ def _avaliar_interesse(
     pendencias: list[str] = []
     if oferta.data_agenda <= date.today():
         pendencias.append('A data da grade já passou.')
-    if oferta.status != 'ABERTA':
+    if oferta.status not in ('ABERTA', 'PROPOSTA'):
         pendencias.append('Esta grade já foi preenchida ou cancelada.')
     escala = soulmv.escala_modelo(oferta.cd_escala_modelo)
     if escala is None:
         pendencias.append('A escala-modelo não está mais ativa no SoulMV.')
         return pendencias, {}
+    if oferta.status == 'PROPOSTA' and (
+        oferta.hr_inicio != escala['hr_inicio']
+        or oferta.hr_fim != escala['hr_fim']
+    ):
+        pendencias.append(
+            'O horário sugerido não corresponde ao modelo do SoulMV. '
+            'A gestão deve recusar esta proposta ou criar uma escala-modelo '
+            'compatível antes da aprovação.'
+        )
     especialidades = soulmv.especialidades_prestador(pedido.cd_prestador)
     if oferta.especialidade not in especialidades:
         pendencias.append(
@@ -617,8 +797,8 @@ def _avaliar_interesse(
     conflitos = soulmv.conflitos(
         pedido.cd_prestador,
         oferta.data_agenda,
-        escala['hr_inicio'],
-        escala['hr_fim'],
+        oferta.hr_inicio,
+        oferta.hr_fim,
     )
     if conflitos:
         agendas = ', '.join(str(c['cd_agenda_central']) for c in conflitos)
@@ -711,11 +891,18 @@ def decidir_solicitacao(
     if pedido.status != 'PENDENTE':
         raise _conflito('Esta solicitação já foi decidida.')
 
+    oferta = (
+        session.get(AgendaMedicaOferta, pedido.oferta_id)
+        if pedido.tipo == 'INTERESSE'
+        else None
+    )
+
     if payload.acao == 'recusar':
         resultado = {'modo': 'recusado', 'motivo': payload.motivo}
         status = 'RECUSADA'
+        if oferta is not None and oferta.status == 'PROPOSTA':
+            oferta.status = 'RECUSADA'
     elif pedido.tipo == 'INTERESSE':
-        oferta = session.get(AgendaMedicaOferta, pedido.oferta_id)
         pendencias, plano = _avaliar_interesse(pedido, oferta, session, soulmv)
         if pendencias:
             raise _conflito({'pendencias': pendencias})
