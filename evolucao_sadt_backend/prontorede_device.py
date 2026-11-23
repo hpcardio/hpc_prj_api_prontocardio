@@ -30,6 +30,7 @@ MAX_P256_DER_SIGNATURE_BYTES = 72
 MAX_INSTALLATION_ID_LENGTH = 64
 MAX_FINALIDADE_LENGTH = 64
 MAX_MV_USER_LENGTH = 64
+MAX_MV_IDENTITY_HINT_LENGTH = 120
 MAX_MV_CRM_LENGTH = 64
 DEVICE_PUBLIC_KEYS_ENVIRONMENT = 'PRONTOREDE_MV_DEVICE_PUBLIC_KEYS_JSON'
 
@@ -342,7 +343,6 @@ class ProntoRedeDeviceService:
         if (
             not isinstance(context, VerifiedMvContext)
             or context.cd_atendimento != record.cd_atendimento_hint
-            or context.cd_usuario != record.cd_usuario_hint
             or not _is_bounded_nonempty_string(
                 context.cd_usuario, MAX_MV_USER_LENGTH
             )
@@ -421,7 +421,7 @@ class ProntoRedeDeviceService:
             )
             or not _is_positive_integer(request.cd_atendimento_hint)
             or not _is_bounded_nonempty_string(
-                request.cd_usuario_hint, MAX_MV_USER_LENGTH
+                request.cd_usuario_hint, MAX_MV_IDENTITY_HINT_LENGTH
             )
         ):
             raise ProntoRedeDeviceVerificationError(

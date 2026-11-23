@@ -2708,7 +2708,8 @@ def consultar_contexto_medico_internacao_rede(
     """Retorna o contexto mínimo de uma internação ativa para o ProntoRede."""
     del usuario_atual
     usuario = _normalizar_usuario_mv(usuario_mv)
-    if usuario not in _usuarios_mv_permitidos():
+    usuarios_permitidos = _usuarios_mv_permitidos()
+    if '*' not in usuarios_permitidos and usuario not in usuarios_permitidos:
         raise HTTPException(
             status_code=HTTPStatus.FORBIDDEN,
             detail='Contexto MV não autorizado.',

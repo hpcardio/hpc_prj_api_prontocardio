@@ -58,7 +58,7 @@ class DeviceChallengeRequest(BaseModel):
     installation_id: constr(pattern=r'^[a-f0-9-]{36}$')
     finalidade: Literal['ATUALIZACAO_PRONTOCARDIO_REDE']
     cd_atendimento_hint: StrictInt
-    cd_usuario_hint: constr(pattern=r'^[A-Z0-9_.-]{2,30}$')
+    cd_usuario_hint: constr(pattern=r"^[A-ZÀ-ÖØ-Ý0-9_. '\-]{2,120}$")
 
 
 class DeviceProofRequest(BaseModel):
@@ -87,7 +87,7 @@ class DeviceEnrollmentChallengeRequest(BaseModel):
     extension_version: constr(pattern=r'^2\.4\.[0-9]+$')
     finalidade: Literal['ATUALIZACAO_PRONTOCARDIO_REDE']
     cd_atendimento_hint: StrictInt
-    cd_usuario_hint: constr(pattern=r'^[A-Z0-9_.-]{2,30}$')
+    cd_usuario_hint: constr(pattern=r"^[A-ZÀ-ÖØ-Ý0-9_. '\-]{2,120}$")
 
 
 def _resolve_authorized_mv_context(cd_atendimento: int, cd_usuario: str):
