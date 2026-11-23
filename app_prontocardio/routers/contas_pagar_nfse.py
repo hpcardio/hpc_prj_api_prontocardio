@@ -84,10 +84,13 @@ AcessoFila = Annotated[Usuario, Depends(acesso_fila)]
 
 # ---------------------------------------------------------------- MV
 
+# O setor da NFS-e é o setor do MV da oficina (OFICINA.CD_SETOR -> SETOR).
 SQL_OFICINAS = text("""
 SELECT o.cd_oficina AS cd_oficina, o.ds_oficina AS ds_oficina,
-       o.cd_setor AS cd_setor, o.cd_multi_empresa AS cd_multi_empresa
+       o.cd_setor AS cd_setor, s.nm_setor AS nm_setor,
+       o.cd_multi_empresa AS cd_multi_empresa
   FROM dbamv.oficina o
+  LEFT JOIN dbamv.setor s ON s.cd_setor = o.cd_setor
  ORDER BY o.cd_multi_empresa, o.ds_oficina
 """)
 
@@ -430,8 +433,9 @@ def listar_recebidas(
     situacao: Literal['pendente', 'pronta', 'a_classificar', 'lancada', 'cancelada', 'todas'] = 'pendente',
     cd_oficina: int | None = None,
     desde: Annotated[date | None, Query()] = None,
+    cd_setor: int | None = None,
 ):
-    """NFS-e recebidas por oficina.
+    """NFS-e recebidas por setor do MV (setor da oficina definida na regra).
 
     ``pendente``: oficina definida e ainda sem entrada/título no MV.
     ``a_classificar``: fornecedor sem regra possível (só o financeiro vê).
@@ -463,6 +467,7 @@ def listar_recebidas(
     cnpjs = [somente_digitos(n['prestador_cnpj']) for n in notas if n['prestador_cnpj']]
     lancadas = _lancadas_mv(oracle, cnpjs) if cnpjs else {}
     empresas = _empresas_mv(oracle)
+    oficinas_mv = _oficinas_mv(oracle)
     nomes_empresa = {
         int(e['cd_multi_empresa']): e['ds_multi_empresa'] for e in empresas.values()
     }
@@ -499,6 +504,10 @@ def listar_recebidas(
             continue
         if cd_oficina is not None and oficina_nota != cd_oficina:
             continue
+        oficina_mv = oficinas_mv.get(oficina_nota) if oficina_nota is not None else None
+        setor_nota = oficina_mv.get('cd_setor') if oficina_mv else None
+        if cd_setor is not None and setor_nota != cd_setor:
+            continue
 
         discriminacao = (nota['discriminacao'] or '').strip()
         itens.append({
@@ -518,6 +527,8 @@ def listar_recebidas(
             'discriminacao': discriminacao[:TAMANHO_DISCRIMINACAO],
             'cd_oficina': oficina_nota,
             'ds_oficina': regra['ds_oficina'] if oficina_nota else None,
+            'cd_setor': setor_nota,
+            'nm_setor': (oficina_mv.get('nm_setor') or regra['ds_oficina']) if oficina_mv else None,
             'situacao': situacao_nota,
             'status_nfse': status,
             'origem_nfse': nota.get('origem_nfse') or 'iss',
@@ -541,13 +552,18 @@ def listar_recebidas(
         grupo = por_oficina[_chave_grupo(item)]
         grupo['quantidade'] += 1
         grupo['valor'] += item['valor_servicos'] or Decimal('0')
+        if item['ds_oficina']:
+            grupo['oficinas'].add(item['ds_oficina'])
 
     return {
         'desde': inicio,
         'situacao': situacao,
         'oficinas': sorted(
-            por_oficina.values(),
-            key=lambda g: (g['cd_oficina'] is not None, g['ds_oficina'], g['empresa'] or ''),
+            (
+                {**grupo, 'oficinas': sorted(grupo['oficinas'])}
+                for grupo in por_oficina.values()
+            ),
+            key=lambda g: (g['cd_oficina'] is not None, g['nm_setor'], g['empresa'] or ''),
         ),
         'itens': itens,
     }
@@ -563,18 +579,28 @@ _ROTULO_SEM_SETOR = {
 
 
 def _chave_grupo(item: dict) -> tuple:
+    if item['cd_setor'] is not None:
+        return ('setor', item['cd_setor'])
     if item['cd_oficina'] is not None:
         return ('oficina', item['cd_oficina'])
     return ('sem_setor', _ROTULO_SEM_SETOR.get(item['situacao'], GRUPO_SEM_SETOR_LANCADA))
 
 
 def _novo_grupo(item: dict) -> dict:
-    """Grupo de oficina; a empresa distingue oficinas homônimas (ex.: Central de Recebimento Fiscal)."""
+    """Grupo por setor do MV; o setor já é de uma empresa (cada empresa tem os próprios setores).
+
+    Oficinas do mesmo setor ficam no mesmo grupo (ex.: Obras e Manutenção e
+    Infraestrutura em Manutenção Predial). ``cd_oficina``/``ds_oficina`` são
+    mantidos para clientes antigos: a primeira oficina do grupo e o nome do setor.
+    """
     if item['cd_oficina'] is None:
         rotulo = _ROTULO_SEM_SETOR.get(item['situacao'], GRUPO_SEM_SETOR_LANCADA)
-        return {'cd_oficina': None, 'ds_oficina': rotulo, 'cd_multi_empresa': None,
-                'empresa': None, 'quantidade': 0, 'valor': Decimal('0')}
-    return {'cd_oficina': item['cd_oficina'], 'ds_oficina': item['ds_oficina'],
+        return {'cd_setor': None, 'nm_setor': rotulo, 'cd_oficina': None, 'ds_oficina': rotulo,
+                'oficinas': set(), 'cd_multi_empresa': None, 'empresa': None,
+                'quantidade': 0, 'valor': Decimal('0')}
+    nome = item['nm_setor'] or item['ds_oficina']
+    return {'cd_setor': item['cd_setor'], 'nm_setor': nome,
+            'cd_oficina': item['cd_oficina'], 'ds_oficina': nome, 'oficinas': set(),
             'cd_multi_empresa': item['cd_multi_empresa'], 'empresa': item['empresa'],
             'quantidade': 0, 'valor': Decimal('0')}
 

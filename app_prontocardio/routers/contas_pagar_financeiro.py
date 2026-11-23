@@ -159,7 +159,8 @@ def conferencia_financeiro(
         vencimentos = [b['vencimento'] for b in bols]
         resultado.append({
             **{k: item.get(k) for k in ('chave', 'prestador_cnpj', 'prestador', 'numero_nfse', 'codigo_verificacao',
-                                        'data_emissao', 'empresa', 'cd_multi_empresa', 'ds_oficina', 'status_nfse', 'mv')},
+                                        'data_emissao', 'empresa', 'cd_multi_empresa', 'ds_oficina', 'cd_setor', 'nm_setor',
+                                        'status_nfse', 'mv')},
             'etapa': fase,
             'valor_servicos': servicos,
             'valor_retido': servicos - liquido,
