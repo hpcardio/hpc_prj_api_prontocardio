@@ -129,8 +129,11 @@ def test_filtro_padrao_mostra_so_pendentes_agrupadas_por_oficina():
     resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='pendente')
 
     assert [i['chave'] for i in resposta['itens']] == ['11111111000111-0000123']
+    # Sem a oficina no MV, o grupo usa o nome da oficina da regra.
     assert resposta['oficinas'] == [{
+        'cd_setor': None, 'nm_setor': 'TECNOLOGIA DA INFORMACAO',
         'cd_oficina': 2, 'ds_oficina': 'TECNOLOGIA DA INFORMACAO',
+        'oficinas': ['TECNOLOGIA DA INFORMACAO'],
         'cd_multi_empresa': 1, 'empresa': 'HOSPITAL',
         'quantidade': 1, 'valor': Decimal('1500.50'),
     }]
@@ -270,6 +273,77 @@ def test_oficinas_homonimas_de_empresas_diferentes_ficam_separadas():
         ('CENTRAL DE RECEBIMENTO FISCAL', 'HOSPITAL'),
         ('CENTRAL DE RECEBIMENTO FISCAL', 'PRONTO ATENDIMENTO'),
     ]
+
+
+# ------------------------------------------------------------ setor do MV
+
+OFICINAS_MV = [
+    {'cd_oficina': 1, 'ds_oficina': 'MANUTENÇÃO E INFRAESTRUTURA', 'cd_setor': 43, 'nm_setor': 'MANUTENCAO PREDIAL', 'cd_multi_empresa': 1},
+    {'cd_oficina': 4, 'ds_oficina': 'OBRAS', 'cd_setor': 43, 'nm_setor': 'MANUTENCAO PREDIAL', 'cd_multi_empresa': 1},
+    {'cd_oficina': 5, 'ds_oficina': 'CENTRAL DE RECEBIMENTO FISCAL', 'cd_setor': 7, 'nm_setor': 'CONTABILIDADE', 'cd_multi_empresa': 1},
+    {'cd_oficina': 12, 'ds_oficina': 'CENTRAL DE RECEBIMENTO FISCAL', 'cd_setor': 68, 'nm_setor': 'CONTABILIDADE', 'cd_multi_empresa': 2},
+]
+PA = {'cd_multi_empresa': 2, 'ds_multi_empresa': 'PRONTO ATENDIMENTO', 'cnpj': '05613278000158'}
+
+
+def _cenario_setores():
+    notas = [
+        {**NOTA_TI, 'prestador_cnpj': '41000000000141', 'numero_nfse': '1', 'valor_servicos': '100'},
+        {**NOTA_TI, 'prestador_cnpj': '44000000000144', 'numero_nfse': '2', 'valor_servicos': '50'},
+        {**NOTA_TI, 'prestador_cnpj': '55000000000155', 'numero_nfse': '3', 'valor_servicos': '10'},
+        {**NOTA_TI, 'prestador_cnpj': '12000000000112', 'numero_nfse': '4', 'valor_servicos': '5',
+         'tomador_cnpj': '05613278000158'},
+    ]
+    regras = [
+        {**REGRAS[0], 'cnpj': '41000000000141', 'cd_oficina': 1, 'ds_oficina': 'MANUTENÇÃO E INFRAESTRUTURA'},
+        {**REGRAS[0], 'cnpj': '44000000000144', 'cd_oficina': 4, 'ds_oficina': 'OBRAS'},
+        {**REGRAS[0], 'cnpj': '55000000000155', 'cd_oficina': 5, 'ds_oficina': 'CENTRAL DE RECEBIMENTO FISCAL'},
+        {**REGRAS[0], 'cnpj': '12000000000112', 'cd_multi_empresa': 2, 'cd_oficina': 12,
+         'ds_oficina': 'CENTRAL DE RECEBIMENTO FISCAL'},
+    ]
+    return (FakeSession([[True], [True], notas, regras]),
+            FakeSession([[], [HOSPITAL, PA], OFICINAS_MV]))
+
+
+def test_nota_mostra_o_setor_do_mv_da_oficina():
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), *_cenario_setores(), situacao='todas')
+
+    por_numero = {i['numero_nfse']: i for i in resposta['itens']}
+    assert (por_numero['1']['cd_setor'], por_numero['1']['nm_setor']) == (43, 'MANUTENCAO PREDIAL')
+    assert (por_numero['2']['cd_setor'], por_numero['2']['nm_setor']) == (43, 'MANUTENCAO PREDIAL')
+    assert por_numero['3']['nm_setor'] == 'CONTABILIDADE'
+    # A oficina continua na nota: é ela que vai para a entrada de serviço no MV.
+    assert (por_numero['2']['cd_oficina'], por_numero['2']['ds_oficina']) == (4, 'OBRAS')
+
+
+def test_oficinas_do_mesmo_setor_ficam_no_mesmo_grupo_e_empresas_separadas():
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), *_cenario_setores(), situacao='todas')
+
+    grupos = [(g['cd_setor'], g['nm_setor'], g['empresa'], g['quantidade'], g['valor'], g['oficinas'])
+              for g in resposta['oficinas']]
+    assert grupos == [
+        (7, 'CONTABILIDADE', 'HOSPITAL', 1, Decimal('10'), ['CENTRAL DE RECEBIMENTO FISCAL']),
+        (68, 'CONTABILIDADE', 'PRONTO ATENDIMENTO', 1, Decimal('5'), ['CENTRAL DE RECEBIMENTO FISCAL']),
+        (43, 'MANUTENCAO PREDIAL', 'HOSPITAL', 2, Decimal('150'), ['MANUTENÇÃO E INFRAESTRUTURA', 'OBRAS']),
+    ]
+
+
+def test_filtro_por_setor_traz_todas_as_oficinas_do_setor():
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), *_cenario_setores(), situacao='todas', cd_setor=43)
+
+    assert sorted(i['numero_nfse'] for i in resposta['itens']) == ['1', '2']
+
+
+def test_filtro_por_oficina_continua_valendo():
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), *_cenario_setores(), situacao='todas', cd_oficina=4)
+
+    assert [i['numero_nfse'] for i in resposta['itens']] == ['2']
+
+
+def test_consulta_de_oficinas_traz_o_nome_do_setor():
+    sql = str(rota.SQL_OFICINAS)
+    assert 's.nm_setor AS nm_setor' in sql
+    assert 'LEFT JOIN dbamv.setor s ON s.cd_setor = o.cd_setor' in sql
 
 
 # ------------------------------------------------------------ situação no ISS
