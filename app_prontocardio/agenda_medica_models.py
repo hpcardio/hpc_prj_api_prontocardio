@@ -58,6 +58,9 @@ class AgendaMedicaOferta:
         String(120), default=None
     )
     observacao: Mapped[str | None] = mapped_column(Text, default=None)
+    prazo_interesse: Mapped[datetime | None] = mapped_column(
+        DateTime, default=None, index=True
+    )
     status: Mapped[str] = mapped_column(
         String(20), default='ABERTA', index=True
     )

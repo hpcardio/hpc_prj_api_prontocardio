@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from http import HTTPStatus
 
 import pytest
@@ -23,6 +23,10 @@ from app_prontocardio.services.agenda_medica_soulmv import (
 )
 
 DATA_FUTURA = date.today() + timedelta(days=7)
+# Prazo de interesse: futuro e antes do início da grade (08:00 de DATA_FUTURA).
+PRAZO_INTERESSE = datetime.combine(
+    DATA_FUTURA - timedelta(days=1), time(18, 0)
+)
 CD_PRESTADOR = 245
 CD_ESCALA = 757
 CD_AGENDA = 55211
@@ -179,6 +183,7 @@ def _oferta(cliente, tokens):
             'cd_escala_modelo': CD_ESCALA,
             'data_agenda': DATA_FUTURA.isoformat(),
             'especialidade': 'cardiologia',
+            'prazo_interesse': PRAZO_INTERESSE.isoformat(),
         },
         headers=tokens['admin'],
     )
@@ -212,6 +217,168 @@ def test_oferta_guarda_horario_e_unidade_da_escala(cliente, perfis):
     assert ofertas[0]['hr_inicio'] == '08:00'
     assert ofertas[0]['hr_fim'] == '12:00'
     assert ofertas[0]['ds_unidade_atendimento'] == 'CLINICA PRONTOCARDIO SAUDE'
+    assert ofertas[0]['prazo_interesse'] == PRAZO_INTERESSE.isoformat()
+
+
+@pytest.mark.parametrize(
+    ('prazo', 'mensagem'),
+    [
+        (datetime.now() - timedelta(hours=1), 'precisa ser futuro'),
+        (
+            datetime.combine(DATA_FUTURA, time(8, 0)),
+            'antes do início da grade',
+        ),
+        (
+            datetime.combine(DATA_FUTURA, time(9, 0)),
+            'antes do início da grade',
+        ),
+    ],
+)
+def test_prazo_de_interesse_precisa_ser_futuro_e_antes_da_grade(
+    cliente, perfis, prazo, mensagem
+):
+    resposta = cliente.post(
+        '/agenda-medica/ofertas',
+        json={
+            'cd_escala_modelo': CD_ESCALA,
+            'data_agenda': DATA_FUTURA.isoformat(),
+            'especialidade': 'CARDIOLOGIA',
+            'prazo_interesse': prazo.isoformat(),
+        },
+        headers=perfis['admin'],
+    )
+    assert resposta.status_code == HTTPStatus.CONFLICT
+    assert mensagem in resposta.json()['detail']
+
+
+def test_oferta_exige_prazo_de_interesse(cliente, perfis):
+    resposta = cliente.post(
+        '/agenda-medica/ofertas',
+        json={
+            'cd_escala_modelo': CD_ESCALA,
+            'data_agenda': DATA_FUTURA.isoformat(),
+            'especialidade': 'CARDIOLOGIA',
+        },
+        headers=perfis['admin'],
+    )
+    assert resposta.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def test_medico_consulta_escalas_modelo(cliente, perfis):
+    resposta = cliente.get(
+        '/agenda-medica/escalas-modelo', headers=perfis['medico']
+    )
+    assert resposta.status_code == HTTPStatus.OK
+    assert resposta.json()['escalas'][0]['cd_escala_central'] == CD_ESCALA
+
+
+def test_admin_lanca_interesse_em_nome_do_medico_com_auditoria(
+    cliente, session, perfis
+):
+    oferta_id = _oferta(cliente, perfis)
+    url = f'/agenda-medica/ofertas/{oferta_id}/interesse-administrativo'
+    negado = cliente.post(
+        url, json={'cd_prestador': CD_PRESTADOR}, headers=perfis['medico']
+    )
+    assert negado.status_code == HTTPStatus.FORBIDDEN
+
+    pedido = cliente.post(
+        url, json={'cd_prestador': CD_PRESTADOR}, headers=perfis['admin']
+    )
+    assert pedido.status_code == HTTPStatus.CREATED
+    assert pedido.json()['cd_prestador'] == CD_PRESTADOR
+    repetido = cliente.post(
+        url, json={'cd_prestador': CD_PRESTADOR}, headers=perfis['admin']
+    )
+    assert repetido.status_code == HTTPStatus.CONFLICT
+    acoes = {e.acao for e in session.query(AgendaMedicaEvento).all()}
+    assert 'INTERESSE_ADMINISTRATIVO' in acoes
+
+
+def _proposta(cliente, perfis, **extra):
+    return cliente.post(
+        '/agenda-medica/propostas-grade',
+        json={
+            'cd_escala_modelo': CD_ESCALA,
+            'data_agenda': DATA_FUTURA.isoformat(),
+            'hr_inicio': '08:00',
+            'hr_fim': '12:00',
+            'especialidade': 'cardiologia',
+            **extra,
+        },
+        headers=perfis['medico'],
+    )
+
+
+def test_medico_propoe_grade_sem_gravar_no_soulmv(cliente, session, perfis):
+    resposta = _proposta(cliente, perfis, observacao='  posso cobrir  ')
+    assert resposta.status_code == HTTPStatus.CREATED
+    corpo = resposta.json()
+    assert corpo['oferta']['status'] == 'PROPOSTA'
+    assert corpo['oferta']['especialidade'] == 'CARDIOLOGIA'
+    assert corpo['oferta']['prazo_interesse'] is None
+    assert corpo['solicitacao']['cd_prestador'] == CD_PRESTADOR
+    assert corpo['solicitacao']['status'] == 'PENDENTE'
+    assert _proposta(cliente, perfis).status_code == HTTPStatus.CONFLICT
+    acoes = {e.acao for e in session.query(AgendaMedicaEvento).all()}
+    assert 'PROPOSTA_GRADE_CRIADA' in acoes
+
+
+@pytest.mark.parametrize(
+    'extra',
+    [
+        {'hr_inicio': '12:00', 'hr_fim': '08:00'},
+        {'data_agenda': date.today().isoformat()},
+        {'data_agenda': (DATA_FUTURA + timedelta(days=1)).isoformat()},
+    ],
+)
+def test_proposta_de_grade_invalida_e_recusada(cliente, perfis, extra):
+    assert (
+        _proposta(cliente, perfis, **extra).status_code == HTTPStatus.CONFLICT
+    )
+
+
+def test_proposta_com_horario_do_modelo_e_aprovada(cliente, session, perfis):
+    corpo = _proposta(cliente, perfis).json()
+    decisao = cliente.post(
+        f'/agenda-medica/solicitacoes/{corpo["solicitacao"]["id"]}/decisao',
+        json={'acao': 'aprovar'},
+        headers=perfis['admin'],
+    )
+    assert decisao.status_code == HTTPStatus.OK
+    assert decisao.json()['resultado_mv']['gravado_no_soulmv'] is False
+    assert (
+        session.get(AgendaMedicaOferta, corpo['oferta']['id']).status
+        == 'PREENCHIDA'
+    )
+
+
+def test_proposta_com_horario_fora_do_modelo_nao_e_aprovada(cliente, perfis):
+    corpo = _proposta(cliente, perfis, hr_inicio='09:00').json()
+    decisao = cliente.post(
+        f'/agenda-medica/solicitacoes/{corpo["solicitacao"]["id"]}/decisao',
+        json={'acao': 'aprovar'},
+        headers=perfis['admin'],
+    )
+    assert decisao.status_code == HTTPStatus.CONFLICT
+    assert any(
+        'não corresponde ao modelo' in p
+        for p in decisao.json()['detail']['pendencias']
+    )
+
+
+def test_recusar_proposta_recusa_a_grade_sugerida(cliente, session, perfis):
+    corpo = _proposta(cliente, perfis).json()
+    decisao = cliente.post(
+        f'/agenda-medica/solicitacoes/{corpo["solicitacao"]["id"]}/decisao',
+        json={'acao': 'recusar', 'motivo': 'Sem demanda nesta data.'},
+        headers=perfis['admin'],
+    )
+    assert decisao.status_code == HTTPStatus.OK
+    assert (
+        session.get(AgendaMedicaOferta, corpo['oferta']['id']).status
+        == 'RECUSADA'
+    )
 
 
 def test_usuario_sem_tela_nao_acessa(cliente, perfis):
@@ -248,6 +415,7 @@ def test_oferta_em_dia_diferente_da_escala_e_recusada(cliente, perfis):
             'cd_escala_modelo': CD_ESCALA,
             'data_agenda': (DATA_FUTURA + timedelta(days=1)).isoformat(),
             'especialidade': 'CARDIOLOGIA',
+            'prazo_interesse': PRAZO_INTERESSE.isoformat(),
         },
         headers=perfis['admin'],
     )
@@ -261,6 +429,7 @@ def test_medico_nao_cria_oferta(cliente, perfis):
             'cd_escala_modelo': CD_ESCALA,
             'data_agenda': DATA_FUTURA.isoformat(),
             'especialidade': 'CARDIOLOGIA',
+            'prazo_interesse': PRAZO_INTERESSE.isoformat(),
         },
         headers=perfis['medico'],
     )
@@ -437,9 +606,7 @@ def test_cancelamento_habilitado_bloqueia_agenda_no_soulmv(
     )
     assert decisao.status_code == HTTPStatus.OK
     assert decisao.json()['resultado_mv']['gravado_no_soulmv'] is True
-    assert soulmv.bloqueios == [
-        (CD_AGENDA, 'Congresso médico', 'DBAMV')
-    ]
+    assert soulmv.bloqueios == [(CD_AGENDA, 'Congresso médico', 'DBAMV')]
 
 
 def test_falha_no_bloqueio_mantem_cancelamento_pendente(
