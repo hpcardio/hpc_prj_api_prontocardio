@@ -18,6 +18,7 @@ from app_prontocardio.routers import (
     autenticacao,
     biq,
     biq_admissoes_eletivas,
+    central_atendimento,
     contas_pagar,
     contas_pagar_boletos,
     contas_pagar_extratos,
@@ -64,6 +65,15 @@ from evolucao_sadt_backend.app import app as evolucao_sadt_app
 
 settings = Settings()
 
+CENTRAL_READ_ONLY_POST_PATHS = {
+    '/central-atendimento/escopo-operador',
+    '/central-atendimento/fila/permissoes-risco',
+    '/central-atendimento/pacientes/pesquisar',
+    '/central-atendimento/pacientes/revisar',
+    '/central-atendimento/opcoes',
+    '/central-atendimento/opcoes/preflight',
+}
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -83,6 +93,11 @@ async def bloquear_escrita_perfil_leitura(request: Request, call_next):
     if (
         request.method == 'POST'
         and request.url.path == '/ecg/worklist/search'
+    ):
+        return await call_next(request)
+    if (
+        request.method == 'POST'
+        and request.url.path in CENTRAL_READ_ONLY_POST_PATHS
     ):
         return await call_next(request)
 
@@ -138,6 +153,7 @@ app.include_router(contas_pagar_financeiro.router)
 app.include_router(contas_pagar_nfse_manual.router)
 app.include_router(contas_pagar_extratos.router)
 app.include_router(mv_identidade.router)
+app.include_router(central_atendimento.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
 app.include_router(agenda_medica.router)

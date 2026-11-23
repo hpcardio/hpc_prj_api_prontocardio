@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     AGENDAMENTO_TELAS_PERMITIDAS: str = ''
     COOKIE_SECURE: bool = False
     EVOLUCAO_MV_WRITE_ENABLED: bool = False
+    CENTRAL_MV_WRITE_ENABLED: bool = False
+    CENTRAL_MV_WRITE_SCOPES: str = ''
     REPASSE_MV_CANCELAMENTO_ENABLED: bool = False
     PRONTOESCALA_AUDIT_SECRET: SecretStr | None = None
     EVOLUCAO_MV_ALLOWED_ATENDIMENTOS: str = '339070'
@@ -176,6 +178,25 @@ class Settings(BaseSettings):
     @property
     def smtp_username(self) -> str | None:
         return self.SMTP_USERNAME or self.SMTP_USER
+
+    @property
+    def central_mv_write_scopes(self) -> frozenset[str]:
+        return frozenset(
+            scope.strip()
+            for scope in self.CENTRAL_MV_WRITE_SCOPES.split(',')
+            if scope.strip()
+        )
+
+    def central_mv_write_allowed(
+        self,
+        unit_code: str,
+        attendance_type: str,
+    ) -> bool:
+        if not self.CENTRAL_MV_WRITE_ENABLED:
+            return False
+        return (
+            f'{unit_code}:{attendance_type}' in self.central_mv_write_scopes
+        )
 
     @property
     def smtp_from_email(self) -> str:

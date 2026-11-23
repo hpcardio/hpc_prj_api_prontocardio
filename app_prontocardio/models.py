@@ -1776,3 +1776,6 @@ class ModelHpcPaciente:
     email: Mapped[str | None] = mapped_column(String, init=False)
     ddd: Mapped[str | None] = mapped_column(String, init=False)
     contato: Mapped[str | None] = mapped_column(String, init=False)
+
+
+from app_prontocardio import central_atendimento_models  # noqa: E402, F401
