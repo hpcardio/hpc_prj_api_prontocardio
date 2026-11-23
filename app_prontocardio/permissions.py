@@ -33,6 +33,7 @@ TELAS_SISTEMA = (
     'agenda_medica_evolucoes',
     'pronto_escala_medico',
     'pronto_escala_validador',
+    'central_atendimento',
 )
 # Telas concedidas só por atribuição explícita (fora do padrão).
 TELAS_RESTRITAS = {
@@ -48,6 +49,7 @@ TELAS_RESTRITAS = {
     'pronto_escala_validador',
     'contas_pagar_nfse_setor',
     'contas_pagar_nfse_regras',
+    'central_atendimento',
 }
 TELAS_PADRAO = tuple(
     tela for tela in TELAS_SISTEMA if tela not in TELAS_RESTRITAS
