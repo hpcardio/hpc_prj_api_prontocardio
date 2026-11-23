@@ -1,7 +1,7 @@
 """adiciona prazo de interesse às ofertas da agenda médica
 
-Revision ID: 20261119_066
-Revises: 20261104_065
+Revision ID: 20261119_073
+Revises: 20261119_072
 Create Date: 2026-11-19 16:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '20261119_066'
-down_revision: Union[str, Sequence[str], None] = '20261104_065'
+revision: str = '20261119_073'
+down_revision: Union[str, Sequence[str], None] = '20261119_072'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 SCHEMA = 'api_prontocardio'
