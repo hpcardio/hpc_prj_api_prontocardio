@@ -150,8 +150,78 @@ def _identidade_fornecedor(row):
     ).decode('ascii').rstrip('=')
 
 
+def _numero_log(coluna: str) -> str:
+    # LOG_FNFI guarda os valores como texto ('1360', '1220,5').
+    return (
+        f"CASE WHEN REGEXP_LIKE({coluna}, '^[0-9]+([.,][0-9]+)?$') "
+        f"THEN TO_NUMBER(REPLACE({coluna}, ',', '.'), "
+        "'999999999999990D999999', 'NLS_NUMERIC_CHARACTERS=''.,''') END"
+    )
+
+
+# Títulos em acordo: dívida que já estava vencida quando o vencimento foi
+# alterado no MV (M_CENTRAL_PAGAMENTO, "Prorrogar"/"Parcelar"). A alteração
+# fica em HISTORICO_PRORROGACAO; o vencimento original é o anterior da
+# primeira alteração. "Parcelar" reduz o valor da parcela de origem (gravado
+# pela TRG_LOG_ITCON_PAG em LOG_FNFI) e cria parcelas novas na mesma conta,
+# sem histórico: elas herdam o vencimento original da parcela de origem.
+ACORDOS_CTE = f"""
+historico_vencimento AS (
+    SELECT h.cd_itcon_pag,
+           MIN(h.dt_vencimento_ant) KEEP (
+               DENSE_RANK FIRST ORDER BY h.dt_prorrogacao,
+                                         h.cd_historico_prorrogacao
+           ) AS vencimento_original,
+           MIN(h.dt_prorrogacao) AS data_acordo
+      FROM dbamv.historico_prorrogacao h
+     WHERE h.tp_prorrogacao = 'PAG'
+     GROUP BY h.cd_itcon_pag
+),
+acordos_proprios AS (
+    SELECT i.cd_itcon_pag, i.cd_con_pag,
+           hv.vencimento_original, hv.data_acordo
+      FROM historico_vencimento hv
+      JOIN dbamv.itcon_pag i ON i.cd_itcon_pag = hv.cd_itcon_pag
+     WHERE hv.vencimento_original < TRUNC(hv.data_acordo)
+),
+acordos_parcelados AS (
+    SELECT a.cd_con_pag,
+           MIN(a.vencimento_original) AS vencimento_original,
+           MIN(a.data_acordo) AS data_acordo
+      FROM acordos_proprios a
+     WHERE EXISTS (
+           SELECT 1
+             FROM dbamv.log_fnfi l
+            WHERE l.cd_identificacao = 2
+              AND l.cd_origem = a.cd_itcon_pag
+              AND l.ds_coluna = 'VL_DUPLICATA'
+              AND {_numero_log('l.vl_atual')} < {_numero_log('l.vl_anterior')}
+     )
+     GROUP BY a.cd_con_pag
+),
+acordos AS (
+    -- Poucas centenas de linhas: calculadas uma vez e juntadas por hash.
+    SELECT /*+ MATERIALIZE */ *
+      FROM (
+           SELECT cd_itcon_pag, vencimento_original, data_acordo,
+                  0 AS parcela_nova
+             FROM acordos_proprios
+           UNION ALL
+           SELECT i.cd_itcon_pag, ap.vencimento_original, ap.data_acordo,
+                  1 AS parcela_nova
+             FROM dbamv.itcon_pag i
+             JOIN acordos_parcelados ap ON ap.cd_con_pag = i.cd_con_pag
+            WHERE NOT EXISTS (
+                  SELECT 1 FROM historico_vencimento hv
+                   WHERE hv.cd_itcon_pag = i.cd_itcon_pag
+            )
+      )
+)"""
+
+
 ORACLE_FORNECEDORES_QUERY = text(f"""
-WITH pagamentos_distintos AS (
+WITH {ACORDOS_CTE},
+pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
            MAX(NVL(valor_pago, 0)) AS valor_pago
@@ -174,8 +244,10 @@ parcelas AS (
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao,
            MAX(v.classificacao) AS classificacao,
-           MAX(v.descricao_do_processo_prov) AS processo_provisao
+           MAX(v.descricao_do_processo_prov) AS processo_provisao,
+           MAX(a.vencimento_original) AS vencimento_original
       FROM dbamv.HPC_V_CONTAS_A_PAGAR v
+      LEFT JOIN acordos a ON a.cd_itcon_pag = v.codigo_parcela_pk
      GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,
               {REFERENCIA_SEM_CADASTRO_SQL}
 ),
@@ -184,6 +256,7 @@ saldos AS (
            p.referencia_sem_cadastro,
            p.nome_fornecedor,
            p.data_vencimento,
+           p.vencimento_original,
            -- Paid titles only make the supplier listable: every amount
            -- below counts open titles alone.
            CASE WHEN p.tipo_quitacao = 'quitado' THEN 0
@@ -212,13 +285,23 @@ SELECT codigo_fornecedor,
        SUM(valor_honrado) AS valor_total_honrado,
        SUM(saldo) AS saldo_a_pagar,
        SUM(CASE WHEN data_vencimento <= :hoje THEN saldo ELSE 0 END) AS valor_a_pagar_ate_hoje,
-       SUM(CASE WHEN data_vencimento < TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_total_vencido,
-       SUM(CASE WHEN data_vencimento >= TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_corrente,
+       -- Dívida vencida = em atraso + em acordo (dívida vencida renegociada
+       -- que ainda vai vencer); o acordo sai do "a vencer".
+       SUM(CASE WHEN data_vencimento < TRUNC(SYSDATE)
+                  OR vencimento_original IS NOT NULL THEN saldo ELSE 0 END) AS valor_total_vencido,
+       SUM(CASE WHEN data_vencimento < TRUNC(SYSDATE) THEN saldo ELSE 0 END) AS valor_vencido_em_atraso,
+       SUM(CASE WHEN data_vencimento >= TRUNC(SYSDATE)
+                 AND vencimento_original IS NOT NULL THEN saldo ELSE 0 END) AS valor_em_acordo,
+       COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE)
+                   AND vencimento_original IS NOT NULL AND saldo > 0 THEN 1 END) AS titulos_em_acordo,
+       SUM(CASE WHEN data_vencimento >= TRUNC(SYSDATE)
+                 AND vencimento_original IS NULL THEN saldo ELSE 0 END) AS valor_corrente,
        MIN(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN data_vencimento END) AS vencimento_mais_antigo,
        SUM(CASE WHEN data_vencimento BETWEEN TRUNC(SYSDATE) - 6 AND TRUNC(SYSDATE) - 1 THEN saldo ELSE 0 END) AS novos_vencidos_7d,
        SUM(CASE WHEN data_vencimento = TRUNC(SYSDATE) - 1 THEN saldo ELSE 0 END) AS vencidos_dia_anterior,
        COUNT(CASE WHEN data_vencimento < TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_vencidos,
-       COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE) AND saldo > 0 THEN 1 END) AS titulos_correntes
+       COUNT(CASE WHEN data_vencimento >= TRUNC(SYSDATE) AND vencimento_original IS NULL
+                   AND saldo > 0 THEN 1 END) AS titulos_correntes
   FROM saldos
  GROUP BY codigo_fornecedor, referencia_sem_cadastro
 HAVING SUM(saldo) > 0 OR :incluir_pagos = 1
@@ -226,7 +309,8 @@ HAVING SUM(saldo) > 0 OR :incluir_pagos = 1
 
 
 ORACLE_TITULOS_QUERY = text(f"""
-WITH pagamentos_distintos AS (
+WITH {ACORDOS_CTE},
+pagamentos_distintos AS (
     SELECT codigo_parcela_pk,
            codigo_pagamento_pk,
            MAX(NVL(valor_pago, 0)) AS valor_pago
@@ -264,8 +348,12 @@ parcelas AS (
            -- registered payment row, so it is read from every row of the
            -- installment (reversed payments excluded).
            MAX(CASE WHEN v.data_de_estorno IS NULL
-                    THEN v.data_de_pagamento END) AS data_pagamento_mv
+                    THEN v.data_de_pagamento END) AS data_pagamento_mv,
+           MAX(a.vencimento_original) AS vencimento_original,
+           MAX(a.data_acordo) AS data_acordo,
+           MAX(a.parcela_nova) AS acordo_parcela_nova
      FROM dbamv.HPC_V_CONTAS_A_PAGAR v
+     LEFT JOIN acordos a ON a.cd_itcon_pag = v.codigo_parcela_pk
      WHERE v.codigo_do_fornecedor IN :codigos_fornecedor
         OR ({REFERENCIA_SEM_CADASTRO_SQL}) IN :referencias_sem_cadastro
      GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk,
@@ -290,7 +378,10 @@ SELECT p.codigo_fornecedor,
        p.tipo_quitacao,
        p.classificacao,
        NVL(pg.valor_pago, 0) AS valor_honrado_oracle,
-       p.data_pagamento_mv
+       p.data_pagamento_mv,
+       p.vencimento_original,
+       p.data_acordo,
+       p.acordo_parcela_nova
   FROM parcelas p
   LEFT JOIN pagamentos pg ON pg.codigo_parcela_pk = p.codigo_parcela_pk
  WHERE (
@@ -387,6 +478,11 @@ def _consultar_oracle(
             'nome_fornecedor': row['nome_fornecedor'] or 'Fornecedor sem nome',
             'valor_total': _decimal(row['valor_total']),
             'valor_total_vencido': _decimal(row['valor_total_vencido']),
+            'valor_vencido_em_atraso': _decimal(
+                row.get('valor_vencido_em_atraso', row['valor_total_vencido'])
+            ),
+            'valor_em_acordo': _decimal(row.get('valor_em_acordo')),
+            'titulos_em_acordo': int(row.get('titulos_em_acordo') or 0),
             'valor_total_honrado': _decimal(row['valor_total_honrado']),
             'saldo_a_pagar': _decimal(row['saldo_a_pagar']),
             'valor_a_pagar_ate_hoje': _decimal(
@@ -501,8 +597,23 @@ def _consultar_titulos_oracle(
             'tipo_quitacao': row['tipo_quitacao'],
             'classificacao': row.get('classificacao'),
             'valor_honrado_oracle': _decimal(row['valor_honrado_oracle']),
+            # Acordo: vencimento original (já vencido) e data em que o
+            # vencimento foi alterado no MV.
+            'data_vencimento_original': _normalizar_data(
+                row.get('vencimento_original')
+            ),
+            'data_acordo': _normalizar_data(row.get('data_acordo')),
+            'acordo_parcela_nova': bool(row.get('acordo_parcela_nova')),
         })
     return resultado
+
+
+def _em_acordo_a_vencer(titulo: dict, hoje: date) -> bool:
+    """Dívida vencida renegociada cujo novo vencimento ainda não chegou."""
+    vencimento = titulo['data_vencimento']
+    return bool(titulo.get('data_vencimento_original')) and (
+        vencimento is None or vencimento >= hoje
+    )
 
 
 def _opcoes_classificacao(session: Session) -> list[dict]:
@@ -583,6 +694,9 @@ def _agrupar_fornecedores(
                 'nome_fornecedor': titulo['nome_fornecedor'],
                 'valor_total': Decimal('0'),
                 'valor_total_vencido': Decimal('0'),
+                'valor_vencido_em_atraso': Decimal('0'),
+                'valor_em_acordo': Decimal('0'),
+                'titulos_em_acordo': 0,
                 'valor_total_honrado': Decimal('0'),
                 'valor_corrente': Decimal('0'),
                 'novos_vencidos_7d': Decimal('0'),
@@ -608,8 +722,23 @@ def _agrupar_fornecedores(
             fornecedor['dias_atraso'] = max(
                 fornecedor['dias_atraso'], dias_vencidos
             )
-        if vencimento and vencimento < hoje and saldo > 0:
+        em_acordo = _em_acordo_a_vencer(titulo, hoje)
+        titulo['situacao_acordo'] = (
+            None
+            if not titulo.get('data_vencimento_original')
+            else 'a_vencer'
+            if em_acordo
+            else 'em_atraso'
+        )
+        if em_acordo and saldo > 0:
+            # Dívida vencida renegociada: soma na dívida vencida, em faixa
+            # própria, e não entra no "a vencer".
             fornecedor['valor_total_vencido'] += saldo
+            fornecedor['valor_em_acordo'] += saldo
+            fornecedor['titulos_em_acordo'] += 1
+        elif vencimento and vencimento < hoje and saldo > 0:
+            fornecedor['valor_total_vencido'] += saldo
+            fornecedor['valor_vencido_em_atraso'] += saldo
             fornecedor['titulos_vencidos'] += 1
             antigo = fornecedor['vencimento_mais_antigo']
             if antigo is None or vencimento < antigo:
@@ -645,6 +774,7 @@ def _fornecedor_compoe(item, componente, vencidos_dia_anterior):
         'a_pagar': 'valor_a_pagar_ate_hoje',
         'a_vencer': 'valor_corrente',
         'vencida': 'valor_vencido',
+        'em_acordo': 'valor_em_acordo',
         'novos_7d': 'novos_vencidos_7d',
         'pagar_agora': 'pagamento_imediato',
         'saldo_negociar': 'saldo_negociar',
@@ -657,21 +787,34 @@ def _titulos_do_componente(titulos, componente, vencidos_dia_anterior):
     if not componente and not vencidos_dia_anterior:
         return titulos
     hoje = _hoje_hospital()
-    vencido = lambda v: v is not None and v < hoje  # noqa: E731
+
+    def vencido(titulo):
+        v = titulo['data_vencimento']
+        return v is not None and v < hoje
+
+    def acordo(titulo):
+        return _em_acordo_a_vencer(titulo, hoje)
+
     regras = {
-        'a_pagar': lambda v: v is not None and v <= hoje,
-        'a_vencer': lambda v: v is None or v >= hoje,
-        'vencida': vencido,
-        'novos_7d': lambda v: vencido(v) and v >= hoje - timedelta(days=6),
+        'a_pagar': lambda t: (
+            t['data_vencimento'] is not None and t['data_vencimento'] <= hoje
+        ),
+        'a_vencer': lambda t: not vencido(t) and not acordo(t),
+        # Dívida vencida inclui a faixa em acordo.
+        'vencida': lambda t: vencido(t) or acordo(t),
+        'em_acordo': acordo,
+        'novos_7d': lambda t: (
+            vencido(t) and t['data_vencimento'] >= hoje - timedelta(days=6)
+        ),
         'saldo_negociar': vencido,
     }
     # 'pagar_agora' is a supplier amount: every open title stays visible.
-    regra = regras.get(componente, lambda v: True)
+    regra = regras.get(componente, lambda t: True)
     return [
         titulo
         for titulo in titulos
         if titulo['saldo_a_pagar'] > 0
-        and regra(titulo['data_vencimento'])
+        and regra(titulo)
         and (
             not vencidos_dia_anterior
             or titulo['data_vencimento'] == hoje - timedelta(days=1)
@@ -720,8 +863,11 @@ def _tratamentos(session: Session) -> dict[int | str, dict]:
 
 def _registrar_snapshot(session: Session, fornecedores: list[dict]) -> None:
     hoje = _hoje_hospital()
+    # A série histórica segue só o atraso real (a mesma base dos dias já
+    # gravados); a faixa em acordo não entra para não criar um salto.
     total_vencido = sum(
-        (item['valor_vencido'] for item in fornecedores), Decimal('0')
+        (item['valor_vencido_em_atraso'] for item in fornecedores),
+        Decimal('0'),
     )
     novos = sum(
         (item['novos_vencidos_7d'] for item in fornecedores), Decimal('0')
@@ -729,7 +875,9 @@ def _registrar_snapshot(session: Session, fornecedores: list[dict]) -> None:
     corrente = sum(
         (item['valor_corrente'] for item in fornecedores), Decimal('0')
     )
-    quantidade = sum(1 for item in fornecedores if item['valor_vencido'] > 0)
+    quantidade = sum(
+        1 for item in fornecedores if item['valor_vencido_em_atraso'] > 0
+    )
     session.execute(
         text("""
         INSERT INTO api_prontocardio.contas_pagar_snapshots
@@ -857,6 +1005,9 @@ def _filtrar_prioridade(
 
 def _enriquecer_fornecedores(itens, tratamentos):
     for item in itens:
+        item.setdefault('valor_vencido_em_atraso', item['valor_total_vencido'])
+        item.setdefault('valor_em_acordo', Decimal('0'))
+        item.setdefault('titulos_em_acordo', 0)
         tratamento = tratamentos.get(item['codigo_fornecedor'], {})
         item.update({
             'critico': bool(tratamento.get('critico', False)),
@@ -879,8 +1030,9 @@ def _enriquecer_fornecedores(itens, tratamentos):
             })
         )
         item['faixa_atraso'] = age_level(item['dias_atraso'])
+        # O que está em acordo já foi negociado: só o atraso real entra.
         item['saldo_negociar'] = max(
-            item['valor_total_vencido'] - item['pagamento_imediato'],
+            item['valor_vencido_em_atraso'] - item['pagamento_imediato'],
             Decimal('0'),
         )
         item['valor_vencido'] = item['valor_total_vencido']
@@ -989,6 +1141,7 @@ def listar_contas_pagar(
         'a_pagar',
         'a_vencer',
         'vencida',
+        'em_acordo',
         'novos_7d',
         'pagar_agora',
         'saldo_negociar',
@@ -1061,6 +1214,9 @@ def listar_contas_pagar(
         campos_calculados = {
             'valor_total',
             'valor_total_vencido',
+            'valor_vencido_em_atraso',
+            'valor_em_acordo',
+            'titulos_em_acordo',
             'valor_total_honrado',
             'valor_corrente',
             'novos_vencidos_7d',
@@ -1097,8 +1253,19 @@ def listar_contas_pagar(
             ),
             Decimal('0'),
         ),
+        # Dívida vencida = em atraso + em acordo.
         'valor_vencido_atual': sum(
             (item['valor_vencido'] for item in vencidos), Decimal('0')
+        ),
+        'valor_vencido_em_atraso': sum(
+            (item['valor_vencido_em_atraso'] for item in vencidos),
+            Decimal('0'),
+        ),
+        'valor_em_acordo': sum(
+            (item['valor_em_acordo'] for item in vencidos), Decimal('0')
+        ),
+        'fornecedores_em_acordo': sum(
+            1 for item in vencidos if item['valor_em_acordo'] > 0
         ),
         'valor_corrente': sum(
             (item['valor_corrente'] for item in fornecedores), Decimal('0')
@@ -1129,10 +1296,11 @@ def listar_contas_pagar(
     resumo['valor_vencido_inicial'] = (
         valor_vencido_inicial
         if valor_vencido_inicial is not None
-        else resumo['valor_vencido_atual']
+        else resumo['valor_vencido_em_atraso']
     )
+    # Mesma base do histórico (atraso real), para a variação ser comparável.
     resumo['variacao_desde_inicio'] = (
-        resumo['valor_vencido_atual'] - resumo['valor_vencido_inicial']
+        resumo['valor_vencido_em_atraso'] - resumo['valor_vencido_inicial']
     )
 
     filtrados = _filtrar_fornecedores(
@@ -1233,6 +1401,14 @@ def listar_contas_pagar(
                 'data_pagamento_mv': titulo['data_pagamento_mv'].isoformat()
                 if titulo.get('data_pagamento_mv')
                 else None,
+                'data_vencimento_original': titulo[
+                    'data_vencimento_original'
+                ].isoformat()
+                if titulo.get('data_vencimento_original')
+                else None,
+                'data_acordo': titulo['data_acordo'].isoformat()
+                if titulo.get('data_acordo')
+                else None,
                 'valor_desconto': _serializar_decimal(titulo['valor_desconto'])
                 if titulo.get('valor_desconto') is not None
                 else None,
@@ -1265,6 +1441,10 @@ def listar_contas_pagar(
             'valor_total_vencido': _serializar_decimal(
                 item['valor_total_vencido']
             ),
+            'valor_vencido_em_atraso': _serializar_decimal(
+                item['valor_vencido_em_atraso']
+            ),
+            'valor_em_acordo': _serializar_decimal(item['valor_em_acordo']),
             'valor_total_honrado': _serializar_decimal(
                 item['valor_total_honrado']
             ),
