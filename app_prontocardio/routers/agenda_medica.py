@@ -17,9 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app_prontocardio.agenda_medica_models import (
+    AgendaMedicaContraproposta,
     AgendaMedicaEvento,
     AgendaMedicaOferta,
     AgendaMedicaSolicitacao,
+    AgendaMedicaTratativaPaciente,
     AgendaMedicaTriagem,
     AgendaMedicaVinculo,
 )
@@ -177,6 +179,18 @@ class DecisaoInput(BaseModel):
     motivo: str | None = Field(default=None, max_length=1000)
 
 
+class ContrapropostaInput(BaseModel):
+    data_agenda: date
+    hr_inicio: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    hr_fim: str = Field(pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
+    motivo: str = Field(min_length=MOTIVO_MINIMO, max_length=1000)
+
+
+class RespostaContrapropostaInput(BaseModel):
+    acao: Literal['aceitar', 'recusar']
+    motivo: str | None = Field(default=None, max_length=1000)
+
+
 # ---------------------------------------------------------------- apoio
 
 
@@ -234,6 +248,25 @@ def _solicitacao_dict(item: AgendaMedicaSolicitacao) -> dict:
         'decisao_por': item.decisao_por_nome,
         'decisao_em': item.decisao_em.isoformat() if item.decisao_em else None,
         'resultado_mv': item.resultado_mv,
+    }
+
+
+def _contraproposta_dict(item: AgendaMedicaContraproposta) -> dict:
+    return {
+        'id': item.id,
+        'solicitacao_id': item.solicitacao_id,
+        'data_agenda': item.data_agenda.isoformat(),
+        'hr_inicio': item.hr_inicio,
+        'hr_fim': item.hr_fim,
+        'motivo': item.motivo,
+        'status': item.status,
+        'criado_por': item.criado_por_nome,
+        'criado_em': item.criado_em.isoformat() if item.criado_em else None,
+        'respondido_por': item.respondido_por_nome,
+        'respondido_em': (
+            item.respondido_em.isoformat() if item.respondido_em else None
+        ),
+        'resposta_motivo': item.resposta_motivo,
     }
 
 
@@ -761,6 +794,132 @@ def listar_solicitacoes(
     }
 
 
+@router.get('/contrapropostas')
+def listar_contrapropostas(
+    usuario: Leitor,
+    session: SessionPostgres,
+    status: str | None = None,
+):
+    consulta = select(AgendaMedicaContraproposta).order_by(
+        AgendaMedicaContraproposta.id.desc()
+    )
+    if status:
+        consulta = consulta.where(AgendaMedicaContraproposta.status == status)
+    if not (_tem_tela(usuario, TELA_ADMIN) or _tem_tela(usuario, TELA_RESPONSAVEL)):
+        vinculo = session.scalar(
+            select(AgendaMedicaVinculo).where(
+                AgendaMedicaVinculo.usuario_id == usuario.id
+            )
+        )
+        if vinculo is None:
+            return {'contrapropostas': []}
+        consulta = consulta.join(
+            AgendaMedicaSolicitacao,
+            AgendaMedicaSolicitacao.id
+            == AgendaMedicaContraproposta.solicitacao_id,
+        ).where(
+            AgendaMedicaSolicitacao.cd_prestador == vinculo.cd_prestador
+        )
+    return {
+        'contrapropostas': [
+            _contraproposta_dict(item) for item in session.scalars(consulta)
+        ]
+    }
+
+
+@router.post(
+    '/solicitacoes/{solicitacao_id}/contrapropostas',
+    status_code=HTTPStatus.CREATED,
+)
+def criar_contraproposta(
+    solicitacao_id: int,
+    payload: ContrapropostaInput,
+    usuario: Admin,
+    session: SessionPostgres,
+):
+    pedido = session.get(AgendaMedicaSolicitacao, solicitacao_id)
+    if pedido is None or pedido.tipo != 'INTERESSE':
+        raise _nao_encontrado('Solicitação de grade não encontrada.')
+    if pedido.status != 'PENDENTE':
+        raise _conflito('Somente solicitações pendentes aceitam contraproposta.')
+    if payload.data_agenda <= date.today():
+        raise _conflito('A nova data precisa ser futura.')
+    if payload.hr_fim <= payload.hr_inicio:
+        raise _conflito('O horário final precisa ser posterior ao inicial.')
+    aberta = session.scalar(
+        select(AgendaMedicaContraproposta).where(
+            AgendaMedicaContraproposta.solicitacao_id == solicitacao_id,
+            AgendaMedicaContraproposta.status == 'AGUARDANDO_MEDICO',
+        )
+    )
+    if aberta is not None:
+        raise _conflito('Já existe uma contraproposta aguardando o médico.')
+    item = AgendaMedicaContraproposta(
+        solicitacao_id=solicitacao_id,
+        data_agenda=payload.data_agenda,
+        hr_inicio=payload.hr_inicio,
+        hr_fim=payload.hr_fim,
+        motivo=payload.motivo.strip(),
+        criado_por_id=usuario.id,
+        criado_por_nome=usuario.nome,
+    )
+    session.add(item)
+    session.flush()
+    _registrar(
+        session,
+        usuario,
+        'CONTRAPROPOSTA_CRIADA',
+        f'{payload.data_agenda} {payload.hr_inicio}-{payload.hr_fim}: '
+        f'{payload.motivo.strip()}',
+        solicitacao_id=solicitacao_id,
+    )
+    session.commit()
+    session.refresh(item)
+    return _contraproposta_dict(item)
+
+
+@router.post('/contrapropostas/{contraproposta_id}/resposta')
+def responder_contraproposta(
+    contraproposta_id: int,
+    payload: RespostaContrapropostaInput,
+    medico: Medico,
+    session: SessionPostgres,
+):
+    usuario, cd_prestador = medico
+    item = session.get(AgendaMedicaContraproposta, contraproposta_id)
+    if item is None:
+        raise _nao_encontrado('Contraproposta não encontrada.')
+    pedido = session.get(AgendaMedicaSolicitacao, item.solicitacao_id)
+    if pedido is None or pedido.cd_prestador != cd_prestador:
+        raise _proibido('Esta contraproposta pertence a outro profissional.')
+    if item.status != 'AGUARDANDO_MEDICO' or pedido.status != 'PENDENTE':
+        raise _conflito('Esta contraproposta não está mais aguardando resposta.')
+    oferta = session.get(AgendaMedicaOferta, pedido.oferta_id)
+    if oferta is None:
+        raise _nao_encontrado('Oferta vinculada não encontrada.')
+    aceita = payload.acao == 'aceitar'
+    item.status = 'ACEITA' if aceita else 'RECUSADA'
+    item.respondido_por_id = usuario.id
+    item.respondido_por_nome = usuario.nome
+    item.resposta_motivo = (payload.motivo or '').strip() or None
+    item.respondido_em = datetime.now(FUSO_HORARIO_BRASIL).replace(tzinfo=None)
+    if aceita:
+        oferta.data_agenda = item.data_agenda
+        oferta.hr_inicio = item.hr_inicio
+        oferta.hr_fim = item.hr_fim
+    _registrar(
+        session,
+        usuario,
+        'CONTRAPROPOSTA_ACEITA' if aceita else 'CONTRAPROPOSTA_RECUSADA',
+        item.resposta_motivo,
+        oferta_id=oferta.id,
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    session.refresh(item)
+    return _contraproposta_dict(item)
+
+
 # ---------------------------------------------------------------- decisões
 
 
@@ -873,6 +1032,69 @@ def _resultado_cancelamento(
         raise _conflito({'pendencias': [str(erro)]}) from erro
 
 
+def _criar_fila_remanejamento(
+    pedido: AgendaMedicaSolicitacao,
+    usuario: Usuario,
+    session: Session,
+    soulmv: AgendaMedicaSoulMV,
+) -> int:
+    """Registra horários ocupados sem copiar nome, contato ou prontuário."""
+    consultar_horarios = getattr(soulmv, 'horarios_agenda', None)
+    horarios = (
+        consultar_horarios(pedido.cd_agenda_central)
+        if consultar_horarios is not None
+        else []
+    )
+    ocupados = [
+        item
+        for item in horarios
+        if item.get('cd_paciente') is not None
+        and item.get('status_horario') == 'OCUPADO'
+    ]
+    criados = 0
+    for horario in ocupados:
+        cd_it = int(horario['cd_it_agenda_central'])
+        existente = session.scalar(
+            select(AgendaMedicaTratativaPaciente).where(
+                AgendaMedicaTratativaPaciente.cd_it_agenda_central == cd_it,
+                AgendaMedicaTratativaPaciente.tipo == 'REMANEJAMENTO',
+                AgendaMedicaTratativaPaciente.status.in_(
+                    ('PENDENTE', 'EM_TRATATIVA')
+                ),
+            )
+        )
+        if existente is not None:
+            continue
+        session.add(
+            AgendaMedicaTratativaPaciente(
+                cd_it_agenda_central=cd_it,
+                cd_agenda_central=pedido.cd_agenda_central,
+                solicitacao_id=pedido.id,
+                tipo='REMANEJAMENTO',
+                status='PENDENTE',
+                cd_it_agenda_destino=None,
+                valor_anterior=None,
+                valor_novo=None,
+                motivo='Remanejamento obrigatório antes do cancelamento da agenda.',
+                criado_por_id=usuario.id,
+                criado_por_nome=usuario.nome,
+                concluido_por_id=None,
+                concluido_por_nome=None,
+                concluido_em=None,
+            )
+        )
+        criados += 1
+    _registrar(
+        session,
+        usuario,
+        'REMANEJAMENTO_CRIADO',
+        f'{len(ocupados)} horário(s) aguardando remanejamento',
+        solicitacao_id=pedido.id,
+    )
+    session.commit()
+    return len(ocupados)
+
+
 @router.post('/solicitacoes/{solicitacao_id}/decisao')
 def decidir_solicitacao(
     solicitacao_id: int,
@@ -910,6 +1132,18 @@ def decidir_solicitacao(
         oferta.status = 'PREENCHIDA'
         status = 'APROVADA'
     else:
+        agenda_cancelada = soulmv.agenda(pedido.cd_agenda_central)
+        if agenda_cancelada is not None and agenda_cancelada['qt_marcados'] > 0:
+            total = _criar_fila_remanejamento(
+                pedido, usuario, session, soulmv
+            )
+            total = max(total, int(agenda_cancelada['qt_marcados']))
+            raise _conflito({
+                'pendencias': [
+                    f'{total} paciente(s) precisam ser remanejados antes '
+                    'do cancelamento. A fila operacional foi criada.'
+                ]
+            })
         resultado = _resultado_cancelamento(pedido, soulmv)
         status = 'APROVADA'
 

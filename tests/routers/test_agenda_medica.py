@@ -220,6 +220,45 @@ def test_oferta_guarda_horario_e_unidade_da_escala(cliente, perfis):
     assert ofertas[0]['prazo_interesse'] == PRAZO_INTERESSE.isoformat()
 
 
+def test_gestao_envia_contraproposta_e_medico_responde(cliente, perfis):
+    oferta_id = _oferta(cliente, perfis)
+    interesse = cliente.post(
+        f'/agenda-medica/ofertas/{oferta_id}/interesse',
+        headers=perfis['medico'],
+    )
+    assert interesse.status_code == HTTPStatus.CREATED
+    solicitacao_id = interesse.json()['id']
+    nova_data = DATA_FUTURA + timedelta(days=7)
+
+    contraproposta = cliente.post(
+        f'/agenda-medica/solicitacoes/{solicitacao_id}/contrapropostas',
+        json={
+            'data_agenda': nova_data.isoformat(),
+            'hr_inicio': '09:00',
+            'hr_fim': '11:00',
+            'motivo': 'Evitar conflito com outro atendimento.',
+        },
+        headers=perfis['admin'],
+    )
+    assert contraproposta.status_code == HTTPStatus.CREATED
+    assert contraproposta.json()['status'] == 'AGUARDANDO_MEDICO'
+
+    resposta = cliente.post(
+        '/agenda-medica/contrapropostas/'
+        f'{contraproposta.json()["id"]}/resposta',
+        json={'acao': 'aceitar'},
+        headers=perfis['medico'],
+    )
+    assert resposta.status_code == HTTPStatus.OK
+    assert resposta.json()['status'] == 'ACEITA'
+    ofertas = cliente.get(
+        '/agenda-medica/ofertas?status=', headers=perfis['admin']
+    ).json()['ofertas']
+    oferta = next(item for item in ofertas if item['id'] == oferta_id)
+    assert oferta['data_agenda'] == nova_data.isoformat()
+    assert oferta['hr_inicio'] == '09:00'
+
+
 @pytest.mark.parametrize(
     ('prazo', 'mensagem'),
     [

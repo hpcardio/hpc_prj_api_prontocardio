@@ -148,3 +148,87 @@ class AgendaMedicaTriagem:
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+@table_registry.mapped_as_dataclass
+class AgendaMedicaContraproposta:
+    """Novo horário sugerido pela gestão e respondido pelo médico."""
+
+    __tablename__ = 'agenda_medica_contrapropostas'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    solicitacao_id: Mapped[int] = mapped_column(Integer, index=True)
+    data_agenda: Mapped[date] = mapped_column(Date, index=True)
+    hr_inicio: Mapped[str] = mapped_column(String(5))
+    hr_fim: Mapped[str] = mapped_column(String(5))
+    motivo: Mapped[str] = mapped_column(Text)
+    criado_por_id: Mapped[int] = mapped_column(Integer)
+    criado_por_nome: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(
+        String(30), default='AGUARDANDO_MEDICO', index=True
+    )
+    respondido_por_id: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    respondido_por_nome: Mapped[str | None] = mapped_column(
+        String(200), default=None
+    )
+    resposta_motivo: Mapped[str | None] = mapped_column(Text, default=None)
+    respondido_em: Mapped[datetime | None] = mapped_column(
+        DateTime, default=None
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime, init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
+class AgendaMedicaTratativaPaciente:
+    """Fila operacional de confirmação, cancelamento e remanejamento.
+
+    Não guarda nome, telefone ou prontuário. O identificador do horário é a
+    referência mínima necessária para reconciliar o processo com o SoulMV.
+    """
+
+    __tablename__ = 'agenda_medica_tratativas_paciente'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cd_it_agenda_central: Mapped[int] = mapped_column(Integer, index=True)
+    tipo: Mapped[str] = mapped_column(String(30), index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    criado_por_id: Mapped[int] = mapped_column(Integer)
+    criado_por_nome: Mapped[str] = mapped_column(String(200))
+    cd_agenda_central: Mapped[int | None] = mapped_column(
+        Integer, default=None, index=True
+    )
+    solicitacao_id: Mapped[int | None] = mapped_column(
+        Integer, default=None, index=True
+    )
+    cd_it_agenda_destino: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    valor_anterior: Mapped[str | None] = mapped_column(
+        String(40), default=None
+    )
+    valor_novo: Mapped[str | None] = mapped_column(String(40), default=None)
+    motivo: Mapped[str | None] = mapped_column(Text, default=None)
+    concluido_por_id: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    concluido_por_nome: Mapped[str | None] = mapped_column(
+        String(200), default=None
+    )
+    concluido_em: Mapped[datetime | None] = mapped_column(
+        DateTime, default=None
+    )
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime, init=False, server_default=func.now()
+    )
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime,
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
