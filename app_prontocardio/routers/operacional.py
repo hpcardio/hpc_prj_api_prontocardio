@@ -95,6 +95,9 @@ def montar_resumo_confirmacoes(rows, data_inicio: date, data_fim: date):
         'presencas_registradas',
         'atendidos',
         'sem_registro_presenca',
+        'compareceram',
+        'faltas_registradas',
+        'sem_desfecho_comparecimento',
     )
     totais = {campo: 0 for campo in campos_numericos}
     for grupo in grupos:
@@ -108,6 +111,13 @@ def montar_resumo_confirmacoes(rows, data_inicio: date, data_fim: date):
     totais['taxa_confirmacao'] = round(
         100 * totais['confirmados'] / totais['total_agendamentos'], 1
     ) if totais['total_agendamentos'] else 0.0
+    desfechos = totais['compareceram'] + totais['faltas_registradas']
+    totais['taxa_comparecimento'] = round(
+        100 * totais['compareceram'] / desfechos, 1
+    ) if desfechos else None
+    totais['taxa_absenteismo'] = round(
+        100 * totais['faltas_registradas'] / desfechos, 1
+    ) if desfechos else None
     return {
         'consultado_em': datetime.now(FUSO_HORARIO_BRASIL).isoformat(),
         'data_inicio': data_inicio.isoformat(),
@@ -231,7 +241,23 @@ def consultar_resumo_confirmacoes_agendamentos(
                    ) AS atendidos,
                    SUM(
                        CASE WHEN tp_presenca_falta IS NULL THEN 1 ELSE 0 END
-                   ) AS sem_registro_presenca
+                   ) AS sem_registro_presenca,
+                   SUM(
+                       CASE
+                           WHEN tp_presenca_falta = 'P' OR sn_atendido = 'S'
+                           THEN 1 ELSE 0
+                       END
+                   ) AS compareceram,
+                   SUM(
+                       CASE WHEN tp_presenca_falta = 'F' THEN 1 ELSE 0 END
+                   ) AS faltas_registradas,
+                   SUM(
+                       CASE
+                           WHEN NVL(tp_presenca_falta, 'N') NOT IN ('P', 'F')
+                            AND sn_atendido <> 'S'
+                           THEN 1 ELSE 0
+                       END
+                   ) AS sem_desfecho_comparecimento
               FROM dados
              GROUP BY data,
                       cd_unidade_atendimento,

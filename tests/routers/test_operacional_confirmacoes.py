@@ -124,6 +124,9 @@ def test_montar_resumo_soma_indicadores_sem_dados_de_paciente():
             'presencas_registradas': 4,
             'atendidos': 3,
             'sem_registro_presenca': 8,
+            'compareceram': 4,
+            'faltas_registradas': 1,
+            'sem_desfecho_comparecimento': 7,
         },
         {
             'cd_unidade_atendimento': 2,
@@ -137,6 +140,9 @@ def test_montar_resumo_soma_indicadores_sem_dados_de_paciente():
             'presencas_registradas': 2,
             'atendidos': 2,
             'sem_registro_presenca': 6,
+            'compareceram': 2,
+            'faltas_registradas': 0,
+            'sem_desfecho_comparecimento': 6,
         },
     ]
 
@@ -158,6 +164,11 @@ def test_montar_resumo_soma_indicadores_sem_dados_de_paciente():
         'presencas_registradas': 6,
         'atendidos': 5,
         'sem_registro_presenca': 14,
+        'compareceram': 6,
+        'faltas_registradas': 1,
+        'sem_desfecho_comparecimento': 13,
         'taxa_confirmacao': 40.0,
+        'taxa_comparecimento': 85.7,
+        'taxa_absenteismo': 14.3,
     }
     assert all('nm_paciente' not in grupo for grupo in resposta['grupos'])
