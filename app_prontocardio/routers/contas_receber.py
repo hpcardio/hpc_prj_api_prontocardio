@@ -135,19 +135,43 @@ def remessas_mv(oracle) -> list[dict]:
 
 # ---------------------------------------------------------------- Postgres
 
+# Campos do detalhe do processo (DAG grava tudo em campos_detalhe, JSON):
+# "Entrada no Protocolo:" (dd/mm/aaaa) é a data do protocolo no convênio.
+_PAR = "(CASE WHEN {t}.campos_detalhe IS NOT NULL THEN {t}.campos_detalhe::jsonb -> 'pares' END)"
+
+
+def _entrada_portal(t: str) -> str:
+    par = _PAR.format(t=t)
+    return (
+        f"CASE WHEN {par} ->> 'Entrada no Protocolo:' ~ '^\\d{{2}}/\\d{{2}}/\\d{{4}}$' "
+        f"THEN TO_DATE({par} ->> 'Entrada no Protocolo:', 'DD/MM/YYYY') END"
+    )
+
+
+def _situacao_portal(t: str) -> str:
+    return f"NULLIF({_PAR.format(t=t)} ->> 'Situação:', '')"
+
+
 # Protocolos extraídos dos portais dos convênios, por código do convênio no MV.
 SQL_PORTAL = {
-    CD_CONVENIO_ISSEC: text("""
-SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liberado
+    CD_CONVENIO_ISSEC: text(f"""
+SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liberado,
+       {_entrada_portal('processos')} AS data_entrada,
+       {_situacao_portal('processos')} AS situacao
   FROM raw_issec_portal.processos
  WHERE processo IS NOT NULL AND mes_producao IS NOT NULL
  ORDER BY processo, extraido_em DESC
 """),
 }
 
-SQL_VINCULOS = text("""
+# Valores do portal lidos na hora (o protocolo gravado guarda só o vínculo):
+# o portal é atualizado a cada execução da DAG.
+SQL_VINCULOS = text(f"""
 SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
-       p.valor_cobrado, p.valor_liberado, p.data_protocolo,
+       COALESCE(pt.valor_cobrado, p.valor_cobrado) AS valor_cobrado,
+       COALESCE(pt.valor_liberado, p.valor_liberado) AS valor_liberado,
+       COALESCE(p.data_protocolo, pt.data_entrada) AS data_protocolo,
+       pt.situacao AS situacao_portal,
        p.solicitacao_nota_em, p.solicitacao_nota_obs,
        n.numero_nfse, n.prestador_cnpj, n.data_emissao, n.valor AS valor_nfse,
        n.origem AS origem_nfse, x.valor_liquido AS valor_liquido_nfse
@@ -163,6 +187,15 @@ SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
      ORDER BY nx.data_hora DESC
      LIMIT 1
   ) x ON n.prestador_cnpj IS NOT NULL
+  LEFT JOIN LATERAL (
+    SELECT ip.valor_cobrado, ip.valor_liberado,
+           {_entrada_portal('ip')} AS data_entrada,
+           {_situacao_portal('ip')} AS situacao
+      FROM raw_issec_portal.processos ip
+     WHERE ip.processo = p.numero
+     ORDER BY ip.extraido_em DESC
+     LIMIT 1
+  ) pt ON p.cd_convenio = {CD_CONVENIO_ISSEC}
 """)
 
 SQL_RECEBIMENTOS = text("""
@@ -186,6 +219,8 @@ def processos_portal(postgres) -> dict[int, list[ProcessoPortal]]:
                     if linha['valor_liberado'] is not None
                     else None
                 ),
+                data_entrada=_como_data(linha['data_entrada']),
+                situacao=linha['situacao'],
             )
             for linha in postgres.execute(sql).mappings().all()
         ]
@@ -236,7 +271,8 @@ def vinculos_gravados(postgres) -> dict[int, dict]:
                 'situacao': 'vinculado',
                 'valor_cobrado': linha['valor_cobrado'],
                 'valor_liberado': linha['valor_liberado'],
-                'data_protocolo': linha['data_protocolo'],
+                'data_protocolo': _como_data(linha['data_protocolo']),
+                'situacao_portal': linha['situacao_portal'],
                 'solicitacao_nota_em': linha['solicitacao_nota_em'],
                 'solicitacao_nota_obs': linha['solicitacao_nota_obs'],
             },

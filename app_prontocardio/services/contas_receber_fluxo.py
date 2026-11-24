@@ -45,6 +45,8 @@ class ProcessoPortal:
     competencia: date
     valor_cobrado: Decimal
     valor_liberado: Decimal | None
+    data_entrada: date | None = None
+    situacao: str | None = None
 
 
 def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
@@ -102,7 +104,8 @@ def montar_item(remessa, vinculo, sugestao, hoje):
             'situacao': 'automatico',
             'valor_cobrado': p.valor_cobrado,
             'valor_liberado': p.valor_liberado,
-            'data_protocolo': None,
+            'data_protocolo': p.data_entrada,
+            'situacao_portal': p.situacao,
             'solicitacao_nota_em': None,
             'solicitacao_nota_obs': None,
         }
