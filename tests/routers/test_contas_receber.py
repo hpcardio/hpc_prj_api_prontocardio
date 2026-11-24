@@ -224,3 +224,42 @@ def test_tela_do_fluxo_e_valida_e_restrita():
         'contas_receber_fluxo',
     ]
     assert 'contas_receber_fluxo' not in TELAS_PADRAO
+
+
+def test_exportar_devolve_todas_as_remessas_sem_paginar(monkeypatch):
+    remessas = [_remessa(cd, '10.00') for cd in range(1, 26)]
+    remessas[0]['dt_entrega'] = date(2026, 11, 3)
+    remessas[0]['dt_prevista_pgto'] = date(2026, 12, 18)
+    monkeypatch.setattr(rota, 'remessas_mv', lambda _o: remessas)
+    monkeypatch.setattr(rota, 'processos_portal', lambda _p: {})
+    monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
+    monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
+    kwargs = dict(
+        oracle=None,
+        postgres=None,
+        _usuario=None,
+        convenio=None,
+        etapa=None,
+        competencia_de=None,
+        competencia_ate=None,
+        q=None,
+        a_confirmar=False,
+        ordenar_por='parado',
+        page=1,
+        page_size=10,
+    )
+
+    assert len(rota.fluxo(**kwargs)['itens']) == 10
+    todos = rota.fluxo(exportar=True, **kwargs)['itens']
+    assert len(todos) == 25
+    item = next(i for i in todos if i['cd_remessa'] == 1)
+    assert item['dt_entrega'] == date(2026, 11, 3)
+    assert item['dt_prevista_pgto'] == date(2026, 12, 18)
+
+
+def test_sql_traz_datas_do_mv_e_liquido_da_nfse():
+    assert 'r.dt_entrega_da_fatura AS dt_entrega' in rota.SQL_REMESSAS_MV.text
+    assert 'r.dt_prevista_para_pgto AS dt_prevista_pgto' in (
+        rota.SQL_REMESSAS_MV.text
+    )
+    assert 'valor_liquido_nfse' in rota.SQL_VINCULOS.text

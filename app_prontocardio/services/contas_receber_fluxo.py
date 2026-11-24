@@ -163,6 +163,8 @@ def montar_item(remessa, vinculo, sugestao, hoje):
         'valor': dinheiro(remessa['valor']),
         'qt_contas': remessa.get('qt_contas') or 0,
         'dt_fechamento': fechamento,
+        'dt_entrega': remessa.get('dt_entrega'),
+        'dt_prevista_pgto': remessa.get('dt_prevista_pgto'),
         'protocolo': protocolo,
         'protocolo_candidatos': candidatos,
         'nfse': nfse,

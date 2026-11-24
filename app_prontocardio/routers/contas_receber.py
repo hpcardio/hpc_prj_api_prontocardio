@@ -74,7 +74,8 @@ WITH contas AS (
   GROUP BY cd_remessa)
 SELECT r.cd_remessa AS cd_remessa, f.cd_convenio AS cd_convenio, c.nm_convenio AS convenio,
        f.dt_competencia AS dt_competencia, f.cd_multi_empresa AS cd_multi_empresa,
-       r.dt_fechamento AS dt_fechamento, ct.vl AS valor, ct.qt AS qt_contas
+       r.dt_fechamento AS dt_fechamento, ct.vl AS valor, ct.qt AS qt_contas,
+       r.dt_entrega_da_fatura AS dt_entrega, r.dt_prevista_para_pgto AS dt_prevista_pgto
   FROM dbamv.remessa_fatura r
   JOIN dbamv.fatura f ON f.cd_fatura = r.cd_fatura
   JOIN dbamv.convenio c ON c.cd_convenio = f.cd_convenio
@@ -112,6 +113,8 @@ def _carregar_remessas(oracle) -> list[dict]:
             'competencia': competencia.replace(day=1) if competencia else None,
             'cd_multi_empresa': linha['cd_multi_empresa'],
             'dt_fechamento': _como_data(linha['dt_fechamento']),
+            'dt_entrega': _como_data(linha['dt_entrega']),
+            'dt_prevista_pgto': _como_data(linha['dt_prevista_pgto']),
             'valor': dinheiro(linha['valor']),
             'qt_contas': int(linha['qt_contas'] or 0),
         })
@@ -147,10 +150,19 @@ SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
        p.valor_cobrado, p.valor_liberado, p.data_protocolo,
        p.solicitacao_nota_em, p.solicitacao_nota_obs,
        n.numero_nfse, n.prestador_cnpj, n.data_emissao, n.valor AS valor_nfse,
-       n.origem AS origem_nfse
+       n.origem AS origem_nfse, x.valor_liquido AS valor_liquido_nfse
   FROM api_prontocardio.cr_protocolo_remessas pr
   JOIN api_prontocardio.cr_protocolos p ON p.id = pr.protocolo_id
   LEFT JOIN api_prontocardio.cr_protocolo_nfse n ON n.protocolo_id = p.id
+  -- Valor líquido da NFS no ISS (quando a nota está na base extraída).
+  LEFT JOIN LATERAL (
+    SELECT NULLIF(nx.valor_liquido_nfse, '')::numeric AS valor_liquido
+      FROM api_prontocardio.nfse_xml nx
+     WHERE nx.numero_nfse = n.numero_nfse
+       AND nx.prestador_cnpj = n.prestador_cnpj
+     ORDER BY nx.data_hora DESC
+     LIMIT 1
+  ) x ON n.prestador_cnpj IS NOT NULL
 """)
 
 SQL_RECEBIMENTOS = text("""
@@ -210,6 +222,11 @@ def vinculos_gravados(postgres) -> dict[int, dict]:
                     else None
                 ),
                 'origem': linha['origem_nfse'],
+                'valor_liquido': (
+                    dinheiro(linha['valor_liquido_nfse'])
+                    if linha['valor_liquido_nfse'] is not None
+                    else None
+                ),
             }
         vinculos[int(linha['cd_remessa'])] = {
             'protocolo': {
@@ -373,11 +390,13 @@ def fluxo(
     ordenar_por: Literal['parado', 'competencia', 'valor'] = 'parado',
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+    exportar: bool = False,
 ):
     """Remessas fechadas e a etapa de cada uma, com o funil por etapa.
 
     O funil considera os filtros da tela, exceto a etapa (que é o próprio
-    card selecionado).
+    card selecionado). ``exportar`` devolve todas as remessas filtradas,
+    sem paginação (planilha da tela).
     """
     de = _competencia(competencia_de, 'Competência inicial')
     ate = _competencia(competencia_ate, 'Competência final')
@@ -405,7 +424,9 @@ def fluxo(
     return {
         'resumo': resumo,
         'etapas': [{'chave': k, 'rotulo': r} for k, r in ETAPAS],
-        'itens': filtrados[inicio : inicio + page_size],
+        'itens': (
+            filtrados if exportar else filtrados[inicio : inicio + page_size]
+        ),
         'total': total,
         'valor_total_filtrado': sum(
             (i['valor'] for i in filtrados), dinheiro(0)
