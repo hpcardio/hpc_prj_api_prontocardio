@@ -263,3 +263,29 @@ def test_sql_traz_datas_do_mv_e_liquido_da_nfse():
         rota.SQL_REMESSAS_MV.text
     )
     assert 'valor_liquido_nfse' in rota.SQL_VINCULOS.text
+
+
+def test_vinculos_leem_o_portal_na_hora_e_a_entrada_no_protocolo():
+    sql = rota.SQL_VINCULOS.text
+    assert 'COALESCE(pt.valor_liberado, p.valor_liberado)' in sql
+    assert 'COALESCE(p.data_protocolo, pt.data_entrada)' in sql
+    assert "'Entrada no Protocolo:'" in sql
+    assert "TO_DATE(" in rota.SQL_PORTAL[rota.CD_CONVENIO_ISSEC].text
+
+
+def test_protocolo_automatico_usa_a_entrada_no_portal():
+    processo = ProcessoPortal(
+        '2600042216',
+        OUT,
+        Decimal('1968.18'),
+        Decimal('1328.30'),
+        date(2026, 11, 13),
+        'LIBERADO',
+    )
+    sugestao = {'situacao': 'automatico', 'candidatos': [processo]}
+
+    item = montar_item(_remessa(20586, '1968.18'), None, sugestao, HOJE)
+
+    assert item['protocolo']['data_protocolo'] == date(2026, 11, 13)
+    assert item['protocolo']['situacao_portal'] == 'LIBERADO'
+    assert item['dias_na_etapa'] == 11
