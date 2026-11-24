@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from http import HTTPStatus
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ from app_prontocardio.unidades import nome_unidade_publica
 router = APIRouter(prefix='/operacional', tags=['operacional'])
 SessionOracle = Annotated[Session, Depends(get_session_oracle)]
 UsuarioOperacional = Annotated[Usuario, Depends(valida_token_usuario_atual)]
+FUSO_HORARIO_BRASIL = ZoneInfo('America/Sao_Paulo')
 StatusConfirmacao = Literal[
     'confirmado',
     'nao_confirmado',
@@ -79,6 +81,175 @@ def montar_resposta_confirmacoes(rows):
         'total_agendamentos': total_agendamentos,
         'total_pacientes': total_pacientes,
     }
+
+
+def montar_resumo_confirmacoes(rows, data_inicio: date, data_fim: date):
+    grupos = [dict(row) for row in rows]
+    campos_numericos = (
+        'total_agendamentos',
+        'confirmados',
+        'cancelamentos_solicitados',
+        'pendentes',
+        'encaixes',
+        'horarios_regulares',
+        'presencas_registradas',
+        'atendidos',
+        'sem_registro_presenca',
+    )
+    totais = {campo: 0 for campo in campos_numericos}
+    for grupo in grupos:
+        grupo['ds_unidade_atendimento'] = nome_unidade_publica(
+            grupo.get('cd_unidade_atendimento'),
+            grupo.get('ds_unidade_atendimento'),
+        )
+        for campo in campos_numericos:
+            grupo[campo] = int(grupo.get(campo) or 0)
+            totais[campo] += grupo[campo]
+    totais['taxa_confirmacao'] = round(
+        100 * totais['confirmados'] / totais['total_agendamentos'], 1
+    ) if totais['total_agendamentos'] else 0.0
+    return {
+        'consultado_em': datetime.now(FUSO_HORARIO_BRASIL).isoformat(),
+        'data_inicio': data_inicio.isoformat(),
+        'data_fim': data_fim.isoformat(),
+        'totais': totais,
+        'grupos': grupos,
+    }
+
+
+@router.get('/agendamentos/confirmacoes/resumo')
+def consultar_resumo_confirmacoes_agendamentos(
+    _: UsuarioOperacional,
+    session: SessionOracle,
+    data_inicio: date,
+    data_fim: date,
+):
+    """Indicadores agregados de confirmação, encaixe e presença no MV."""
+    _validar_periodo_confirmacoes(data_inicio, data_fim)
+    rows = session.execute(
+        text(
+            """
+            WITH contatos AS (
+                SELECT rc.CD_REGISTRO_VINCULADO,
+                       rc.DS_ASSUNTO,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY rc.CD_REGISTRO_VINCULADO
+                           ORDER BY
+                               TRUNC(rc.DT_CONTATO)
+                               + (rc.HR_CONTATO - TRUNC(rc.HR_CONTATO)) DESC,
+                               rc.CD_REGISTRO_CONTATO DESC
+                       ) AS ordem
+                  FROM DBAMV.REGISTRO_CONTATO rc
+                 WHERE rc.TP_ACAO = 'AS'
+            ), dados AS (
+                SELECT TO_CHAR(TRUNC(iac.HR_AGENDA), 'YYYY-MM-DD') AS data,
+                       ua.CD_UNIDADE_ATENDIMENTO AS cd_unidade_atendimento,
+                       ua.DS_UNIDADE_ATENDIMENTO AS ds_unidade_atendimento,
+                       ac.CD_SETOR AS cd_setor,
+                       s.NM_SETOR AS nm_setor,
+                       iac.CD_ESPECIALID AS cd_especialid,
+                       e.DS_ESPECIALID AS ds_especialid,
+                       pr.CD_PRESTADOR AS cd_prestador,
+                       pr.NM_PRESTADOR AS nm_prestador,
+                       iac.CD_ITEM_AGENDAMENTO AS cd_item_agendamento,
+                       ia.DS_ITEM_AGENDAMENTO AS ds_item_agendamento,
+                       NVL(iac.SN_ENCAIXE, 'N') AS sn_encaixe,
+                       NVL(iac.SN_ATENDIDO, 'N') AS sn_atendido,
+                       iac.TP_PRESENCA_FALTA AS tp_presenca_falta,
+                       CASE
+                           WHEN rc.DS_ASSUNTO IS NULL THEN 'pendente'
+                           WHEN UPPER(rc.DS_ASSUNTO) LIKE '%REAGEND%'
+                               THEN 'reagendamento_solicitado'
+                           WHEN UPPER(rc.DS_ASSUNTO) LIKE '%CANCEL%'
+                               THEN 'cancelamento_solicitado'
+                           WHEN UPPER(rc.DS_ASSUNTO) LIKE '%SEM RESPOSTA%'
+                               THEN 'sem_resposta'
+                           WHEN UPPER(rc.DS_ASSUNTO) LIKE '%NÃO CONFIRM%'
+                             OR UPPER(rc.DS_ASSUNTO) LIKE '%NAO CONFIRM%'
+                               THEN 'nao_confirmado'
+                           WHEN UPPER(rc.DS_ASSUNTO) LIKE '%CONFIRM%'
+                               THEN 'confirmado'
+                           ELSE 'contato_registrado'
+                       END AS status_confirmacao
+                  FROM DBAMV.IT_AGENDA_CENTRAL iac
+                  JOIN DBAMV.AGENDA_CENTRAL ac
+                    ON ac.CD_AGENDA_CENTRAL = iac.CD_AGENDA_CENTRAL
+                  LEFT JOIN DBAMV.UNIDADE_ATENDIMENTO ua
+                    ON ua.CD_UNIDADE_ATENDIMENTO = ac.CD_UNIDADE_ATENDIMENTO
+                  LEFT JOIN DBAMV.SETOR s ON s.CD_SETOR = ac.CD_SETOR
+                  LEFT JOIN DBAMV.ESPECIALID e
+                    ON e.CD_ESPECIALID = iac.CD_ESPECIALID
+                  LEFT JOIN DBAMV.PRESTADOR pr
+                    ON pr.CD_PRESTADOR = ac.CD_PRESTADOR
+                  LEFT JOIN DBAMV.ITEM_AGENDAMENTO ia
+                    ON ia.CD_ITEM_AGENDAMENTO = iac.CD_ITEM_AGENDAMENTO
+                  LEFT JOIN contatos rc
+                    ON rc.CD_REGISTRO_VINCULADO = iac.CD_IT_AGENDA_CENTRAL
+                   AND rc.ordem = 1
+                 WHERE iac.CD_PACIENTE IS NOT NULL
+                   AND NVL(iac.TP_SITUACAO, 'M') <> 'C'
+                   AND iac.CD_IT_AGENDA_PAI IS NULL
+                   AND iac.HR_AGENDA >= :data_inicio
+                   AND iac.HR_AGENDA < :data_fim + 1
+            )
+            SELECT data,
+                   cd_unidade_atendimento,
+                   ds_unidade_atendimento,
+                   cd_setor,
+                   nm_setor,
+                   cd_especialid,
+                   ds_especialid,
+                   cd_prestador,
+                   nm_prestador,
+                   cd_item_agendamento,
+                   ds_item_agendamento,
+                   COUNT(*) AS total_agendamentos,
+                   SUM(
+                       CASE WHEN status_confirmacao = 'confirmado'
+                           THEN 1 ELSE 0 END
+                   ) AS confirmados,
+                   SUM(
+                       CASE WHEN status_confirmacao =
+                           'cancelamento_solicitado' THEN 1 ELSE 0 END
+                   ) AS cancelamentos_solicitados,
+                   SUM(
+                       CASE WHEN status_confirmacao NOT IN (
+                           'confirmado', 'cancelamento_solicitado'
+                       ) THEN 1 ELSE 0 END
+                   ) AS pendentes,
+                   SUM(
+                       CASE WHEN sn_encaixe = 'S' THEN 1 ELSE 0 END
+                   ) AS encaixes,
+                   SUM(
+                       CASE WHEN sn_encaixe <> 'S' THEN 1 ELSE 0 END
+                   ) AS horarios_regulares,
+                   SUM(
+                       CASE WHEN tp_presenca_falta = 'P' THEN 1 ELSE 0 END
+                   ) AS presencas_registradas,
+                   SUM(
+                       CASE WHEN sn_atendido = 'S' THEN 1 ELSE 0 END
+                   ) AS atendidos,
+                   SUM(
+                       CASE WHEN tp_presenca_falta IS NULL THEN 1 ELSE 0 END
+                   ) AS sem_registro_presenca
+              FROM dados
+             GROUP BY data,
+                      cd_unidade_atendimento,
+                      ds_unidade_atendimento,
+                      cd_setor,
+                      nm_setor,
+                      cd_especialid,
+                      ds_especialid,
+                      cd_prestador,
+                      nm_prestador,
+                      cd_item_agendamento,
+                      ds_item_agendamento
+             ORDER BY data, ds_unidade_atendimento, nm_prestador
+            """
+        ),
+        {'data_inicio': data_inicio, 'data_fim': data_fim},
+    ).mappings().all()
+    return montar_resumo_confirmacoes(rows, data_inicio, data_fim)
 
 
 @router.get('/agendamentos/confirmacoes')
