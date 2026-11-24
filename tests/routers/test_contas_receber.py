@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from app_prontocardio.permissions import TELAS_PADRAO, normalizar_telas
 from app_prontocardio.routers import contas_receber as rota
 from app_prontocardio.services.contas_receber_fluxo import (
     ProcessoPortal,
@@ -215,3 +216,11 @@ def test_sql_das_remessas_soma_as_contas_e_exclui_particular():
     assert 'dbamv.reg_fat' in sql
     assert 'dbamv.reg_amb' in sql
     assert 'NOT IN (3)' in sql
+
+
+def test_tela_do_fluxo_e_valida_e_restrita():
+    assert normalizar_telas(['contas_receber_fluxo', 'indicadores']) == [
+        'indicadores',
+        'contas_receber_fluxo',
+    ]
+    assert 'contas_receber_fluxo' not in TELAS_PADRAO
