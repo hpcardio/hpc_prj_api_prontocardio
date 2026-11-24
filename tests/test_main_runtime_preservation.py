@@ -37,7 +37,10 @@ def test_context_roundtrip_is_scoped_and_expires():
     with pytest.raises(MvContextTokenError):
         claims.require_attendance(101)
     with pytest.raises(MvContextTokenError, match='expirado'):
-        verify_mv_context_token(token, SECRET, now=NOW + timedelta(minutes=5))
+        verify_mv_context_token(token, SECRET, now=NOW + timedelta(hours=8))
+    # Dentro do turno o contexto continua válido.
+    quase_fim = NOW + timedelta(hours=7, minutes=59)
+    verify_mv_context_token(token, SECRET, now=quase_fim)
     with pytest.raises(MvContextTokenError):
         verify_mv_context_token(token + 'x', SECRET, now=NOW)
     with pytest.raises(MvContextTokenError):

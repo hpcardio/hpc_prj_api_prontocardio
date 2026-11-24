@@ -11,7 +11,9 @@ from fastapi import Header, HTTPException
 from evolucao_sadt_backend.prontorede_context import VerifiedMvContext
 
 TOKEN_PURPOSE = 'EVOLUCAO_SADT_CONTEXT_V1'
-DEFAULT_TTL_SECONDS = 5 * 60
+# Contexto MV válido por um turno (8 h): com 5 min o médico perdia o
+# contexto no meio do atendimento. Recuperado da versão de 23/11.
+DEFAULT_TTL_SECONDS = 8 * 60 * 60
 
 
 class MvContextTokenError(PermissionError):
