@@ -228,3 +228,37 @@ def test_cpf_do_login_so_reconhece_onze_digitos():
     assert autenticacao._cpf_do_login('RH000938') is None
     assert autenticacao._cpf_do_login('1234') is None
     assert autenticacao._cpf_do_login('ana@x.com') is None
+
+
+def test_usuario_antigo_entra_pelo_login_mv_vinculado(cliente, session):
+    from sqlalchemy import text  # noqa: PLC0415
+
+    from app_prontocardio.models import Usuario  # noqa: PLC0415
+    from app_prontocardio.security import gera_hash_senha  # noqa: PLC0415
+
+    usuario = Usuario(
+        nome='Usuário Antigo', email='antigo@x.com',
+        senha=gera_hash_senha('minha-senha'), nome_usuario='Antigo',
+    )
+    session.add(usuario)
+    session.commit()
+    session.execute(text(
+        'CREATE TABLE usuarios_mv (usuario_id INTEGER, cd_usuario_mv TEXT)'
+    ))
+    session.execute(
+        text("INSERT INTO usuarios_mv VALUES (:id, 'RH000938')"),
+        {'id': usuario.id},
+    )
+    session.commit()
+
+    for login in ('RH000938', 'rh000938', 'Antigo'):
+        resposta = cliente.post(
+            '/autenticacao/token',
+            data={'username': login, 'password': 'minha-senha'},
+        )
+        assert resposta.status_code == HTTPStatus.OK, login
+    outro = cliente.post(
+        '/autenticacao/token',
+        data={'username': 'RH000111', 'password': 'minha-senha'},
+    )
+    assert outro.status_code == HTTPStatus.UNAUTHORIZED
