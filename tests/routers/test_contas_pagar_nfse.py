@@ -516,3 +516,14 @@ def test_historico_respeita_emitidas_desde_e_nao_aparece_em_a_lancar():
         _usuario(telas=[rota.TELA_SETOR]), postgres, oracle, situacao='pendente'
     )
     assert all(i['origem_nfse'] != 'mv' for i in resposta['itens'])
+
+
+def test_lancada_marca_se_foi_pelo_receita_certa():
+    postgres, oracle = _sessoes()
+    # login MV, boletos, tabela de importações, importadas
+    postgres.responses.extend([[], [], [True], [{'prestador_cnpj': '33333333000133', 'numero_nfse': '55'}]])
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='todas')
+
+    por_chave = {i['chave']: i for i in resposta['itens']}
+    assert por_chave['33333333000133-55']['lancada_pelo_receita_certa'] is True
+    assert por_chave['11111111000111-0000123']['lancada_pelo_receita_certa'] is False

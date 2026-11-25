@@ -612,6 +612,7 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
         boletos_por_nota,
     )
     boletos = boletos_por_nota(session, cnpjs)
+    importadas_rc = _importadas_pelo_receita_certa(session)
     historico = _historico_mv(oracle)
     lancadores = lancadores_por_fornecedor(historico)
     lancamento_do_documento = {
@@ -709,6 +710,7 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
                 'enviado_por': [u for u in (resumo_boletos.get('enviado_por') or []) if u is not None],
             } if resumo_boletos else None,
             'pronta': pronta,
+            'lancada_pelo_receita_certa': (cnpj, nota['numero_nfse']) in importadas_rc,
         })
 
     if escopo is not None and situacao in ('lancada', 'todas'):
@@ -746,6 +748,29 @@ class FiltroFila:
     desde: date | None
     cd_oficina: int | None
     cd_setor: int | None
+
+
+SQL_IMPORTADAS_RC = text("""
+SELECT prestador_cnpj, numero_nfse
+  FROM api_prontocardio.contas_pagar_importacoes
+ WHERE status = 'importada'
+""")
+
+
+def _importadas_pelo_receita_certa(session: Session) -> set[tuple[str, str]]:
+    """Notas lançadas no MV pela importação do Receita Certa (não direto no MV).
+
+    Só elas mostram PDF da NFS-e e boleto entre as lançadas.
+    """
+    existe = session.execute(
+        text("SELECT to_regclass('api_prontocardio.contas_pagar_importacoes') IS NOT NULL")
+    ).scalar_one_or_none()
+    if not existe:
+        return set()
+    return {
+        (linha['prestador_cnpj'], linha['numero_nfse'])
+        for linha in session.execute(SQL_IMPORTADAS_RC).mappings().all()
+    }
 
 
 def _itens_do_historico(  # noqa: PLR0913
@@ -813,6 +838,7 @@ def _item_historico_mv(linha, oficina, ds_oficina, cd_setor, nm_setor, cd_empres
         },
         'boletos': None,
         'pronta': False,
+        'lancada_pelo_receita_certa': False,
     }
 
 
