@@ -105,7 +105,7 @@ def _nota_normal(monkeypatch, request):
 
 def test_setor_da_oficina_anexa_boleto_sem_divergencia():
     pdf, linha = _pdf()
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], [99]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [99]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf)
 
     assert resposta['id'] == 99
@@ -123,7 +123,7 @@ def test_setor_da_oficina_anexa_boleto_sem_divergencia():
 
 def test_divergencias_ficam_registradas():
     pdf, _ = _pdf(valor=Decimal('1700.00'), dias=-2, cnpj='63.554.067/0001-98', impresso='1600,00')
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], [5]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [5]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf, justificativa_atraso='Fornecedor mandou o boleto atrasado')
 
     assert len(resposta['divergencias']) == 4
@@ -138,7 +138,7 @@ def test_divergencias_ficam_registradas():
 def test_soma_com_boletos_anteriores_respeita_o_liquido():
     pdf, _ = _pdf(valor=Decimal('600.00'), impresso='600,00')
     anteriores = [{'valor': Decimal('1000.00')}]
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], anteriores, [6]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], anteriores, [6]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf)
 
     assert any('passa do valor líquido' in d for d in resposta['divergencias'])
@@ -147,7 +147,7 @@ def test_soma_com_boletos_anteriores_respeita_o_liquido():
 def test_pdf_escaneado_aceita_linha_digitada():
     _, linha = _pdf()
     escaneado = gerar_pdf('imagem do boleto')
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], [7]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [7]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), escaneado, linha_digitavel=formatar(linha))
 
     assert resposta['origem_leitura'] == 'manual'
@@ -155,7 +155,7 @@ def test_pdf_escaneado_aceita_linha_digitada():
 
 
 def test_pdf_sem_linha_e_sem_digitacao_e_rejeitado():
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], []])
+    postgres = FakeSession([[NOTA], REGRAS, [2], []])
     with pytest.raises(HTTPException) as erro:
         _enviar(postgres, FakeSession([EMPRESAS]), gerar_pdf('imagem do boleto'))
     assert erro.value.status_code == 422
@@ -163,7 +163,7 @@ def test_pdf_sem_linha_e_sem_digitacao_e_rejeitado():
 
 
 def test_arquivo_nao_pdf_e_rejeitado():
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], []])
+    postgres = FakeSession([[NOTA], REGRAS, [2], []])
     with pytest.raises(HTTPException) as erro:
         _enviar(postgres, FakeSession([EMPRESAS]), b'PK\x03\x04 planilha')
     assert erro.value.status_code == 422
@@ -171,7 +171,7 @@ def test_arquivo_nao_pdf_e_rejeitado():
 
 def test_outro_setor_nao_pode_anexar():
     pdf, _ = _pdf()
-    postgres = FakeSession([[NOTA], REGRAS, [5], [], []])
+    postgres = FakeSession([[NOTA], REGRAS, [5], []])
     with pytest.raises(HTTPException) as erro:
         _enviar(postgres, FakeSession([EMPRESAS]), pdf)
     assert erro.value.status_code == 403
@@ -179,7 +179,7 @@ def test_outro_setor_nao_pode_anexar():
 
 def test_boleto_repetido_retorna_conflito():
     pdf, _ = _pdf()
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], IntegrityError('dup', {}, Exception())])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], IntegrityError('dup', {}, Exception())])
     with pytest.raises(HTTPException) as erro:
         _enviar(postgres, FakeSession([EMPRESAS]), pdf)
     assert erro.value.status_code == 409
@@ -210,7 +210,7 @@ def test_fila_filtra_notas_prontas():
                'participacao': Decimal('1'), 'usuario_id': 1, 'atualizado_em': None, 'cd_fornecedor': 1}]
     boletos = [{'prestador_cnpj': '11222333000181', 'numero_nfse': '123', 'quantidade': 1,
                 'soma': Decimal('1500.50'), 'primeiro_vencimento': HOJE, 'com_divergencia': False, 'fora_do_prazo': True}]
-    postgres = FakeSession([[True], [False], [nota_fila, sem_boleto], regras, boletos])
+    postgres = FakeSession([[True], [False], [nota_fila, sem_boleto], regras, [], boletos])
     oracle = FakeSession([[], EMPRESAS])
 
     resposta = rota_nfse.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='pronta')
@@ -224,7 +224,7 @@ def test_fila_filtra_notas_prontas():
 def test_nota_cancelada_no_iss_nao_aceita_boleto(monkeypatch):
     monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'CANCELADA')
     pdf, _ = _pdf()
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], []])
+    postgres = FakeSession([[NOTA], REGRAS, [2], []])
 
     with pytest.raises(HTTPException) as erro:
         _enviar(postgres, FakeSession([EMPRESAS]), pdf)
@@ -245,7 +245,7 @@ def test_status_da_nota_combina_xml_e_portal():
 
 def test_boleto_dentro_do_prazo_nao_pede_justificativa():
     # Terça 17/11 10h + 72h úteis: qua, qui, (sex 20/11 é feriado), segunda 23/11 10h.
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], [5]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [5]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), _pdf(dias=6)[0])  # vence 23/11
     assert resposta['fora_do_prazo'] is False
     assert resposta['justificativa_atraso'] is None
@@ -255,7 +255,7 @@ def test_boleto_dentro_do_prazo_nao_pede_justificativa():
 
 
 def test_boleto_fora_do_prazo_sem_justificativa_e_recusado():
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], [5]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [5]])
     with pytest.raises(HTTPException) as erro:
         _enviar(postgres, FakeSession([EMPRESAS]), _pdf(dias=3)[0])  # vence sexta 20/11 (feriado) < segunda 23/11
     assert erro.value.status_code == 422
@@ -266,13 +266,13 @@ def test_boleto_fora_do_prazo_sem_justificativa_e_recusado():
 
 def test_justificativa_curta_demais_e_recusada():
     with pytest.raises(HTTPException) as erro:
-        _enviar(FakeSession([[NOTA], REGRAS, [2], [], [], [], [5]]), FakeSession([EMPRESAS]), _pdf(dias=3)[0],
+        _enviar(FakeSession([[NOTA], REGRAS, [2], [], [], [5]]), FakeSession([EMPRESAS]), _pdf(dias=3)[0],
                 justificativa_atraso='  atraso ')
     assert erro.value.status_code == 422
 
 
 def test_boleto_fora_do_prazo_com_justificativa_segue_para_o_financeiro():
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [], [5]])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [5]])
     resposta = _enviar(postgres, FakeSession([EMPRESAS]), _pdf(dias=3)[0],
                        justificativa_atraso='  O fornecedor   só enviou o boleto hoje. ')
     assert resposta['fora_do_prazo'] is True
@@ -283,29 +283,36 @@ def test_boleto_fora_do_prazo_com_justificativa_segue_para_o_financeiro():
 
 
 def test_listagem_informa_o_prazo_minimo_de_quem_envia_agora():
-    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], []])
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], []])
     resposta = rota.listar_boletos('11.222.333/0001-81', '123', _usuario(), postgres, FakeSession([EMPRESAS]))
     assert resposta['prazo_minimo_hoje'] == datetime(2026, 11, 23, 10, 0)
 
 
-def _historico_do_usuario():
-    """Setor sem a oficina 2 na regra do MV, mas que lançou a nota no MV."""
-    postgres = FakeSession([[NOTA], REGRAS, [], ['RH000938'], []])
-    lancada = {'cnpj': '11222333000181', 'nr_documento': '0123', 'cd_ent_serv': 9,
-               'cd_con_pag': None, 'cd_usuario': 'RH000938', 'origem': 'ENT_SERV'}
-    oracle = FakeSession([EMPRESAS, [{'cd_oficina': 9}], [lancada]])
+
+def _setor_com_colega(lancado_por):
+    """Usuário RH000938 (oficina 9 na regra do MV); a regra do fornecedor aponta para 2."""
+    postgres = FakeSession([[NOTA], REGRAS, [], ['RH000938']])
+    lancamento = {'cnpj': '11222333000181', 'cd_usuario': lancado_por, 'dt_entrada': datetime(2026, 1, 5)}
+    oracle = FakeSession([
+        EMPRESAS,
+        [{'cd_oficina': 9}],                                        # regra do usuário
+        [{'cd_usuario': 'RH000938', 'cd_oficina': 9},
+         {'cd_usuario': 'RH000777', 'cd_oficina': 9},
+         {'cd_usuario': 'RH000111', 'cd_oficina': 5}],              # regra de todos (2 sem ninguém)
+        [lancamento],                                               # ENT_SERV do fornecedor
+    ])
     return postgres, oracle
 
 
-def test_nota_do_historico_do_usuario_pode_ser_consultada():
-    postgres, oracle = _historico_do_usuario()
-    nota = rota._nota_ou_404(postgres, oracle, _usuario(), '11222333000181', '123', historico_ok=True)
+def test_fornecedor_de_oficina_sem_usuarios_lancado_por_colega_e_do_usuario():
+    postgres, oracle = _setor_com_colega('RH000777')
+    nota = rota._nota_ou_404(postgres, oracle, _usuario(), '11222333000181', '123')
 
-    assert nota['cd_oficina'] == 2
+    assert nota['cd_oficina'] == 9  # oficina da regra do usuário, não a da regra do fornecedor
 
 
-def test_nota_do_historico_nao_aceita_alteracao_fora_da_oficina():
-    postgres, oracle = _historico_do_usuario()
+def test_fornecedor_de_outra_oficina_e_recusado():
+    postgres, oracle = _setor_com_colega('RH000111')
     with pytest.raises(HTTPException) as erro:
         rota._nota_ou_404(postgres, oracle, _usuario(), '11222333000181', '123')
     assert erro.value.status_code == 403

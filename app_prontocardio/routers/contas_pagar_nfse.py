@@ -26,6 +26,11 @@ from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import Usuario
 from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.nfse_manuais import FONTE_NFSE_RECEBIDAS
+from app_prontocardio.services.nfse_setor_escopo import (
+    EscopoFila,
+    lancadores_por_fornecedor,
+    oficinas_por_login,
+)
 from app_prontocardio.services.payables_mv import read_payables_rows
 from app_prontocardio.services.payables_oficinas import (
     MESES_HISTORICO,
@@ -316,60 +321,102 @@ SELECT DISTINCT o.cd_oficina AS cd_oficina
 """)
 
 
-@dataclass(frozen=True)
-class AcessoNotas:
-    """O que um usuário de setor vê na fila.
+# Regra usuário -> oficina do MV de todos os usuários ativos.
+SQL_REGRA_MV_TODOS = text("""
+SELECT DISTINCT uof.cd_usuario AS cd_usuario, o.cd_oficina AS cd_oficina
+  FROM dbamv.usuarios_oficina_funcao uof
+  JOIN dbamv.oficina o ON o.cd_oficina = uof.cd_oficina
+  JOIN dbamv.setor s
+    ON s.cd_setor = o.cd_setor AND s.cd_multi_empresa = o.cd_multi_empresa
+  JOIN dbamv.config_acma ca
+    ON ca.cd_multi_empresa = o.cd_multi_empresa
+   AND ca.sn_usuario_oficina_funcao = 'S'
+  JOIN dbasgu.usuarios u ON u.cd_usuario = uof.cd_usuario AND u.sn_ativo = 'S'
+ WHERE uof.tp_funcao <> 'SS'
+""")
 
-    - notas a lançar: as dos fornecedores cuja regra aponta para uma das
-      oficinas dele (regra do MV pelo login MV vinculado + oficinas
-      concedidas no Receita Certa);
-    - histórico (lançadas): só o que ele lançou no MV ou para o que enviou
-      boleto, qualquer que seja a oficina de hoje.
+# Histórico de NFS lançadas no MV (entradas de serviço), com quem lançou.
+MESES_HISTORICO_SETOR = 24
+_SQL_LANCAMENTOS_ENT_SERV = """
+SELECT REGEXP_REPLACE(f.nr_cgc_cpf, '[^0-9]', '') AS cnpj,
+       f.nm_fornecedor AS nm_fornecedor,
+       e.cd_ent_serv AS cd_ent_serv, e.cd_con_pag AS cd_con_pag,
+       e.nr_documento AS nr_documento, e.dt_emissao AS dt_emissao,
+       e.dt_entrada AS dt_entrada, e.vl_total AS vl_total,
+       e.cd_usuario AS cd_usuario, u.nm_usuario AS nm_usuario,
+       o.cd_multi_empresa AS cd_multi_empresa
+  FROM dbamv.ent_serv e
+  JOIN dbamv.fornecedor f ON f.cd_fornecedor = e.cd_fornecedor
+  LEFT JOIN dbamv.oficina o ON o.cd_oficina = e.cd_oficina
+  LEFT JOIN dbasgu.usuarios u ON u.cd_usuario = e.cd_usuario
+ WHERE e.dt_entrada >= ADD_MONTHS(TRUNC(SYSDATE), -:meses)
+"""
+SQL_LANCAMENTOS_ENT_SERV = text(_SQL_LANCAMENTOS_ENT_SERV)
+SQL_LANCAMENTOS_ENT_SERV_DO_FORNECEDOR = text(
+    _SQL_LANCAMENTOS_ENT_SERV
+    + "   AND REGEXP_REPLACE(f.nr_cgc_cpf, '[^0-9]', '') = :cnpj\n"
+)
+
+
+def escopo_da_fila(session: Session, oracle: Session, usuario) -> EscopoFila | None:
+    """Oficinas que o usuário vê na fila (ver services/nfse_setor_escopo).
+
+    None = vê tudo: gestor sem oficina na regra do MV. Quem tem oficina na
+    regra do MV vê só ela, qualquer que seja o perfil.
     """
-
-    oficinas: frozenset[int]
-    login_mv: str | None
-    enviadas: frozenset[tuple[str, str]]
-
-    def ve_pendente(self, cd_oficina: int | None) -> bool:
-        return cd_oficina is not None and cd_oficina in self.oficinas
-
-    def ve_historico(self, cnpj: str, numero: str, mv: dict | None) -> bool:
-        lancado_por = (mv or {}).get('lancado_por') or ()
-        return (
-            (self.login_mv is not None and self.login_mv in lancado_por)
-            or (cnpj, numero) in self.enviadas
-        )
-
-
-def acesso_do_usuario(session: Session, oracle: Session, usuario) -> AcessoNotas | None:
-    """None para o financeiro/gestão (vê tudo)."""
-    if _gestor(usuario):
-        return None
-    oficinas = {
-        int(cd)
-        for cd in session.execute(
-            SQL_OFICINAS_DO_USUARIO, {'usuario_id': usuario.id}
-        ).scalars()
-    }
+    gestor = _gestor(usuario)
+    concedidas: set[int] = set()
+    if not gestor:
+        concedidas = {
+            int(cd)
+            for cd in session.execute(
+                SQL_OFICINAS_DO_USUARIO, {'usuario_id': usuario.id}
+            ).scalars()
+        }
     login = session.execute(
         SQL_LOGIN_MV_DO_USUARIO, {'usuario_id': usuario.id}
     ).scalar_one_or_none()
-    login = login.strip().upper() if login else None
+    login = login.strip().upper() if isinstance(login, str) and login.strip() else None
+    oficinas_mv: set[int] = set()
     if login:
-        oficinas |= {
+        oficinas_mv = {
             int(linha['cd_oficina'])
             for linha in read_payables_rows(
                 oracle, SQL_OFICINAS_REGRA_MV, {'cd_usuario': login}
             )
         }
-    enviadas = {
-        (linha['prestador_cnpj'], linha['numero_nfse'])
-        for linha in session.execute(
-            SQL_NOTAS_ENVIADAS_PELO_USUARIO, {'usuario_id': usuario.id}
-        ).mappings().all()
+    if gestor and not oficinas_mv:
+        return None
+    regra = (
+        oficinas_por_login(read_payables_rows(oracle, SQL_REGRA_MV_TODOS, {}))
+        if oficinas_mv
+        else {}
+    )
+    return EscopoFila(frozenset(oficinas_mv | concedidas), regra)
+
+
+def _historico_mv(oracle: Session) -> list[dict]:
+    return [
+        dict(linha)
+        for linha in read_payables_rows(
+            oracle, SQL_LANCAMENTOS_ENT_SERV, {'meses': MESES_HISTORICO_SETOR}
+        )
+    ]
+
+
+def _data_iso(valor) -> str | None:
+    if valor is None:
+        return None
+    return (valor.date() if isinstance(valor, datetime) else valor).isoformat()
+
+
+def _info_lancamento(lancamento: dict | None) -> dict:
+    if not lancamento:
+        return {}
+    return {
+        'lancado_por_nome': lancamento.get('nm_usuario') or lancamento.get('cd_usuario'),
+        'lancado_em': _data_iso(lancamento.get('dt_entrada')),
     }
-    return AcessoNotas(frozenset(oficinas), login, frozenset(enviadas))
 
 
 def _regras(session: Session) -> dict[tuple[str, int], dict]:
@@ -518,7 +565,7 @@ def _situacao_na_fila(mv: dict | None, status: str | None, status_regra: str) ->
 
 
 @router.get('/recebidas')
-def listar_recebidas(
+def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; histórico em _itens_do_historico
     usuario: AcessoFila,
     session: SessionPostgres,
     oracle: SessionOracle,
@@ -536,8 +583,10 @@ def listar_recebidas(
     títulos que o financeiro pode importar.
     ``cancelada``: cancelada (ou substituída) no ISS e ainda não lançada no MV.
 
-    Usuário de setor: ver ``AcessoNotas``. A oficina exibida é sempre a da
-    regra atual do fornecedor, também nas notas do histórico.
+    Quem tem oficina na regra do MV (ou é usuário de setor) vê só as
+    oficinas dele (``escopo_da_fila``), com o nome da oficina da regra do
+    usuário, e também o histórico de NFS lançadas no MV nos últimos 24 meses
+    (``origem_nfse='mv'``), com quem lançou.
     """
     if not session.execute(SQL_TABELA_NFSE).scalar_one():
         return {
@@ -549,7 +598,7 @@ def listar_recebidas(
     inicio = desde or _inicio_padrao()
     notas = _notas_recebidas(session, inicio)
     regras = _regras(session)
-    acesso = acesso_do_usuario(session, oracle, usuario)
+    escopo = escopo_da_fila(session, oracle, usuario)
 
     cnpjs = [somente_digitos(n['prestador_cnpj']) for n in notas if n['prestador_cnpj']]
     lancadas = _lancadas_mv(oracle, cnpjs) if cnpjs else {}
@@ -563,6 +612,26 @@ def listar_recebidas(
         boletos_por_nota,
     )
     boletos = boletos_por_nota(session, cnpjs)
+    historico = _historico_mv(oracle)
+    lancadores = lancadores_por_fornecedor(historico)
+    lancamento_do_documento = {
+        (linha['cnpj'], _chave_documento(linha['nr_documento'])): linha for linha in historico
+    }
+    documentos_da_base = {
+        (somente_digitos(n['prestador_cnpj']), _chave_documento(n['numero_nfse'])) for n in notas
+    }
+
+    def nomes_da_oficina(oficina: int | None, regra: dict | None):
+        """(ds_oficina, cd_setor, nm_setor) exibidos no card."""
+        oficina_mv = oficinas_mv.get(oficina) if oficina is not None else None
+        if oficina is None:
+            return None, None, None
+        if escopo is not None:
+            # Nome da oficina da regra do usuário (não a do lançamento antigo).
+            nome = (oficina_mv or {}).get('ds_oficina') or (regra or {}).get('ds_oficina')
+            return nome, (oficina_mv or {}).get('cd_setor'), nome
+        ds = (regra or {}).get('ds_oficina')
+        return ds, (oficina_mv or {}).get('cd_setor'), ((oficina_mv.get('nm_setor') or ds) if oficina_mv else None)
 
     itens = []
     for nota in notas:
@@ -576,12 +645,16 @@ def listar_recebidas(
         situacao_nota = _situacao_na_fila(mv, status, status_regra)
 
         oficina_nota = regra['cd_oficina'] if regra and status_regra == STATUS_DEFINIDA else None
-        if acesso is not None and not (
-            acesso.ve_historico(cnpj, nota['numero_nfse'], mv)
-            if situacao_nota == 'lancada'
-            else acesso.ve_pendente(oficina_nota)
-        ):
-            continue
+        if escopo is not None:
+            oficina_nota = escopo.oficina_do_fornecedor(oficina_nota, lancadores.get(cnpj, ()))
+            if oficina_nota is None:
+                continue
+            if situacao_nota == 'a_classificar':
+                situacao_nota = 'pendente'
+        if mv is not None:
+            mv = {**mv, **_info_lancamento(
+                lancamento_do_documento.get((cnpj, _chave_documento(nota['numero_nfse'])))
+            )}
         resumo_boletos = boletos.get((cnpj, nota['numero_nfse']))
         pronta = (
             situacao_nota == 'pendente'
@@ -595,8 +668,7 @@ def listar_recebidas(
             continue
         if cd_oficina is not None and oficina_nota != cd_oficina:
             continue
-        oficina_mv = oficinas_mv.get(oficina_nota) if oficina_nota is not None else None
-        setor_nota = oficina_mv.get('cd_setor') if oficina_mv else None
+        ds_oficina, setor_nota, nm_setor = nomes_da_oficina(oficina_nota, regra)
         if cd_setor is not None and setor_nota != cd_setor:
             continue
 
@@ -617,9 +689,9 @@ def listar_recebidas(
             'empresa': nomes_empresa.get(cd_empresa),
             'discriminacao': discriminacao[:TAMANHO_DISCRIMINACAO],
             'cd_oficina': oficina_nota,
-            'ds_oficina': regra['ds_oficina'] if oficina_nota else None,
+            'ds_oficina': ds_oficina,
             'cd_setor': setor_nota,
-            'nm_setor': (oficina_mv.get('nm_setor') or regra['ds_oficina']) if oficina_mv else None,
+            'nm_setor': nm_setor,
             'situacao': situacao_nota,
             'status_nfse': status,
             'origem_nfse': nota.get('origem_nfse') or 'iss',
@@ -636,6 +708,13 @@ def listar_recebidas(
             } if resumo_boletos else None,
             'pronta': pronta,
         })
+
+    if escopo is not None and situacao in ('lancada', 'todas'):
+        itens.extend(_itens_do_historico(
+            historico, documentos_da_base, escopo, regras, lancadores, nomes_da_oficina,
+            nomes_empresa, FiltroFila(desde, cd_oficina, cd_setor),
+        ))
+        itens.sort(key=lambda item: item['data_emissao'] or '', reverse=True)
 
     por_oficina: dict[tuple, dict] = {}
     for item in itens:
@@ -657,6 +736,81 @@ def listar_recebidas(
             key=lambda g: (g['cd_oficina'] is not None, g['nm_setor'], g['empresa'] or ''),
         ),
         'itens': itens,
+    }
+
+
+@dataclass(frozen=True)
+class FiltroFila:
+    desde: date | None
+    cd_oficina: int | None
+    cd_setor: int | None
+
+
+def _itens_do_historico(  # noqa: PLR0913
+    historico, documentos_da_base, escopo, regras, lancadores, nomes_da_oficina,
+    nomes_empresa, filtro: FiltroFila,
+) -> list[dict]:
+    """NFS lançadas no MV (24 meses) dos fornecedores da oficina do usuário,
+    que não estão na base de NFS-e recebidas."""
+    itens = []
+    ja_listados = set(documentos_da_base)
+    for linha in historico:
+        documento = (linha['cnpj'], _chave_documento(linha['nr_documento']))
+        entrada = _data_iso(linha['dt_entrada'])
+        if documento in ja_listados or (filtro.desde and entrada and entrada < filtro.desde.isoformat()):
+            continue
+        cd_empresa = int(linha['cd_multi_empresa']) if linha['cd_multi_empresa'] is not None else None
+        regra = regras.get((linha['cnpj'], cd_empresa)) if cd_empresa is not None else None
+        oficina_regra = regra['cd_oficina'] if regra and regra['status'] == STATUS_DEFINIDA else None
+        oficina = escopo.oficina_do_fornecedor(oficina_regra, lancadores.get(linha['cnpj'], ()))
+        if oficina is None or filtro.cd_oficina not in (None, oficina):
+            continue
+        ds_oficina, setor, nm_setor = nomes_da_oficina(oficina, regra)
+        if filtro.cd_setor not in (None, setor):
+            continue
+        ja_listados.add(documento)
+        itens.append(_item_historico_mv(
+            linha, oficina, ds_oficina, setor, nm_setor, cd_empresa, nomes_empresa.get(cd_empresa)
+        ))
+    return itens
+
+
+def _item_historico_mv(linha, oficina, ds_oficina, cd_setor, nm_setor, cd_empresa, empresa) -> dict:
+    """NFS lançada no MV antes da extração das NFS-e recebidas (só ENT_SERV)."""
+    numero = (linha['nr_documento'] or '').strip()
+    return {
+        'chave': f"{linha['cnpj']}-{numero}",
+        'prestador_cnpj': linha['cnpj'],
+        'prestador': linha['nm_fornecedor'],
+        'numero_nfse': numero,
+        'codigo_verificacao': None,
+        'data_emissao': _data_iso(linha['dt_emissao'] or linha['dt_entrada']),
+        'competencia': None,
+        'valor_servicos': _decimal(linha['vl_total']),
+        'valor_liquido': None,
+        'tomador_cnpj': None,
+        'tomador': None,
+        'cd_multi_empresa': cd_empresa,
+        'empresa': empresa,
+        'discriminacao': '',
+        'cd_oficina': oficina,
+        'ds_oficina': ds_oficina,
+        'cd_setor': cd_setor,
+        'nm_setor': nm_setor,
+        'situacao': 'lancada',
+        'status_nfse': None,
+        'origem_nfse': 'mv',
+        'nfse_manual_id': None,
+        'status_nfse_consultado_em': None,
+        'motivo': None,
+        'mv': {
+            'cd_ent_serv': linha['cd_ent_serv'],
+            'cd_con_pag': linha['cd_con_pag'],
+            'lancado_por': [(linha['cd_usuario'] or '').strip().upper()] if linha['cd_usuario'] else [],
+            **_info_lancamento(linha),
+        },
+        'boletos': None,
+        'pronta': False,
     }
 
 
