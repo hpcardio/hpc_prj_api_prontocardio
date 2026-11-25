@@ -28,7 +28,9 @@ from sqlalchemy import text
 
 SENHA_PADRAO = 'prontocardio'
 TELA_SETOR = 'contas_pagar_nfse_setor'
-DOMINIO_SEM_EMAIL = 'mv.receitacerta.local'
+# Subdomínio do hospital sem caixa de e-mail. Não usar .local: a API recusa
+# domínios reservados (EmailStr) e a listagem de usuários quebra.
+DOMINIO_SEM_EMAIL = 'sem-email.hospitalprontocardio.com.br'
 TAMANHO_CPF = 11
 RE_EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 # Contas de sistema do MV (dono do schema) não viram usuário do Receita Certa.

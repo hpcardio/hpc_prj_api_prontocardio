@@ -203,7 +203,7 @@ def test_login_aceita_cpf_com_ou_sem_pontuacao_e_login_mv(cliente, session):
     from app_prontocardio.security import gera_hash_senha  # noqa: PLC0415
 
     session.add(Usuario(
-        nome='Colaborador Setor', email='rh000938@mv.receitacerta.local',
+        nome='Colaborador Setor', email='rh000938@sem-email.hospitalprontocardio.com.br',
         senha=gera_hash_senha('prontocardio'), nome_usuario='RH000938',
         cpf='52998224725',
     ))
