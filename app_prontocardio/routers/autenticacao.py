@@ -36,16 +36,28 @@ OAuthForm = Annotated[OAuth2PasswordRequestForm, Depends()]
 settings = Settings()
 
 
+TAMANHO_CPF = 11
+
+
+def _cpf_do_login(login: str) -> str | None:
+    """CPF digitado com ou sem pontuação (000.000.000-00)."""
+    if not login or any(ch not in '0123456789.- ' for ch in login):
+        return None
+    digitos = ''.join(ch for ch in login if ch.isdigit())
+    return digitos if len(digitos) == TAMANHO_CPF else None
+
+
 def _usuario_por_login(session: Session, login: str) -> Usuario | None:
+    """Login por email, nome de usuário (ex.: login MV RH000938) ou CPF."""
     login_normalizado = login.strip().lower()
-    return session.scalar(
-        select(Usuario).where(
-            or_(
-                func.lower(Usuario.email) == login_normalizado,
-                func.lower(Usuario.nome_usuario) == login_normalizado,
-            )
-        )
-    )
+    condicoes = [
+        func.lower(Usuario.email) == login_normalizado,
+        func.lower(Usuario.nome_usuario) == login_normalizado,
+    ]
+    cpf = _cpf_do_login(login.strip())
+    if cpf:
+        condicoes.append(Usuario.cpf == cpf)
+    return session.scalar(select(Usuario).where(or_(*condicoes)))
 
 
 @router.post('/token', status_code=HTTPStatus.OK, response_model=Token)

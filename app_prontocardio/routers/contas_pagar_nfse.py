@@ -10,6 +10,7 @@
   para o mesmo fornecedor e número.
 """
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
@@ -122,6 +123,7 @@ SELECT REGEXP_REPLACE(f.nr_cgc_cpf, '[^0-9]', '') AS cnpj,
        e.nr_documento AS nr_documento,
        e.cd_ent_serv AS cd_ent_serv,
        e.cd_con_pag AS cd_con_pag,
+       e.cd_usuario AS cd_usuario,
        'ENT_SERV' AS origem
   FROM dbamv.ent_serv e
   JOIN dbamv.fornecedor f ON f.cd_fornecedor = e.cd_fornecedor
@@ -132,6 +134,7 @@ SELECT REGEXP_REPLACE(f.nr_cgc_cpf, '[^0-9]', '') AS cnpj,
        c.nr_documento AS nr_documento,
        NULL AS cd_ent_serv,
        c.cd_con_pag AS cd_con_pag,
+       c.cd_usuario_ins AS cd_usuario,
        'CON_PAG' AS origem
   FROM dbamv.con_pag c
   JOIN dbamv.fornecedor f ON f.cd_fornecedor = c.cd_fornecedor
@@ -167,9 +170,14 @@ def _lancadas_mv(oracle: Session, cnpjs: list[str]) -> dict[tuple[str, str], dic
         )
         for linha in linhas:
             chave = (linha['cnpj'], _chave_documento(linha['nr_documento']))
-            atual = lancadas.setdefault(chave, {'cd_ent_serv': None, 'cd_con_pag': None})
+            atual = lancadas.setdefault(
+                chave, {'cd_ent_serv': None, 'cd_con_pag': None, 'lancado_por': []}
+            )
             atual['cd_ent_serv'] = atual['cd_ent_serv'] or linha['cd_ent_serv']
             atual['cd_con_pag'] = atual['cd_con_pag'] or linha['cd_con_pag']
+            quem = (linha.get('cd_usuario') or '').strip().upper()
+            if quem and quem not in atual['lancado_por']:
+                atual['lancado_por'].append(quem)
     return lancadas
 
 
@@ -278,6 +286,90 @@ SQL_OFICINAS_DO_USUARIO = text("""
 SELECT cd_oficina FROM api_prontocardio.contas_pagar_usuarios_oficina
  WHERE usuario_id = :usuario_id
 """)
+
+SQL_LOGIN_MV_DO_USUARIO = text("""
+SELECT cd_usuario_mv FROM api_prontocardio.usuarios_mv WHERE usuario_id = :usuario_id
+""")
+
+SQL_NOTAS_ENVIADAS_PELO_USUARIO = text("""
+SELECT DISTINCT prestador_cnpj, numero_nfse
+  FROM api_prontocardio.contas_pagar_boletos
+ WHERE enviado_por = :usuario_id
+""")
+
+# Regra usuário -> oficinas do MV: a mesma que o LOV de oficina da
+# M_ENTRADA_SERV usa (USUARIOS_OFICINA_FUNCAO, com
+# CONFIG_ACMA.SN_USUARIO_OFICINA_FUNCAO = 'S'). TP_FUNCAO 'SS' é o pacote
+# padrão de abertura de OS, não a designação para lançar NFS.
+SQL_OFICINAS_REGRA_MV = text("""
+SELECT DISTINCT o.cd_oficina AS cd_oficina
+  FROM dbamv.usuarios_oficina_funcao uof
+  JOIN dbamv.oficina o ON o.cd_oficina = uof.cd_oficina
+  JOIN dbamv.setor s
+    ON s.cd_setor = o.cd_setor AND s.cd_multi_empresa = o.cd_multi_empresa
+  JOIN dbamv.config_acma ca
+    ON ca.cd_multi_empresa = o.cd_multi_empresa
+   AND ca.sn_usuario_oficina_funcao = 'S'
+  JOIN dbasgu.usuarios u ON u.cd_usuario = uof.cd_usuario AND u.sn_ativo = 'S'
+ WHERE uof.tp_funcao <> 'SS'
+   AND uof.cd_usuario = :cd_usuario
+""")
+
+
+@dataclass(frozen=True)
+class AcessoNotas:
+    """O que um usuário de setor vê na fila.
+
+    - notas a lançar: as dos fornecedores cuja regra aponta para uma das
+      oficinas dele (regra do MV pelo login MV vinculado + oficinas
+      concedidas no Receita Certa);
+    - histórico (lançadas): só o que ele lançou no MV ou para o que enviou
+      boleto, qualquer que seja a oficina de hoje.
+    """
+
+    oficinas: frozenset[int]
+    login_mv: str | None
+    enviadas: frozenset[tuple[str, str]]
+
+    def ve_pendente(self, cd_oficina: int | None) -> bool:
+        return cd_oficina is not None and cd_oficina in self.oficinas
+
+    def ve_historico(self, cnpj: str, numero: str, mv: dict | None) -> bool:
+        lancado_por = (mv or {}).get('lancado_por') or ()
+        return (
+            (self.login_mv is not None and self.login_mv in lancado_por)
+            or (cnpj, numero) in self.enviadas
+        )
+
+
+def acesso_do_usuario(session: Session, oracle: Session, usuario) -> AcessoNotas | None:
+    """None para o financeiro/gestão (vê tudo)."""
+    if _gestor(usuario):
+        return None
+    oficinas = {
+        int(cd)
+        for cd in session.execute(
+            SQL_OFICINAS_DO_USUARIO, {'usuario_id': usuario.id}
+        ).scalars()
+    }
+    login = session.execute(
+        SQL_LOGIN_MV_DO_USUARIO, {'usuario_id': usuario.id}
+    ).scalar_one_or_none()
+    login = login.strip().upper() if login else None
+    if login:
+        oficinas |= {
+            int(linha['cd_oficina'])
+            for linha in read_payables_rows(
+                oracle, SQL_OFICINAS_REGRA_MV, {'cd_usuario': login}
+            )
+        }
+    enviadas = {
+        (linha['prestador_cnpj'], linha['numero_nfse'])
+        for linha in session.execute(
+            SQL_NOTAS_ENVIADAS_PELO_USUARIO, {'usuario_id': usuario.id}
+        ).mappings().all()
+    }
+    return AcessoNotas(frozenset(oficinas), login, frozenset(enviadas))
 
 
 def _regras(session: Session) -> dict[tuple[str, int], dict]:
@@ -443,6 +535,9 @@ def listar_recebidas(
     ``pronta``: pendente com boleto(s) anexado(s) e sem divergência — os
     títulos que o financeiro pode importar.
     ``cancelada``: cancelada (ou substituída) no ISS e ainda não lançada no MV.
+
+    Usuário de setor: ver ``AcessoNotas``. A oficina exibida é sempre a da
+    regra atual do fornecedor, também nas notas do histórico.
     """
     if not session.execute(SQL_TABELA_NFSE).scalar_one():
         return {
@@ -454,15 +549,7 @@ def listar_recebidas(
     inicio = desde or _inicio_padrao()
     notas = _notas_recebidas(session, inicio)
     regras = _regras(session)
-    gestor = _gestor(usuario)
-    permitidas: set[int] | None = None
-    if not gestor:
-        permitidas = {
-            int(cd)
-            for cd in session.execute(
-                SQL_OFICINAS_DO_USUARIO, {'usuario_id': usuario.id}
-            ).scalars()
-        }
+    acesso = acesso_do_usuario(session, oracle, usuario)
 
     cnpjs = [somente_digitos(n['prestador_cnpj']) for n in notas if n['prestador_cnpj']]
     lancadas = _lancadas_mv(oracle, cnpjs) if cnpjs else {}
@@ -489,7 +576,11 @@ def listar_recebidas(
         situacao_nota = _situacao_na_fila(mv, status, status_regra)
 
         oficina_nota = regra['cd_oficina'] if regra and status_regra == STATUS_DEFINIDA else None
-        if permitidas is not None and oficina_nota not in permitidas:
+        if acesso is not None and not (
+            acesso.ve_historico(cnpj, nota['numero_nfse'], mv)
+            if situacao_nota == 'lancada'
+            else acesso.ve_pendente(oficina_nota)
+        ):
             continue
         resumo_boletos = boletos.get((cnpj, nota['numero_nfse']))
         pronta = (

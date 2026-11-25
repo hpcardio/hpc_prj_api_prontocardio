@@ -362,7 +362,7 @@ def mv_fake(monkeypatch):
         yield Conexao()
 
     monkeypatch.setattr(rota, '_gestor', lambda u: True)
-    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a: dict(NOTA))
+    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a, **k: dict(NOTA))
     monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'NORMAL')
     monkeypatch.setattr(rota, '_vinculo', lambda *a: {'pode_gravar_no_mv': True, 'cd_usuario_mv': 'RH000938'})
     monkeypatch.setattr(rota.mv, 'sessao_mv', sessao)
@@ -386,7 +386,7 @@ def test_endpoint_exige_financeiro(monkeypatch):
 
 def test_endpoint_exige_login_mv(monkeypatch):
     monkeypatch.setattr(rota, '_gestor', lambda u: True)
-    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a: dict(NOTA))
+    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a, **k: dict(NOTA))
     monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'NORMAL')
     monkeypatch.setattr(rota, '_vinculo', lambda *a: {'pode_gravar_no_mv': False})
     with pytest.raises(HTTPException) as erro:
@@ -514,7 +514,7 @@ def test_boleto_no_prazo_nao_mexe_na_observacao():
 
 
 def test_ver_nfse_traz_campos_do_xml(monkeypatch):
-    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a: dict(NOTA))
+    monkeypatch.setattr(rota, '_nota_ou_404', lambda *a, **k: dict(NOTA))
     monkeypatch.setattr(rota, 'status_da_nota', lambda *a: 'NORMAL')
 
     class Sessao:

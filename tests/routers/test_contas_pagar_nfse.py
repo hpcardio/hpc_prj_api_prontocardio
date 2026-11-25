@@ -398,3 +398,84 @@ def test_join_da_situacao_normaliza_cnpj():
     sql = str(rota.SQL_NFSE_RECEBIDAS)
     assert 'LEFT JOIN api_prontocardio.nfse_xml_tomador_situacao s' in sql
     assert "regexp_replace(n.prestador_cnpj, '\\D', '', 'g')" in sql
+
+
+# ------------------------------------------------ usuário de setor x regra do MV
+
+LANCADA_POR = [
+    {**LANCADAS_MV[0], 'cd_usuario': 'rh000938'},
+]
+
+
+def _sessoes_setor(login='RH000938', oficinas_mv=(2,), enviadas=(), lancadas=None):
+    """Fila de um usuário de setor: oficinas da regra do MV pelo login vinculado."""
+    postgres = FakeSession([
+        [True], [True], [NOTA_TI, NOTA_NOVA, NOTA_LANCADA], REGRAS,
+        [],                                   # oficinas concedidas no Receita Certa
+        [login] if login else [],             # login MV vinculado
+        [{'prestador_cnpj': c, 'numero_nfse': n} for c, n in enviadas],
+    ])
+    oracle_respostas = ([[{'cd_oficina': o} for o in oficinas_mv]] if login else []) + [
+        LANCADA_POR if lancadas is None else lancadas, [HOSPITAL],
+    ]
+    return postgres, FakeSession(oracle_respostas)
+
+
+def test_setor_ve_pendentes_pelas_oficinas_da_regra_do_mv():
+    postgres, oracle = _sessoes_setor(oficinas_mv=(2,))
+    resposta = rota.listar_recebidas(
+        _usuario(telas=[rota.TELA_SETOR]), postgres, oracle, situacao='pendente'
+    )
+
+    assert [i['chave'] for i in resposta['itens']] == ['11111111000111-0000123']
+    assert oracle.executions[0][1] == {'cd_usuario': 'RH000938'}
+    assert "tp_funcao <> 'SS'" in oracle.executions[0][0]
+
+
+def test_setor_sem_oficina_na_regra_nao_ve_pendentes():
+    postgres, oracle = _sessoes_setor(oficinas_mv=(9,))
+    resposta = rota.listar_recebidas(
+        _usuario(telas=[rota.TELA_SETOR]), postgres, oracle, situacao='pendente'
+    )
+
+    assert resposta['itens'] == []
+
+
+def test_historico_mostra_so_o_que_o_usuario_lancou_com_a_oficina_atual():
+    # Lançada por ele, mesmo sem a oficina na regra atual (reorganização).
+    postgres, oracle = _sessoes_setor(oficinas_mv=(9,))
+    resposta = rota.listar_recebidas(
+        _usuario(telas=[rota.TELA_SETOR]), postgres, oracle, situacao='lancada'
+    )
+
+    assert [i['chave'] for i in resposta['itens']] == ['33333333000133-55']
+    item = resposta['itens'][0]
+    assert item['ds_oficina'] == 'TECNOLOGIA DA INFORMACAO'  # oficina atual da regra
+    assert item['mv']['lancado_por'] == ['RH000938']
+
+
+def test_historico_nao_mostra_lancada_por_outro_usuario_da_mesma_oficina():
+    postgres, oracle = _sessoes_setor(
+        oficinas_mv=(2,), lancadas=[{**LANCADAS_MV[0], 'cd_usuario': 'RH000111'}]
+    )
+    resposta = rota.listar_recebidas(
+        _usuario(telas=[rota.TELA_SETOR]), postgres, oracle, situacao='lancada'
+    )
+
+    assert resposta['itens'] == []
+
+
+def test_historico_inclui_nota_com_boleto_enviado_pelo_usuario():
+    postgres, oracle = _sessoes_setor(
+        login=None, lancadas=[{**LANCADAS_MV[0], 'cd_usuario': 'RH000111'}],
+        enviadas=[('33333333000133', '55')],
+    )
+    resposta = rota.listar_recebidas(
+        _usuario(telas=[rota.TELA_SETOR]), postgres, oracle, situacao='lancada'
+    )
+
+    assert [i['chave'] for i in resposta['itens']] == ['33333333000133-55']
+
+
+def test_gestor_nao_consulta_regra_do_mv():
+    assert rota.acesso_do_usuario(FakeSession([]), FakeSession([]), _usuario(perfil='ti')) is None

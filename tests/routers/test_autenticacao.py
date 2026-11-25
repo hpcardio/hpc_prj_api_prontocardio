@@ -196,3 +196,35 @@ def test_redefinir_senha_por_email_encerra_a_troca_obrigatoria(
         data={'username': usuario_teste.email, 'password': 'NovaSenha#2026'},
     )
     assert login.status_code == HTTPStatus.OK
+
+
+def test_login_aceita_cpf_com_ou_sem_pontuacao_e_login_mv(cliente, session):
+    from app_prontocardio.models import Usuario  # noqa: PLC0415
+    from app_prontocardio.security import gera_hash_senha  # noqa: PLC0415
+
+    session.add(Usuario(
+        nome='Colaborador Setor', email='rh000938@mv.receitacerta.local',
+        senha=gera_hash_senha('prontocardio'), nome_usuario='RH000938',
+        cpf='52998224725',
+    ))
+    session.commit()
+
+    for login in ('529.982.247-25', '52998224725', 'rh000938', 'RH000938'):
+        resposta = cliente.post(
+            '/autenticacao/token',
+            data={'username': login, 'password': 'prontocardio'},
+        )
+        assert resposta.status_code == HTTPStatus.OK, login
+
+    errado = cliente.post(
+        '/autenticacao/token',
+        data={'username': '529.982.247-26', 'password': 'prontocardio'},
+    )
+    assert errado.status_code == HTTPStatus.UNAUTHORIZED
+
+
+def test_cpf_do_login_so_reconhece_onze_digitos():
+    assert autenticacao._cpf_do_login('529.982.247-25') == '52998224725'
+    assert autenticacao._cpf_do_login('RH000938') is None
+    assert autenticacao._cpf_do_login('1234') is None
+    assert autenticacao._cpf_do_login('ana@x.com') is None
