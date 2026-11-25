@@ -214,6 +214,15 @@ class AgendaMedicaTratativaPaciente:
     )
     valor_novo: Mapped[str | None] = mapped_column(String(40), default=None)
     motivo: Mapped[str | None] = mapped_column(Text, default=None)
+    assumido_por_id: Mapped[int | None] = mapped_column(
+        Integer, default=None
+    )
+    assumido_por_nome: Mapped[str | None] = mapped_column(
+        String(200), default=None
+    )
+    assumido_em: Mapped[datetime | None] = mapped_column(
+        DateTime, default=None
+    )
     concluido_por_id: Mapped[int | None] = mapped_column(
         Integer, default=None
     )

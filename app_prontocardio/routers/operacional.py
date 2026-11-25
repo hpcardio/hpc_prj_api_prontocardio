@@ -36,6 +36,8 @@ STATUS_ASSUNTO = {
     'reagendamento_solicitado': 'REAGENDAMENTO SOLICITADO VIA WHATSAPP',
 }
 INTERVALO_MAXIMO_CONFIRMACOES_DIAS = 31
+SLA_TRATATIVA_ATENCAO_MINUTOS = 120
+SLA_TRATATIVA_ATRASO_MINUTOS = 240
 TELAS_CONFIRMACAO_LEITURA = {
     'agenda_medica_atendente',
     'agenda_medica_admin',
@@ -683,6 +685,31 @@ def registrar_confirmacao_contato(
         ) from exc
 
 
+def _sla_tratativa(
+    item: AgendaMedicaTratativaPaciente,
+    agora: datetime | None = None,
+) -> dict:
+    agora = agora or datetime.now(FUSO_HORARIO_BRASIL).replace(tzinfo=None)
+    inicio = item.criado_em or agora
+    fim = item.concluido_em or agora
+    minutos = max(int((fim - inicio).total_seconds() // 60), 0)
+    if item.status in {'CONCLUIDA', 'CANCELADA'}:
+        nivel, rotulo = 'CONCLUIDA', 'Concluída'
+    elif minutos >= SLA_TRATATIVA_ATRASO_MINUTOS:
+        nivel, rotulo = 'ATRASADA', 'Atrasada'
+    elif minutos >= SLA_TRATATIVA_ATENCAO_MINUTOS:
+        nivel, rotulo = 'ATENCAO', 'Atenção'
+    else:
+        nivel, rotulo = 'NO_PRAZO', 'Dentro do prazo'
+    return {
+        'tempo_aberto_minutos': minutos,
+        'sla_status': nivel,
+        'sla_label': rotulo,
+        'sla_atencao_minutos': SLA_TRATATIVA_ATENCAO_MINUTOS,
+        'sla_atraso_minutos': SLA_TRATATIVA_ATRASO_MINUTOS,
+    }
+
+
 def _tratativa_dict(item: AgendaMedicaTratativaPaciente) -> dict:
     return {
         'id': item.id,
@@ -697,10 +724,15 @@ def _tratativa_dict(item: AgendaMedicaTratativaPaciente) -> dict:
         'motivo': item.motivo,
         'criado_por': item.criado_por_nome,
         'criado_em': item.criado_em.isoformat() if item.criado_em else None,
+        'responsavel': item.assumido_por_nome,
+        'assumido_em': (
+            item.assumido_em.isoformat() if item.assumido_em else None
+        ),
         'concluido_por': item.concluido_por_nome,
         'concluido_em': (
             item.concluido_em.isoformat() if item.concluido_em else None
         ),
+        **_sla_tratativa(item),
     }
 
 
@@ -798,6 +830,12 @@ def atualizar_tratativa_paciente(
                     detail='O horário de destino não está ocupado no SoulMV.',
                 )
     item.status = payload.status
+    if payload.status == 'EM_TRATATIVA' and item.assumido_em is None:
+        item.assumido_por_id = usuario.id
+        item.assumido_por_nome = usuario.nome
+        item.assumido_em = datetime.now(FUSO_HORARIO_BRASIL).replace(
+            tzinfo=None
+        )
     item.cd_it_agenda_destino = payload.cd_it_agenda_destino
     if payload.motivo:
         item.motivo = payload.motivo.strip()
