@@ -11,6 +11,7 @@ Regras puras (sem banco), usadas pela rota ``contas_receber``:
 - a NFS e o recebimento vêm dos vínculos gravados.
 """
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -35,6 +36,31 @@ PENDENCIA = {
 }
 
 
+_NUP = re.compile(r'NUP\D{0,3}(\d[\d.\-/ ]{14,24}\d)', re.IGNORECASE)
+TAMANHO_NUP = 17
+
+
+def nups_da_discriminacao(texto: str | None) -> list[str]:
+    """NUPs (17 dígitos) citados na discriminação da NFS."""
+    nups = []
+    for bruto in _NUP.findall(texto or ''):
+        nup = re.sub(r'\D', '', bruto)
+        if len(nup) == TAMANHO_NUP and nup not in nups:
+            nups.append(nup)
+    return nups
+
+
+def notas_por_nup(notas):
+    """{nup: nota}; com mais de uma nota para o mesmo NUP, vale a mais nova."""
+    resultado = {}
+    for nota in sorted(notas, key=lambda n: n.get('data_emissao') or date.min):
+        for nup in nups_da_discriminacao(nota.get('discriminacao')):
+            resultado[nup] = {
+                k: v for k, v in nota.items() if k != 'discriminacao'
+            }
+    return resultado
+
+
 def dinheiro(valor) -> Decimal:
     return Decimal(valor or 0).quantize(CENTAVO)
 
@@ -47,6 +73,7 @@ class ProcessoPortal:
     valor_liberado: Decimal | None
     data_entrada: date | None = None
     situacao: str | None = None
+    nup_grupo: str | None = None
 
 
 def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
@@ -88,7 +115,7 @@ def _dias(desde: date | None, hoje: date) -> int | None:
     return (hoje - desde).days if desde else None
 
 
-def montar_item(remessa, vinculo, sugestao, hoje):
+def montar_item(remessa, vinculo, sugestao, hoje, notas_por_nup=None):
     """Uma remessa com a situação de cada etapa.
 
     ``vinculo``: dados gravados (protocolo, nfse, recebimentos) ou None.
@@ -106,6 +133,7 @@ def montar_item(remessa, vinculo, sugestao, hoje):
             'valor_liberado': p.valor_liberado,
             'data_protocolo': p.data_entrada,
             'situacao_portal': p.situacao,
+            'nup_grupo': p.nup_grupo,
             'solicitacao_nota_em': None,
             'solicitacao_nota_obs': None,
         }
@@ -120,6 +148,12 @@ def montar_item(remessa, vinculo, sugestao, hoje):
             for p in sugestao['candidatos']
         ]
     nfse = vinculo.get('nfse') if protocolo else None
+    if nfse is None and protocolo and notas_por_nup:
+        # Processo de um grupo (NUP de grupo no portal): a NF do grupo traz
+        # esse NUP na discriminação e vale para todos os processos do grupo.
+        nota = notas_por_nup.get(protocolo.get('nup_grupo') or '')
+        if nota:
+            nfse = {**nota, 'origem': 'nup_grupo'}
     recebimentos = (vinculo.get('recebimentos') or []) if nfse else []
 
     fechamento = remessa.get('dt_fechamento')

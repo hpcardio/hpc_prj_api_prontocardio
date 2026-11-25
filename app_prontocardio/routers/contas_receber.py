@@ -34,6 +34,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     casar_portal,
     dinheiro,
     montar_item,
+    notas_por_nup,
     ratear_nfs,
     resumo_funil,
 )
@@ -161,7 +162,8 @@ SQL_PORTAL = {
     CD_CONVENIO_ISSEC: text(f"""
 SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liberado,
        {_entrada_portal('processos')} AS data_entrada,
-       {_situacao_portal('processos')} AS situacao
+       {_situacao_portal('processos')} AS situacao,
+       to_jsonb(processos) ->> 'nup_grupo' AS nup_grupo
   FROM raw_issec_portal.processos
  WHERE processo IS NOT NULL AND mes_producao IS NOT NULL
  ORDER BY processo, extraido_em DESC
@@ -175,7 +177,7 @@ SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
        COALESCE(pt.valor_cobrado, p.valor_cobrado) AS valor_cobrado,
        COALESCE(pt.valor_liberado, p.valor_liberado) AS valor_liberado,
        COALESCE(p.data_protocolo, pt.data_entrada) AS data_protocolo,
-       pt.situacao AS situacao_portal,
+       pt.situacao AS situacao_portal, pt.nup_grupo,
        p.solicitacao_nota_em, p.solicitacao_nota_obs,
        n.numero_nfse, n.prestador_cnpj, n.data_emissao, n.valor AS valor_nfse,
        n.origem AS origem_nfse, x.valor_liquido AS valor_liquido_nfse
@@ -194,7 +196,8 @@ SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
   LEFT JOIN LATERAL (
     SELECT ip.valor_cobrado, ip.valor_liberado,
            {_entrada_portal('ip')} AS data_entrada,
-           {_situacao_portal('ip')} AS situacao
+           {_situacao_portal('ip')} AS situacao,
+           to_jsonb(ip) ->> 'nup_grupo' AS nup_grupo
       FROM raw_issec_portal.processos ip
      WHERE ip.processo = p.numero
      ORDER BY ip.extraido_em DESC
@@ -225,10 +228,50 @@ def processos_portal(postgres) -> dict[int, list[ProcessoPortal]]:
                 ),
                 data_entrada=_como_data(linha['data_entrada']),
                 situacao=linha['situacao'],
+                nup_grupo=linha['nup_grupo'],
             )
             for linha in postgres.execute(sql).mappings().all()
         ]
     return resultado
+
+
+# NFS emitidas para o convênio (ISS Fortaleza), para achar a NF de grupo pelo
+# NUP citado na discriminação. Notas canceladas ficam de fora.
+SQL_NFSE_CONVENIO = text("""
+SELECT DISTINCT ON (prestador_cnpj, numero_nfse)
+       numero_nfse, prestador_cnpj, discriminacao, valor_servicos,
+       NULLIF(valor_liquido_nfse, '') AS valor_liquido_nfse, data_hora
+  FROM api_prontocardio.nfse_xml
+ WHERE tomador_cnpj = :tomador
+   AND NULLIF(cancelamento_codigo, '') IS NULL
+ ORDER BY prestador_cnpj, numero_nfse, data_hora DESC
+""")
+# CNPJ do tomador das NFS de cada convênio (ISSEC: o fundo FASSEC).
+TOMADOR_CONVENIO = {CD_CONVENIO_ISSEC: '30974559000183'}
+
+
+def notas_de_grupo(postgres) -> dict[str, dict]:
+    notas = []
+    for tomador in TOMADOR_CONVENIO.values():
+        for linha in postgres.execute(
+            SQL_NFSE_CONVENIO, {'tomador': tomador}
+        ).mappings():
+            emissao = linha['data_hora']
+            if isinstance(emissao, datetime):
+                emissao = emissao.astimezone(FUSO_HOSPITAL).date()
+            notas.append({
+                'numero': linha['numero_nfse'],
+                'prestador_cnpj': linha['prestador_cnpj'],
+                'data_emissao': emissao,
+                'valor': dinheiro(linha['valor_servicos']),
+                'valor_liquido': (
+                    dinheiro(linha['valor_liquido_nfse'])
+                    if linha['valor_liquido_nfse'] is not None
+                    else None
+                ),
+                'discriminacao': linha['discriminacao'],
+            })
+    return notas_por_nup(notas)
 
 
 def vinculos_gravados(postgres) -> dict[int, dict]:
@@ -277,6 +320,7 @@ def vinculos_gravados(postgres) -> dict[int, dict]:
                 'valor_liberado': linha['valor_liberado'],
                 'data_protocolo': _como_data(linha['data_protocolo']),
                 'situacao_portal': linha['situacao_portal'],
+                'nup_grupo': linha['nup_grupo'],
                 'solicitacao_nota_em': linha['solicitacao_nota_em'],
                 'solicitacao_nota_obs': linha['solicitacao_nota_obs'],
             },
@@ -310,7 +354,7 @@ def _competencia(valor: str | None, campo: str) -> date | None:
         ) from exc
 
 
-def montar_fluxo(remessas, portal, vinculos, hoje):
+def montar_fluxo(remessas, portal, vinculos, hoje, notas_grupo=None):
     """Todos os itens do fluxo (sem filtro)."""
     numeros_vinculados = {
         (v['protocolo']['numero']) for v in vinculos.values()
@@ -331,6 +375,7 @@ def montar_fluxo(remessas, portal, vinculos, hoje):
             vinculos.get(r['cd_remessa']),
             sugestoes.get(r['cd_remessa']),
             hoje,
+            notas_grupo,
         )
         for r in remessas
     ]
@@ -448,6 +493,7 @@ def fluxo(
         processos_portal(postgres),
         vinculos_gravados(postgres),
         _hoje(),
+        notas_de_grupo(postgres),
     )
     filtrados = filtrar(
         todos,
