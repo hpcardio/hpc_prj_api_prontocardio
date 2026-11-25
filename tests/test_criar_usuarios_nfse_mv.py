@@ -35,7 +35,7 @@ def test_cria_usuario_novo_com_login_mv_cpf_tela_e_vinculo():
     acao, = script.planejar(usuarios, [])
 
     assert acao.tipo == 'criar'
-    assert acao.email == 'rh000938@mv.receitacerta.local'
+    assert acao.email == 'rh000938@sem-email.hospitalprontocardio.com.br'
     assert acao.cpf == '52998224725'
     assert acao.telas == ['contas_pagar_nfse_setor']
     assert acao.vincular is True
@@ -86,3 +86,13 @@ def test_conta_de_sistema_do_mv_nao_vira_usuario():
     usuarios = script.usuarios_do_mv([_linha('DBAMV', 'DBAMV', 'TI'), _linha('RH000938', 'ANA', 'TI')])
 
     assert [u.login for u in usuarios] == ['RH000938']
+
+
+def test_email_gerado_passa_na_validacao_da_listagem_de_usuarios():
+    # A Gestão de acessos valida o e-mail de cada usuário (UserPublic/EmailStr).
+    from app_prontocardio.schema import UserPublic  # noqa: PLC0415
+
+    usuarios = script.usuarios_do_mv([_linha('RH000938', 'ANA SILVA', 'TI')])
+    acao, = script.planejar(usuarios, [])
+    UserPublic(id=1, nome=acao.nome, email=acao.email, nome_usuario='RH000938',
+               perfil='usuario', ativo=True, telas_permitidas=acao.telas)
