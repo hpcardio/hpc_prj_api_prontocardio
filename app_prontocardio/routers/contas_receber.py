@@ -28,6 +28,8 @@ from app_prontocardio.services.contas_receber_fluxo import (
     CONCLUIDO,
     ETAPAS,
     ProcessoPortal,
+    aliquotas_por_convenio,
+    aplicar_estimativa,
     casar_portal,
     dinheiro,
     montar_item,
@@ -321,7 +323,7 @@ def montar_fluxo(remessas, portal, vinculos, hoje):
                 numeros_vinculados,
             )
         )
-    return [
+    itens = [
         montar_item(
             r,
             vinculos.get(r['cd_remessa']),
@@ -330,6 +332,7 @@ def montar_fluxo(remessas, portal, vinculos, hoje):
         )
         for r in remessas
     ]
+    return aplicar_estimativa(itens, aliquotas_por_convenio(itens))
 
 
 def _bate_busca(item, termo: str) -> bool:

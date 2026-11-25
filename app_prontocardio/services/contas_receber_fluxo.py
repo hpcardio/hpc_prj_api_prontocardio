@@ -11,7 +11,7 @@ Regras puras (sem banco), usadas pela rota ``contas_receber``:
 - a NFS e o recebimento vêm dos vínculos gravados.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -187,6 +187,56 @@ def montar_item(remessa, vinculo, sugestao, hoje):
             protocolo and protocolo.get('solicitacao_nota_em')
         ),
     }
+
+
+# Retenção estimada: alíquota (valor da NF - líquido) / valor mais frequente
+# nas NFs já vinculadas do convênio. Só vale com amostra e consenso suficientes
+# (no ISSEC, 433 de 440 NFs retiveram exatamente 4,20%).
+MINIMO_NFS_ALIQUOTA = 5
+CONSENSO_ALIQUOTA = Decimal('0.8')
+
+
+def aliquotas_por_convenio(itens):
+    amostras = defaultdict(list)
+    for item in itens:
+        nf = item.get('nfse') or {}
+        valor, liquido = nf.get('valor'), nf.get('valor_liquido')
+        if valor and liquido is not None and valor > 0:
+            amostras[item['cd_convenio']].append(
+                ((valor - liquido) / valor * 100).quantize(CENTAVO)
+            )
+    aliquotas = {}
+    for convenio, taxas in amostras.items():
+        if len(taxas) < MINIMO_NFS_ALIQUOTA:
+            continue
+        taxa, vezes = Counter(taxas).most_common(1)[0]
+        if Decimal(vezes) / len(taxas) >= CONSENSO_ALIQUOTA:
+            aliquotas[convenio] = taxa
+    return aliquotas
+
+
+def aplicar_estimativa(itens, aliquotas):
+    """Retenções e líquido estimados para remessas ainda sem NF no ISS.
+
+    Base: valor liberado no portal do convênio ou, sem ele, o valor bruto.
+    """
+    for item in itens:
+        nf = item.get('nfse') or {}
+        aliquota = aliquotas.get(item['cd_convenio'])
+        if nf.get('valor_liquido') is not None or aliquota is None:
+            item['estimativa'] = None
+            continue
+        liberado = (item.get('protocolo') or {}).get('valor_liberado')
+        base = dinheiro(liberado) if liberado is not None else item['valor']
+        retencoes = (base * aliquota / 100).quantize(CENTAVO)
+        item['estimativa'] = {
+            'aliquota': aliquota,
+            'base': base,
+            'origem_base': 'liberado' if liberado is not None else 'bruto',
+            'retencoes': retencoes,
+            'liquido': base - retencoes,
+        }
+    return itens
 
 
 def resumo_funil(itens):
