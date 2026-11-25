@@ -30,9 +30,11 @@ from app_prontocardio.services.contas_receber_fluxo import (
     ProcessoPortal,
     aliquotas_por_convenio,
     aplicar_estimativa,
+    bases_das_remessas,
     casar_portal,
     dinheiro,
     montar_item,
+    ratear_nfs,
     resumo_funil,
 )
 
@@ -332,7 +334,9 @@ def montar_fluxo(remessas, portal, vinculos, hoje):
         )
         for r in remessas
     ]
-    return aplicar_estimativa(itens, aliquotas_por_convenio(itens))
+    bases = bases_das_remessas(itens)
+    ratear_nfs(itens, bases)
+    return aplicar_estimativa(itens, aliquotas_por_convenio(itens), bases)
 
 
 def _bate_busca(item, termo: str) -> bool:
