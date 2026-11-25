@@ -11,6 +11,12 @@ services:
       FRONTEND_PASSWORD_RESET_URL: ${FRONTEND_PASSWORD_RESET_URL:?configure a URL publica de redefinicao de senha}
       EXPECTED_POSTGRES_HOST: ${EXPECTED_POSTGRES_HOST:?configure o host oficial}
       EXPECTED_POSTGRES_DATABASE: ${EXPECTED_POSTGRES_DATABASE:?configure o banco oficial}
+      # Login MV (CAS + proxy Oracle) do Receita Certa. Sem elas a API sobe, mas
+      # o "Entrar com login MV" falha ("URL de retorno do CAS não autorizada") e
+      # nada é gravado no MV com o login do usuário (25/11/2026). Falhar no deploy.
+      MV_CAS_SERVICE_URL: ${MV_CAS_SERVICE_URL:?configure a URL de retorno do login MV (CAS), igual a do frontend}
+      MV_PROXY_USER: ${MV_PROXY_USER:-RC_PROXY}
+      MV_PROXY_PASSWORD: ${MV_PROXY_PASSWORD:?configure a senha do usuario proxy Oracle do login MV}
     expose:
       - "8000"
     extra_hosts:
