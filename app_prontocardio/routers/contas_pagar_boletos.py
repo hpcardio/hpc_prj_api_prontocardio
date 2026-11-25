@@ -23,17 +23,17 @@ from sqlalchemy.exc import IntegrityError
 
 from app_prontocardio.routers.contas_pagar_nfse import (
     FUSO_HOSPITAL,
+    MESES_HISTORICO_SETOR,
+    SQL_LANCAMENTOS_ENT_SERV_DO_FORNECEDOR,
     SQL_TABELA_SITUACAO,
     AcessoFila,
     SessionOracle,
     SessionPostgres,
-    _chave_documento,
     _decimal,
     _empresas_mv,
     _gestor,
-    _lancadas_mv,
     _regras,
-    acesso_do_usuario,
+    escopo_da_fila,
     nfse_cancelada,
     status_nfse,
 )
@@ -53,11 +53,15 @@ from app_prontocardio.services.nfse_pdf_fortaleza import (
     PdfIndisponivel,
     baixar_pdf_oficial,
 )
+from app_prontocardio.services.nfse_setor_escopo import (
+    lancadores_por_fornecedor,
+)
 from app_prontocardio.services.payables_boleto import (
     BoletoInvalido,
     ler_boleto_pdf,
     ler_linha_digitavel,
 )
+from app_prontocardio.services.payables_mv import read_payables_rows
 from app_prontocardio.services.payables_oficinas import (
     STATUS_DEFINIDA,
     somente_digitos,
@@ -169,11 +173,11 @@ def conferir_prazo(vencimento: date, envio: datetime, justificativa: str | None)
     return prazo, fora, texto if fora else None
 
 
-def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str, historico_ok: bool = False) -> dict:
-    """Carrega a NFS-e e confere se o usuário pode atuar nela (setor da oficina ou financeiro).
+def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str) -> dict:
+    """Carrega a NFS-e e confere se o usuário pode atuar nela (oficina dele ou financeiro).
 
-    ``historico_ok``: consultas (sem alteração) também valem para as notas do
-    histórico do usuário (lançadas por ele no MV ou com boleto enviado por ele).
+    A oficina do usuário segue o mesmo escopo da fila (``escopo_da_fila``):
+    regra do fornecedor ou lançamento recente por colega da oficina.
     """
     nota = session.execute(SQL_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().first()
     if nota is None:
@@ -182,12 +186,16 @@ def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str, historico_ok:
     cd_empresa = int(empresa['cd_multi_empresa']) if empresa else None
     regra = _regras(session).get((cnpj, cd_empresa)) if cd_empresa is not None else None
     cd_oficina = regra['cd_oficina'] if regra and regra['status'] == STATUS_DEFINIDA else None
-    acesso = acesso_do_usuario(session, oracle, usuario)
-    if acesso is not None and not acesso.ve_pendente(cd_oficina) and not (
-        historico_ok
-        and acesso.ve_historico(cnpj, numero, _lancadas_mv(oracle, [cnpj]).get((cnpj, _chave_documento(numero))))
-    ):
-        raise HTTPException(HTTPStatus.FORBIDDEN, 'Esta NFS-e não é de uma oficina do seu setor.')
+    if not _gestor(usuario):
+        escopo = escopo_da_fila(session, oracle, usuario)
+        lancamentos = read_payables_rows(
+            oracle, SQL_LANCAMENTOS_ENT_SERV_DO_FORNECEDOR,
+            {'meses': MESES_HISTORICO_SETOR, 'cnpj': cnpj},
+        )
+        lancadores = lancadores_por_fornecedor([dict(linha) for linha in lancamentos]).get(cnpj, ())
+        cd_oficina = escopo.oficina_do_fornecedor(cd_oficina, lancadores)
+        if cd_oficina is None:
+            raise HTTPException(HTTPStatus.FORBIDDEN, 'Esta NFS-e não é de uma oficina do seu setor.')
     return {**dict(nota), 'cd_multi_empresa': cd_empresa, 'cd_oficina': cd_oficina}
 
 
@@ -219,7 +227,7 @@ def _serializar(linha) -> dict:
 def listar_boletos(cnpj: str, numero: str, usuario: AcessoFila,
                    session: SessionPostgres, oracle: SessionOracle):
     cnpj = somente_digitos(cnpj)
-    nota = _nota_ou_404(session, oracle, usuario, cnpj, numero, historico_ok=True)
+    nota = _nota_ou_404(session, oracle, usuario, cnpj, numero)
     boletos = [_serializar(b) for b in session.execute(
         SQL_BOLETOS_DA_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().all()]
     return {'nota': nota, 'boletos': boletos, 'resumo': resumo_boletos(boletos, nota),
@@ -335,7 +343,7 @@ SELECT data_hora, {', '.join(CAMPOS_NFSE)}, xml_campos, xml_documento, origem_nf
 
 def _nfse_completa(session, oracle, usuario, cnpj: str, numero: str) -> dict:
     cnpj = somente_digitos(cnpj)
-    _nota_ou_404(session, oracle, usuario, cnpj, numero, historico_ok=True)
+    _nota_ou_404(session, oracle, usuario, cnpj, numero)
     return dict(session.execute(SQL_NFSE_COMPLETA, {'cnpj': cnpj, 'numero': numero}).mappings().first())
 
 
@@ -439,7 +447,7 @@ def baixar_boleto(boleto_id: int, usuario: AcessoFila, session: SessionPostgres,
     ).mappings().first()
     if linha is None:
         raise HTTPException(HTTPStatus.NOT_FOUND, 'Boleto não encontrado.')
-    _nota_ou_404(session, oracle, usuario, linha['prestador_cnpj'], linha['numero_nfse'], historico_ok=True)
+    _nota_ou_404(session, oracle, usuario, linha['prestador_cnpj'], linha['numero_nfse'])
     nome = linha['nome_arquivo'].replace('"', '')
     return Response(
         bytes(linha['arquivo']),
