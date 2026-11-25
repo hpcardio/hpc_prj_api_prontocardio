@@ -155,6 +155,10 @@ class Usuario:
     nome_usuario: Mapped[str | None] = mapped_column(
         String(80), unique=True, nullable=True, default=None
     )
+    # Login também pelo CPF (só dígitos); usuários criados a partir do MV.
+    cpf: Mapped[str | None] = mapped_column(
+        String(11), unique=True, nullable=True, default=None
+    )
     troca_senha_obrigatoria: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text('false')
     )

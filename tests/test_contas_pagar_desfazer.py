@@ -184,7 +184,7 @@ def mv(monkeypatch):
         yield Conexao()
 
     monkeypatch.setattr(rota, '_gestor', lambda u: True)
-    monkeypatch.setattr(rota.boletos_rota, '_nota_ou_404', lambda *a: {'cd_multi_empresa': 2, 'numero_nfse': '93125822'})
+    monkeypatch.setattr(rota.boletos_rota, '_nota_ou_404', lambda *a, **k: {'cd_multi_empresa': 2, 'numero_nfse': '93125822'})
     monkeypatch.setattr(rota.boletos_rota, '_importacao_registrada', lambda *a: dict(REGISTRO))
     monkeypatch.setattr(rota.boletos_rota, '_sessao', sessao)
     monkeypatch.setattr(rota, '_vinculo', lambda *a: {'pode_gravar_no_mv': True, 'cd_usuario_mv': 'RH000938'})

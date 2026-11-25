@@ -23,15 +23,17 @@ from sqlalchemy.exc import IntegrityError
 
 from app_prontocardio.routers.contas_pagar_nfse import (
     FUSO_HOSPITAL,
-    SQL_OFICINAS_DO_USUARIO,
     SQL_TABELA_SITUACAO,
     AcessoFila,
     SessionOracle,
     SessionPostgres,
+    _chave_documento,
     _decimal,
     _empresas_mv,
     _gestor,
+    _lancadas_mv,
     _regras,
+    acesso_do_usuario,
     nfse_cancelada,
     status_nfse,
 )
@@ -167,8 +169,12 @@ def conferir_prazo(vencimento: date, envio: datetime, justificativa: str | None)
     return prazo, fora, texto if fora else None
 
 
-def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str) -> dict:
-    """Carrega a NFS-e e confere se o usuário pode atuar nela (setor da oficina ou financeiro)."""
+def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str, historico_ok: bool = False) -> dict:
+    """Carrega a NFS-e e confere se o usuário pode atuar nela (setor da oficina ou financeiro).
+
+    ``historico_ok``: consultas (sem alteração) também valem para as notas do
+    histórico do usuário (lançadas por ele no MV ou com boleto enviado por ele).
+    """
     nota = session.execute(SQL_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().first()
     if nota is None:
         raise HTTPException(HTTPStatus.NOT_FOUND, 'NFS-e recebida não encontrada.')
@@ -176,14 +182,12 @@ def _nota_ou_404(session, oracle, usuario, cnpj: str, numero: str) -> dict:
     cd_empresa = int(empresa['cd_multi_empresa']) if empresa else None
     regra = _regras(session).get((cnpj, cd_empresa)) if cd_empresa is not None else None
     cd_oficina = regra['cd_oficina'] if regra and regra['status'] == STATUS_DEFINIDA else None
-    if not _gestor(usuario):
-        permitidas = {
-            int(cd) for cd in session.execute(
-                SQL_OFICINAS_DO_USUARIO, {'usuario_id': usuario.id}
-            ).scalars()
-        }
-        if cd_oficina is None or cd_oficina not in permitidas:
-            raise HTTPException(HTTPStatus.FORBIDDEN, 'Esta NFS-e não é de uma oficina do seu setor.')
+    acesso = acesso_do_usuario(session, oracle, usuario)
+    if acesso is not None and not acesso.ve_pendente(cd_oficina) and not (
+        historico_ok
+        and acesso.ve_historico(cnpj, numero, _lancadas_mv(oracle, [cnpj]).get((cnpj, _chave_documento(numero))))
+    ):
+        raise HTTPException(HTTPStatus.FORBIDDEN, 'Esta NFS-e não é de uma oficina do seu setor.')
     return {**dict(nota), 'cd_multi_empresa': cd_empresa, 'cd_oficina': cd_oficina}
 
 
@@ -215,7 +219,7 @@ def _serializar(linha) -> dict:
 def listar_boletos(cnpj: str, numero: str, usuario: AcessoFila,
                    session: SessionPostgres, oracle: SessionOracle):
     cnpj = somente_digitos(cnpj)
-    nota = _nota_ou_404(session, oracle, usuario, cnpj, numero)
+    nota = _nota_ou_404(session, oracle, usuario, cnpj, numero, historico_ok=True)
     boletos = [_serializar(b) for b in session.execute(
         SQL_BOLETOS_DA_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().all()]
     return {'nota': nota, 'boletos': boletos, 'resumo': resumo_boletos(boletos, nota),
@@ -331,7 +335,7 @@ SELECT data_hora, {', '.join(CAMPOS_NFSE)}, xml_campos, xml_documento, origem_nf
 
 def _nfse_completa(session, oracle, usuario, cnpj: str, numero: str) -> dict:
     cnpj = somente_digitos(cnpj)
-    _nota_ou_404(session, oracle, usuario, cnpj, numero)
+    _nota_ou_404(session, oracle, usuario, cnpj, numero, historico_ok=True)
     return dict(session.execute(SQL_NFSE_COMPLETA, {'cnpj': cnpj, 'numero': numero}).mappings().first())
 
 
@@ -435,7 +439,7 @@ def baixar_boleto(boleto_id: int, usuario: AcessoFila, session: SessionPostgres,
     ).mappings().first()
     if linha is None:
         raise HTTPException(HTTPStatus.NOT_FOUND, 'Boleto não encontrado.')
-    _nota_ou_404(session, oracle, usuario, linha['prestador_cnpj'], linha['numero_nfse'])
+    _nota_ou_404(session, oracle, usuario, linha['prestador_cnpj'], linha['numero_nfse'], historico_ok=True)
     nome = linha['nome_arquivo'].replace('"', '')
     return Response(
         bytes(linha['arquivo']),
