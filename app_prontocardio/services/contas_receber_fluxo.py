@@ -215,26 +215,114 @@ def aliquotas_por_convenio(itens):
     return aliquotas
 
 
-def aplicar_estimativa(itens, aliquotas):
+def bases_das_remessas(itens):
+    """{cd_remessa: (base, origem)}: quanto do liberado cabe a cada remessa.
+
+    O portal libera por processo, e um processo pode reunir várias remessas
+    (ex.: R$ 42.450,00 para 12 remessas). A base aplica à remessa a proporção
+    liberada do processo: valor da remessa x (liberado / cobrado). Com uma
+    remessa só, é o próprio liberado. Sem portal, a base é o valor bruto.
+    """
+    bases = {}
+    for item in itens:
+        protocolo = item.get('protocolo') or {}
+        liberado = protocolo.get('valor_liberado')
+        cobrado = protocolo.get('valor_cobrado')
+        if liberado is None or not cobrado or dinheiro(cobrado) <= 0:
+            bases[item['cd_remessa']] = (item['valor'], 'bruto')
+            continue
+        liberado, cobrado = dinheiro(liberado), dinheiro(cobrado)
+        if abs(item['valor'] - cobrado) <= CENTAVO:
+            bases[item['cd_remessa']] = (liberado, 'liberado')
+        else:
+            base = (item['valor'] * liberado / cobrado).quantize(CENTAVO)
+            bases[item['cd_remessa']] = (base, 'liberado_proporcional')
+    return bases
+
+
+def aplicar_estimativa(itens, aliquotas, bases=None):
     """Retenções e líquido estimados para remessas ainda sem NF no ISS.
 
-    Base: valor liberado no portal do convênio ou, sem ele, o valor bruto.
+    Base: parte do valor liberado no portal que cabe à remessa ou, sem ele,
+    o valor bruto (``bases_das_remessas``).
     """
+    bases = bases if bases is not None else bases_das_remessas(itens)
     for item in itens:
         nf = item.get('nfse') or {}
         aliquota = aliquotas.get(item['cd_convenio'])
         if nf.get('valor_liquido') is not None or aliquota is None:
             item['estimativa'] = None
             continue
-        liberado = (item.get('protocolo') or {}).get('valor_liberado')
-        base = dinheiro(liberado) if liberado is not None else item['valor']
+        base, origem = bases[item['cd_remessa']]
         retencoes = (base * aliquota / 100).quantize(CENTAVO)
         item['estimativa'] = {
             'aliquota': aliquota,
             'base': base,
-            'origem_base': 'liberado' if liberado is not None else 'bruto',
+            'origem_base': origem,
             'retencoes': retencoes,
             'liquido': base - retencoes,
+        }
+    return itens
+
+
+def _chave_nf(nf):
+    return (str(nf.get('numero')), nf.get('prestador_cnpj') or '')
+
+
+def ratear_nfs(itens, bases=None):
+    """Parte da NF que cabe a cada remessa (``nf_rateio``).
+
+    NF exclusiva da remessa: valores da própria NF. NF compartilhada (NF de
+    grupo, ex.: ISSEC com NUP de grupo cobrindo vários processos): a parte da
+    remessa é o valor liberado no portal ou, sem ele, o bruto da remessa; as
+    retenções aplicam a alíquota real da NF ((valor - líquido) / valor) sobre
+    essa parte. Mesmo critério da planilha DEMO.
+    """
+    bases = bases if bases is not None else bases_das_remessas(itens)
+    remessas_por_nf = Counter(
+        _chave_nf(i['nfse'])
+        for i in itens
+        if (i.get('nfse') or {}).get('numero')
+    )
+    for item in itens:
+        nf = item.get('nfse') or {}
+        if not nf.get('numero'):
+            item['nf_rateio'] = None
+            continue
+        valor, liquido = nf.get('valor'), nf.get('valor_liquido')
+        quantidade = remessas_por_nf[_chave_nf(nf)]
+        aliquota = (
+            ((valor - liquido) / valor * 100).quantize(CENTAVO)
+            if valor and liquido is not None and valor > 0
+            else None
+        )
+        compartilhada = quantidade > 1 or (
+            valor is not None and valor > item['valor'] + CENTAVO
+        )
+        if not compartilhada:
+            item['nf_rateio'] = {
+                'compartilhada': False,
+                'valor': valor,
+                'retencoes': valor - liquido if aliquota is not None else None,
+                'liquido': liquido,
+                'aliquota': aliquota,
+            }
+            continue
+        base, origem = bases[item['cd_remessa']]
+        retencoes = (
+            (base * aliquota / 100).quantize(CENTAVO)
+            if aliquota is not None
+            else None
+        )
+        item['nf_rateio'] = {
+            'compartilhada': True,
+            'remessas_na_nf': quantidade,
+            'valor_total_nf': valor,
+            'origem_base': origem,
+            'valor': base,
+            'retencoes': retencoes,
+            'liquido': base - retencoes if retencoes is not None else None,
+            'aliquota': aliquota,
         }
     return itens
 

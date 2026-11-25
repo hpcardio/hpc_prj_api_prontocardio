@@ -14,8 +14,10 @@ from app_prontocardio.services.contas_receber_fluxo import (
     ProcessoPortal,
     aliquotas_por_convenio,
     aplicar_estimativa,
+    bases_das_remessas,
     casar_portal,
     montar_item,
+    ratear_nfs,
     resumo_funil,
 )
 
@@ -310,7 +312,10 @@ def test_retencao_estimada_pela_aliquota_do_convenio():
         'cd_remessa': 200,
         'cd_convenio': 46,
         'valor': Decimal('1968.18'),
-        'protocolo': {'valor_liberado': Decimal('1328.30')},
+        'protocolo': {
+            'valor_cobrado': Decimal('1968.18'),
+            'valor_liberado': Decimal('1328.30'),
+        },
         'nfse': None,
     }
     sem_nf_bruto = {
@@ -353,3 +358,96 @@ def test_aliquota_exige_amostra_e_consenso():
     ]
     assert aliquotas_por_convenio(poucos) == {}
     assert aliquotas_por_convenio(dividido) == {}
+
+
+def test_nf_de_grupo_e_rateada_pelo_liberado_de_cada_remessa():
+    nf_grupo = {
+        'numero': '30083',
+        'prestador_cnpj': '08711085000128',
+        'valor': Decimal('572156.82'),
+        'valor_liquido': Decimal('548126.24'),
+    }
+    remessa = {
+        'cd_remessa': 20157,
+        'cd_convenio': 46,
+        'valor': Decimal('2118.58'),
+        'protocolo': {'valor_liberado': Decimal('2118.58')},
+        'nfse': dict(nf_grupo),
+    }
+    outra = {
+        'cd_remessa': 20158,
+        'cd_convenio': 46,
+        'valor': Decimal('5000.00'),
+        'protocolo': None,
+        'nfse': dict(nf_grupo),
+    }
+    exclusiva = {
+        'cd_remessa': 16402,
+        'cd_convenio': 46,
+        'valor': Decimal('7190.00'),
+        'protocolo': None,
+        'nfse': {
+            'numero': '25618',
+            'prestador_cnpj': '08711085000128',
+            'valor': Decimal('7190.00'),
+            'valor_liquido': Decimal('6888.02'),
+        },
+    }
+
+    ratear_nfs([remessa, outra, exclusiva])
+
+    rateio = remessa['nf_rateio']
+    assert rateio['compartilhada'] is True
+    assert rateio['remessas_na_nf'] == 2
+    assert rateio['aliquota'] == Decimal('4.20')
+    assert rateio['valor'] == Decimal('2118.58')
+    assert rateio['retencoes'] == Decimal('88.98')
+    assert rateio['liquido'] == Decimal('2029.60')
+    assert outra['nf_rateio']['origem_base'] == 'bruto'
+    assert outra['nf_rateio']['valor'] == Decimal('5000.00')
+    assert exclusiva['nf_rateio'] == {
+        'compartilhada': False,
+        'valor': Decimal('7190.00'),
+        'retencoes': Decimal('301.98'),
+        'liquido': Decimal('6888.02'),
+        'aliquota': Decimal('4.20'),
+    }
+
+
+def test_nf_maior_que_a_remessa_tambem_e_rateada():
+    item = {
+        'cd_remessa': 1,
+        'cd_convenio': 46,
+        'valor': Decimal('100.00'),
+        'protocolo': None,
+        'nfse': {'numero': '1', 'valor': Decimal('900.00'), 'valor_liquido': None},
+    }
+    ratear_nfs([item])
+    assert item['nf_rateio']['compartilhada'] is True
+    assert item['nf_rateio']['valor'] == Decimal('100.00')
+    assert item['nf_rateio']['retencoes'] is None
+
+
+def test_liberado_do_processo_e_dividido_entre_as_remessas_do_protocolo():
+    protocolo = {
+        'numero': '2600003000',
+        'valor_cobrado': Decimal('1000.00'),
+        'valor_liberado': Decimal('900.00'),
+    }
+    itens = [
+        {
+            'cd_remessa': cd,
+            'cd_convenio': 46,
+            'valor': Decimal(valor),
+            'protocolo': dict(protocolo),
+            'nfse': None,
+        }
+        for cd, valor in ((1, '600.00'), (2, '400.00'))
+    ]
+
+    bases = bases_das_remessas(itens)
+
+    assert bases[1] == (Decimal('540.00'), 'liberado_proporcional')
+    assert bases[2] == (Decimal('360.00'), 'liberado_proporcional')
+    aplicar_estimativa(itens, {46: Decimal('4.20')}, bases)
+    assert itens[0]['estimativa']['retencoes'] == Decimal('22.68')
