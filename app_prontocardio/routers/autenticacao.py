@@ -9,7 +9,7 @@ from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import column, func, or_, select, table, update
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_postgres
@@ -57,7 +57,29 @@ def _usuario_por_login(session: Session, login: str) -> Usuario | None:
     cpf = _cpf_do_login(login.strip())
     if cpf:
         condicoes.append(Usuario.cpf == cpf)
-    return session.scalar(select(Usuario).where(or_(*condicoes)))
+    usuario = session.scalar(select(Usuario).where(or_(*condicoes)))
+    if usuario is None and '@' not in login_normalizado and not cpf:
+        usuario = _usuario_pelo_login_mv(session, login_normalizado)
+    return usuario
+
+
+def _usuario_pelo_login_mv(session: Session, login: str) -> Usuario | None:
+    """Usuário antigo (nome de usuário próprio) com login MV vinculado."""
+    vinculos = table(
+        'usuarios_mv',
+        column('usuario_id'),
+        column('cd_usuario_mv'),
+        schema=Usuario.__table__.schema,
+    )
+    return session.scalar(
+        select(Usuario).where(
+            Usuario.id.in_(
+                select(vinculos.c.usuario_id).where(
+                    func.lower(vinculos.c.cd_usuario_mv) == login
+                )
+            )
+        )
+    )
 
 
 @router.post('/token', status_code=HTTPStatus.OK, response_model=Token)
