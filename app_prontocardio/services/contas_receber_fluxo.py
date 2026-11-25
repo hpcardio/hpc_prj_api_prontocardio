@@ -11,6 +11,7 @@ Regras puras (sem banco), usadas pela rota ``contas_receber``:
 - a NFS e o recebimento vêm dos vínculos gravados.
 """
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -35,6 +36,31 @@ PENDENCIA = {
 }
 
 
+_NUP = re.compile(r'NUP\D{0,3}(\d[\d.\-/ ]{14,24}\d)', re.IGNORECASE)
+TAMANHO_NUP = 17
+
+
+def nups_da_discriminacao(texto: str | None) -> list[str]:
+    """NUPs (17 dígitos) citados na discriminação da NFS."""
+    nups = []
+    for bruto in _NUP.findall(texto or ''):
+        nup = re.sub(r'\D', '', bruto)
+        if len(nup) == TAMANHO_NUP and nup not in nups:
+            nups.append(nup)
+    return nups
+
+
+def notas_por_nup(notas):
+    """{nup: nota}; com mais de uma nota para o mesmo NUP, vale a mais nova."""
+    resultado = {}
+    for nota in sorted(notas, key=lambda n: n.get('data_emissao') or date.min):
+        for nup in nups_da_discriminacao(nota.get('discriminacao')):
+            resultado[nup] = {
+                k: v for k, v in nota.items() if k != 'discriminacao'
+            }
+    return resultado
+
+
 def dinheiro(valor) -> Decimal:
     return Decimal(valor or 0).quantize(CENTAVO)
 
@@ -47,6 +73,7 @@ class ProcessoPortal:
     valor_liberado: Decimal | None
     data_entrada: date | None = None
     situacao: str | None = None
+    nup_grupo: str | None = None
 
 
 def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
@@ -88,7 +115,7 @@ def _dias(desde: date | None, hoje: date) -> int | None:
     return (hoje - desde).days if desde else None
 
 
-def montar_item(remessa, vinculo, sugestao, hoje):
+def montar_item(remessa, vinculo, sugestao, hoje, notas_por_nup=None):
     """Uma remessa com a situação de cada etapa.
 
     ``vinculo``: dados gravados (protocolo, nfse, recebimentos) ou None.
@@ -106,6 +133,7 @@ def montar_item(remessa, vinculo, sugestao, hoje):
             'valor_liberado': p.valor_liberado,
             'data_protocolo': p.data_entrada,
             'situacao_portal': p.situacao,
+            'nup_grupo': p.nup_grupo,
             'solicitacao_nota_em': None,
             'solicitacao_nota_obs': None,
         }
@@ -120,6 +148,12 @@ def montar_item(remessa, vinculo, sugestao, hoje):
             for p in sugestao['candidatos']
         ]
     nfse = vinculo.get('nfse') if protocolo else None
+    if nfse is None and protocolo and notas_por_nup:
+        # Processo de um grupo (NUP de grupo no portal): a NF do grupo traz
+        # esse NUP na discriminação e vale para todos os processos do grupo.
+        nota = notas_por_nup.get(protocolo.get('nup_grupo') or '')
+        if nota:
+            nfse = {**nota, 'origem': 'nup_grupo'}
     recebimentos = (vinculo.get('recebimentos') or []) if nfse else []
 
     fechamento = remessa.get('dt_fechamento')
@@ -240,23 +274,55 @@ def bases_das_remessas(itens):
     return bases
 
 
-def aplicar_estimativa(itens, aliquotas, bases=None):
+IMPOSTOS = ('iss', 'ir', 'pis', 'cofins', 'csll')
+
+
+def config_retencao(linha):
+    """Percentuais configurados de um convênio, com o total."""
+    config = {k: Decimal(str(linha.get(k) or 0)) for k in IMPOSTOS}
+    config['total'] = sum((config[k] for k in IMPOSTOS), Decimal('0'))
+    return config
+
+
+def _retencao(base, aliquota, config):
+    """Retenção sobre a base: pela configuração do convênio, se houver."""
+    if config is not None:
+        retencoes = (base * config['total'] / 100).quantize(CENTAVO)
+        detalhe = {
+            k: (base * config[k] / 100).quantize(CENTAVO)
+            for k in IMPOSTOS
+            if config[k]
+        }
+        return retencoes, config['total'], 'configuracao', detalhe
+    if aliquota is None:
+        return None, None, None, {}
+    return (base * aliquota / 100).quantize(CENTAVO), aliquota, None, {}
+
+
+def aplicar_estimativa(itens, aliquotas, bases=None, configs=None):
     """Retenções e líquido estimados para remessas ainda sem NF no ISS.
 
     Base: parte do valor liberado no portal que cabe à remessa ou, sem ele,
-    o valor bruto (``bases_das_remessas``).
+    o valor bruto (``bases_das_remessas``). Percentuais: os da Configuração
+    por Convênio; sem configuração, a alíquota observada nas NFs do convênio.
     """
     bases = bases if bases is not None else bases_das_remessas(itens)
+    configs = configs or {}
     for item in itens:
         nf = item.get('nfse') or {}
+        config = configs.get(item['cd_convenio'])
         aliquota = aliquotas.get(item['cd_convenio'])
-        if nf.get('valor_liquido') is not None or aliquota is None:
+        if nf.get('valor_liquido') is not None or (
+            config is None and aliquota is None
+        ):
             item['estimativa'] = None
             continue
         base, origem = bases[item['cd_remessa']]
-        retencoes = (base * aliquota / 100).quantize(CENTAVO)
+        retencoes, aliquota, fonte, detalhe = _retencao(base, aliquota, config)
         item['estimativa'] = {
             'aliquota': aliquota,
+            'fonte_aliquota': fonte or 'historico_nfs',
+            'retencoes_detalhe': detalhe,
             'base': base,
             'origem_base': origem,
             'retencoes': retencoes,
@@ -269,16 +335,17 @@ def _chave_nf(nf):
     return (str(nf.get('numero')), nf.get('prestador_cnpj') or '')
 
 
-def ratear_nfs(itens, bases=None):
+def ratear_nfs(itens, bases=None, configs=None):
     """Parte da NF que cabe a cada remessa (``nf_rateio``).
 
     NF exclusiva da remessa: valores da própria NF. NF compartilhada (NF de
     grupo, ex.: ISSEC com NUP de grupo cobrindo vários processos): a parte da
     remessa é o valor liberado no portal ou, sem ele, o bruto da remessa; as
-    retenções aplicam a alíquota real da NF ((valor - líquido) / valor) sobre
-    essa parte. Mesmo critério da planilha DEMO.
+    retenções aplicam os percentuais da Configuração por Convênio sobre essa
+    parte (sem configuração, a alíquota real da NF). Mesmo critério da DEMO.
     """
     bases = bases if bases is not None else bases_das_remessas(itens)
+    configs = configs or {}
     remessas_por_nf = Counter(
         _chave_nf(i['nfse'])
         for i in itens
@@ -309,10 +376,8 @@ def ratear_nfs(itens, bases=None):
             }
             continue
         base, origem = bases[item['cd_remessa']]
-        retencoes = (
-            (base * aliquota / 100).quantize(CENTAVO)
-            if aliquota is not None
-            else None
+        retencoes, aliquota_usada, fonte, detalhe = _retencao(
+            base, aliquota, configs.get(item['cd_convenio'])
         )
         item['nf_rateio'] = {
             'compartilhada': True,
@@ -322,7 +387,10 @@ def ratear_nfs(itens, bases=None):
             'valor': base,
             'retencoes': retencoes,
             'liquido': base - retencoes if retencoes is not None else None,
-            'aliquota': aliquota,
+            'aliquota': aliquota_usada,
+            'aliquota_nf': aliquota,
+            'fonte_aliquota': fonte or 'nf',
+            'retencoes_detalhe': detalhe,
         }
     return itens
 

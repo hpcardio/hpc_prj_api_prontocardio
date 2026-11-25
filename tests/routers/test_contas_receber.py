@@ -16,7 +16,9 @@ from app_prontocardio.services.contas_receber_fluxo import (
     aplicar_estimativa,
     bases_das_remessas,
     casar_portal,
+    config_retencao,
     montar_item,
+    notas_por_nup,
     ratear_nfs,
     resumo_funil,
 )
@@ -25,7 +27,9 @@ HOJE = date(2026, 11, 24)
 OUT = date(2026, 10, 1)
 
 
-def _remessa(cd, valor, competencia=OUT, convenio=46, fechamento=date(2026, 11, 3)):
+def _remessa(
+    cd, valor, competencia=OUT, convenio=46, fechamento=date(2026, 11, 3)
+):
     return {
         'cd_remessa': cd,
         'cd_convenio': convenio,
@@ -61,7 +65,9 @@ def test_casamento_automatico_so_com_par_unico_nos_dois_sentidos():
 
     assert sugestoes[1]['situacao'] == 'automatico'
     assert [p.numero for p in sugestoes[1]['candidatos']] == ['A']
-    assert sugestoes[2]['situacao'] == sugestoes[3]['situacao'] == 'a_confirmar'
+    assert (
+        sugestoes[2]['situacao'] == sugestoes[3]['situacao'] == 'a_confirmar'
+    )
     assert sugestoes[4]['situacao'] == 'a_confirmar'
     assert [p.numero for p in sugestoes[4]['candidatos']] == ['C', 'D']
     assert 5 not in sugestoes
@@ -84,11 +90,19 @@ def test_item_sem_protocolo_aguarda_protocolo_e_conta_dias_desde_o_fechamento():
     assert item['etapa_atual'] == 'protocolo'
     assert item['pendencia'] == 'Aguardando protocolo'
     assert item['dias_na_etapa'] == 21
-    assert [e['status'] for e in item['etapas']] == ['concluida', 'atual', 'futura', 'futura']
+    assert [e['status'] for e in item['etapas']] == [
+        'concluida',
+        'atual',
+        'futura',
+        'futura',
+    ]
 
 
 def test_item_com_protocolo_automatico_aguarda_nfse():
-    sugestao = {'situacao': 'automatico', 'candidatos': [_processo('A', '100.00')]}
+    sugestao = {
+        'situacao': 'automatico',
+        'candidatos': [_processo('A', '100.00')],
+    }
 
     item = montar_item(_remessa(1, '100.00'), None, sugestao, HOJE)
 
@@ -113,17 +127,37 @@ def test_item_a_confirmar_mostra_candidatos_e_continua_sem_protocolo():
 def _vinculo(nfse=True, recebido=False):
     return {
         'protocolo': {
-            'id': 7, 'numero': '2600044294', 'origem': 'manual', 'situacao': 'vinculado',
-            'valor_cobrado': None, 'valor_liberado': None,
+            'id': 7,
+            'numero': '2600044294',
+            'origem': 'manual',
+            'situacao': 'vinculado',
+            'valor_cobrado': None,
+            'valor_liberado': None,
             'data_protocolo': date(2026, 11, 5),
-            'solicitacao_nota_em': date(2026, 11, 10), 'solicitacao_nota_obs': None,
+            'solicitacao_nota_em': date(2026, 11, 10),
+            'solicitacao_nota_obs': None,
         },
-        'nfse': {'numero': '30400', 'prestador_cnpj': '08711085000128',
-                 'data_emissao': date(2026, 11, 12), 'valor': Decimal('100.00'),
-                 'origem': 'manual'} if nfse else None,
-        'recebimentos': [{'id': 1, 'data': date(2026, 11, 20), 'valor': Decimal('500.00'),
-                          'valor_alocado': Decimal('100.00'), 'historico': 'TED', 'origem': 'extrato'}]
-        if recebido else [],
+        'nfse': {
+            'numero': '30400',
+            'prestador_cnpj': '08711085000128',
+            'data_emissao': date(2026, 11, 12),
+            'valor': Decimal('100.00'),
+            'origem': 'manual',
+        }
+        if nfse
+        else None,
+        'recebimentos': [
+            {
+                'id': 1,
+                'data': date(2026, 11, 20),
+                'valor': Decimal('500.00'),
+                'valor_alocado': Decimal('100.00'),
+                'historico': 'TED',
+                'origem': 'extrato',
+            }
+        ]
+        if recebido
+        else [],
     }
 
 
@@ -136,7 +170,9 @@ def test_item_com_nfse_aguarda_recebimento_desde_a_emissao():
 
 
 def test_item_recebido_conclui_o_fluxo():
-    item = montar_item(_remessa(1, '100.00'), _vinculo(recebido=True), None, HOJE)
+    item = montar_item(
+        _remessa(1, '100.00'), _vinculo(recebido=True), None, HOJE
+    )
 
     assert item['etapa_atual'] == 'concluido'
     assert item['dias_na_etapa'] is None
@@ -148,15 +184,25 @@ def test_funil_soma_quantidade_e_valor_por_etapa():
         montar_item(_remessa(1, '100.00'), None, None, HOJE),
         montar_item(_remessa(2, '50.00'), _vinculo(), None, HOJE),
         montar_item(_remessa(3, '25.00'), _vinculo(recebido=True), None, HOJE),
-        montar_item(_remessa(4, '10.00'), None, {
-            'situacao': 'a_confirmar',
-            'candidatos': [_processo('C', '10.00'), _processo('D', '10.00')],
-        }, HOJE),
+        montar_item(
+            _remessa(4, '10.00'),
+            None,
+            {
+                'situacao': 'a_confirmar',
+                'candidatos': [
+                    _processo('C', '10.00'),
+                    _processo('D', '10.00'),
+                ],
+            },
+            HOJE,
+        ),
     ]
 
     resumo = resumo_funil(itens)
 
-    por_etapa = {e['chave']: (e['quantidade'], e['valor']) for e in resumo['etapas']}
+    por_etapa = {
+        e['chave']: (e['quantidade'], e['valor']) for e in resumo['etapas']
+    }
     assert por_etapa == {
         'protocolo': (2, Decimal('110.00')),
         'nfse': (0, Decimal('0.00')),
@@ -174,14 +220,27 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
         _remessa(9, '80.00', convenio=12),
     ]
     monkeypatch.setattr(rota, 'remessas_mv', lambda _o: remessas)
-    monkeypatch.setattr(rota, 'processos_portal', lambda _p: {46: [_processo('A', '100.00')]})
+    monkeypatch.setattr(
+        rota, 'processos_portal', lambda _p: {46: [_processo('A', '100.00')]}
+    )
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
 
     resposta = rota.fluxo(
-        oracle=None, postgres=None, _usuario=None, convenio=46, etapa='nfse',
-        competencia_de=None, competencia_ate=None, q=None, a_confirmar=False,
-        ordenar_por='parado', page=1, page_size=10,
+        oracle=None,
+        postgres=None,
+        _usuario=None,
+        convenio=46,
+        etapa='nfse',
+        competencia_de=None,
+        competencia_ate=None,
+        q=None,
+        a_confirmar=False,
+        ordenar_por='parado',
+        page=1,
+        page_size=10,
     )
 
     assert [i['cd_remessa'] for i in resposta['itens']] == [1]
@@ -190,14 +249,33 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
     assert [c['codigo'] for c in resposta['convenios']] == [12, 46]
 
 
-def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(monkeypatch):
-    monkeypatch.setattr(rota, 'remessas_mv', lambda _o: [_remessa(1, '100.00')])
-    monkeypatch.setattr(rota, 'processos_portal', lambda _p: {46: [_processo('2600044294', '100.00')]})
+def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        rota, 'remessas_mv', lambda _o: [_remessa(1, '100.00')]
+    )
+    monkeypatch.setattr(
+        rota,
+        'processos_portal',
+        lambda _p: {46: [_processo('2600044294', '100.00')]},
+    )
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
-    kwargs = dict(oracle=None, postgres=None, _usuario=None, convenio=None, etapa=None,
-                  competencia_ate=None, a_confirmar=False, ordenar_por='parado',
-                  page=1, page_size=10)
+    kwargs = dict(
+        oracle=None,
+        postgres=None,
+        _usuario=None,
+        convenio=None,
+        etapa=None,
+        competencia_ate=None,
+        a_confirmar=False,
+        ordenar_por='parado',
+        page=1,
+        page_size=10,
+    )
 
     assert rota.fluxo(competencia_de=None, q='44294', **kwargs)['total'] == 1
     with pytest.raises(HTTPException) as erro:
@@ -208,10 +286,14 @@ def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(monkeypa
 def test_acesso_exige_tela_ou_perfil_de_gestao():
     assert rota.acesso_fluxo(SimpleNamespace(perfil='ti', telas_permitidas=[]))
     assert rota.acesso_fluxo(
-        SimpleNamespace(perfil='usuario', telas_permitidas=['contas_receber_fluxo'])
+        SimpleNamespace(
+            perfil='usuario', telas_permitidas=['contas_receber_fluxo']
+        )
     )
     with pytest.raises(HTTPException):
-        rota.acesso_fluxo(SimpleNamespace(perfil='usuario', telas_permitidas=[]))
+        rota.acesso_fluxo(
+            SimpleNamespace(perfil='usuario', telas_permitidas=[])
+        )
 
 
 def test_sql_das_remessas_soma_as_contas_e_exclui_particular():
@@ -237,6 +319,8 @@ def test_exportar_devolve_todas_as_remessas_sem_paginar(monkeypatch):
     monkeypatch.setattr(rota, 'remessas_mv', lambda _o: remessas)
     monkeypatch.setattr(rota, 'processos_portal', lambda _p: {})
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
         oracle=None,
@@ -274,7 +358,7 @@ def test_vinculos_leem_o_portal_na_hora_e_a_entrada_no_protocolo():
     assert 'COALESCE(pt.valor_liberado, p.valor_liberado)' in sql
     assert 'COALESCE(p.data_protocolo, pt.data_entrada)' in sql
     assert "'Entrada no Protocolo:'" in sql
-    assert "TO_DATE(" in rota.SQL_PORTAL[rota.CD_CONVENIO_ISSEC].text
+    assert 'TO_DATE(' in rota.SQL_PORTAL[rota.CD_CONVENIO_ISSEC].text
 
 
 def test_protocolo_automatico_usa_a_entrada_no_portal():
@@ -340,6 +424,8 @@ def test_retencao_estimada_pela_aliquota_do_convenio():
     assert aliquotas == {46: Decimal('4.20')}
     assert sem_nf_liberado['estimativa'] == {
         'aliquota': Decimal('4.20'),
+        'fonte_aliquota': 'historico_nfs',
+        'retencoes_detalhe': {},
         'base': Decimal('1328.30'),
         'origem_base': 'liberado',
         'retencoes': Decimal('55.79'),
@@ -420,7 +506,11 @@ def test_nf_maior_que_a_remessa_tambem_e_rateada():
         'cd_convenio': 46,
         'valor': Decimal('100.00'),
         'protocolo': None,
-        'nfse': {'numero': '1', 'valor': Decimal('900.00'), 'valor_liquido': None},
+        'nfse': {
+            'numero': '1',
+            'valor': Decimal('900.00'),
+            'valor_liquido': None,
+        },
     }
     ratear_nfs([item])
     assert item['nf_rateio']['compartilhada'] is True
@@ -451,3 +541,281 @@ def test_liberado_do_processo_e_dividido_entre_as_remessas_do_protocolo():
     assert bases[2] == (Decimal('360.00'), 'liberado_proporcional')
     aplicar_estimativa(itens, {46: Decimal('4.20')}, bases)
     assert itens[0]['estimativa']['retencoes'] == Decimal('22.68')
+
+
+def test_processo_do_grupo_recebe_a_nf_do_nup_e_a_retencao_rateada():
+    notas = notas_por_nup([
+        {
+            'numero': '30083',
+            'prestador_cnpj': '08711085000128',
+            'data_emissao': date(2026, 11, 5),
+            'valor': Decimal('572156.82'),
+            'valor_liquido': Decimal('548126.24'),
+            'discriminacao': 'REF AS DESPESAS... NUP 46042042895202610',
+        }
+    ])
+    processo = ProcessoPortal(
+        '2600036705',
+        date(2026, 8, 1),
+        Decimal('2118.58'),
+        Decimal('2118.58'),
+        date(2026, 9, 28),
+        None,
+        '46042042895202610',
+    )
+    sugestao = {'situacao': 'automatico', 'candidatos': [processo]}
+    outro = ProcessoPortal(
+        '2600036706',
+        date(2026, 8, 1),
+        Decimal('5000.00'),
+        Decimal('4000.00'),
+        None,
+        None,
+        '46042042895202610',
+    )
+    itens = [
+        montar_item(
+            _remessa(20157, '2118.58', competencia=date(2026, 8, 1)),
+            None,
+            sugestao,
+            HOJE,
+            notas,
+        ),
+        montar_item(
+            _remessa(20158, '5000.00', competencia=date(2026, 8, 1)),
+            None,
+            {'situacao': 'automatico', 'candidatos': [outro]},
+            HOJE,
+            notas,
+        ),
+    ]
+    ratear_nfs(itens)
+
+    primeiro, segundo = itens
+    assert primeiro['nfse']['numero'] == segundo['nfse']['numero'] == '30083'
+    assert primeiro['nfse']['origem'] == 'nup_grupo'
+    assert primeiro['etapa_atual'] == 'recebimento'
+    assert primeiro['nf_rateio']['retencoes'] == Decimal('88.98')
+    assert primeiro['nf_rateio']['liquido'] == Decimal('2029.60')
+    assert segundo['nf_rateio']['valor'] == Decimal('4000.00')
+    assert segundo['nf_rateio']['retencoes'] == Decimal('168.00')
+
+
+def test_nf_gravada_tem_prioridade_sobre_a_do_grupo():
+    notas = notas_por_nup([
+        {
+            'numero': '1',
+            'data_emissao': date(2026, 1, 1),
+            'valor': Decimal('1'),
+            'valor_liquido': Decimal('1'),
+            'discriminacao': 'NUP 46042042895202610',
+        },
+    ])
+    vinculo = {
+        'protocolo': {
+            'id': 1,
+            'numero': '2600036705',
+            'origem': 'planilha',
+            'situacao': 'vinculado',
+            'valor_cobrado': None,
+            'valor_liberado': None,
+            'data_protocolo': None,
+            'nup_grupo': '46042042895202610',
+            'solicitacao_nota_em': None,
+            'solicitacao_nota_obs': None,
+        },
+        'nfse': {'numero': '30083', 'origem': 'planilha'},
+        'recebimentos': [],
+    }
+    item = montar_item(_remessa(20157, '10.00'), vinculo, None, HOJE, notas)
+    assert item['nfse']['numero'] == '30083'
+
+
+BACEN = config_retencao({
+    'iss': '3',
+    'ir': '1.2',
+    'pis': '0.65',
+    'cofins': '3',
+    'csll': '1',
+})
+
+
+def test_configuracao_do_convenio_define_a_retencao_estimada_e_o_rateio():
+    sem_nf = {
+        'cd_remessa': 1,
+        'cd_convenio': 7,
+        'valor': Decimal('1000.00'),
+        'protocolo': None,
+        'nfse': None,
+    }
+    grupo = {
+        'numero': '9',
+        'prestador_cnpj': 'x',
+        'valor': Decimal('5000.00'),
+        'valor_liquido': Decimal('4900.00'),
+    }
+    em_grupo = [
+        {
+            'cd_remessa': 10 + i,
+            'cd_convenio': 7,
+            'valor': Decimal('2500.00'),
+            'protocolo': None,
+            'nfse': dict(grupo),
+        }
+        for i in range(2)
+    ]
+    itens = [sem_nf, *em_grupo]
+    configs = {7: BACEN}
+
+    ratear_nfs(itens, None, configs)
+    aplicar_estimativa(itens, {}, None, configs)
+
+    assert BACEN['total'] == Decimal('8.85')
+    assert sem_nf['estimativa']['aliquota'] == Decimal('8.85')
+    assert sem_nf['estimativa']['fonte_aliquota'] == 'configuracao'
+    assert sem_nf['estimativa']['retencoes'] == Decimal('88.50')
+    assert sem_nf['estimativa']['retencoes_detalhe'] == {
+        'iss': Decimal('30.00'),
+        'ir': Decimal('12.00'),
+        'pis': Decimal('6.50'),
+        'cofins': Decimal('30.00'),
+        'csll': Decimal('10.00'),
+    }
+    rateio = em_grupo[0]['nf_rateio']
+    assert rateio['aliquota_nf'] == Decimal('2.00')
+    assert rateio['aliquota'] == Decimal('8.85')
+    assert rateio['retencoes'] == Decimal('221.25')
+    assert rateio['fonte_aliquota'] == 'configuracao'
+
+
+def test_convenio_configurado_com_zero_nao_retem():
+    item = {
+        'cd_remessa': 1,
+        'cd_convenio': 9,
+        'valor': Decimal('100.00'),
+        'protocolo': None,
+        'nfse': None,
+    }
+    zero = config_retencao({})
+    aplicar_estimativa([item], {9: Decimal('3.00')}, None, {9: zero})
+    assert item['estimativa']['retencoes'] == Decimal('0.00')
+    assert item['estimativa']['liquido'] == Decimal('100.00')
+
+
+class _Resultado:
+    def __init__(self, linhas):
+        self.linhas = linhas
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.linhas
+
+
+class _Sessao:
+    def __init__(self, respostas):
+        self.respostas = list(respostas)
+        self.execucoes = []
+        self.commits = 0
+
+    def execute(self, sql, params=None):
+        self.execucoes.append((str(sql), params))
+        return _Resultado(self.respostas.pop(0) if self.respostas else [])
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_lista_convenios_do_mv_com_os_percentuais_salvos():
+    oracle = _Sessao([
+        [
+            {'cd_convenio': 7, 'nm_convenio': 'BACEN'},
+            {'cd_convenio': 9, 'nm_convenio': 'BRADESCO'},
+        ]
+    ])
+    postgres = _Sessao([
+        [
+            {
+                'cd_convenio': 7,
+                'convenio': 'BACEN',
+                'iss': Decimal('3'),
+                'ir': Decimal('1.2'),
+                'pis': Decimal('0.65'),
+                'cofins': Decimal('3'),
+                'csll': Decimal('1'),
+                'observacao': None,
+                'atualizado_por_nome': 'Financeiro',
+                'atualizado_em': None,
+            },
+        ]
+    ])
+
+    linhas = rota.listar_retencoes_convenio(oracle, postgres, None)[
+        'convenios'
+    ]
+
+    assert linhas[0]['total'] == Decimal('8.85')
+    assert linhas[0]['configurado'] is True
+    assert linhas[1]['configurado'] is False
+    assert linhas[1]['total'] == Decimal('0')
+
+
+def test_salva_so_o_que_mudou_e_audita():
+    postgres = _Sessao([
+        [
+            {
+                'cd_convenio': 7,
+                'convenio': 'BACEN',
+                'iss': Decimal('3'),
+                'ir': Decimal('1.2'),
+                'pis': Decimal('0.65'),
+                'cofins': Decimal('3'),
+                'csll': Decimal('1'),
+                'observacao': None,
+            },
+        ]
+    ])
+    usuario = SimpleNamespace(id=5, nome='Financeiro')
+    payload = [
+        rota.RetencaoConvenioInput(
+            cd_convenio=7,
+            convenio='BACEN',
+            iss=3,
+            ir=1.2,
+            pis=0.65,
+            cofins=3,
+            csll=1,
+        ),
+        rota.RetencaoConvenioInput(
+            cd_convenio=46, convenio='ISSEC', iss=3, ir=1.2
+        ),
+    ]
+
+    resposta = rota.salvar_retencoes_convenio(payload, postgres, usuario)
+
+    assert resposta == {'alterados': 1}
+    assert postgres.commits == 1
+    sqls = [sql for sql, _ in postgres.execucoes]
+    assert (
+        sum(
+            'INSERT INTO api_prontocardio.cr_convenio_retencoes' in s
+            for s in sqls
+        )
+        == 1
+    )
+    assert sum('cr_eventos' in s for s in sqls) == 1
+
+
+def test_acesso_a_configuracao():
+    assert rota.acesso_configuracao(
+        SimpleNamespace(
+            perfil='usuario', telas_permitidas=['configuracao_convenio']
+        )
+    )
+    with pytest.raises(HTTPException):
+        rota.acesso_configuracao(
+            SimpleNamespace(
+                perfil='usuario', telas_permitidas=['contas_receber_fluxo']
+            )
+        )
