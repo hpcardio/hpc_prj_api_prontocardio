@@ -8,7 +8,7 @@ from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from PIL import Image, ImageFile
 from pydantic import BaseModel, Field, field_validator
@@ -26,6 +26,11 @@ from sqlalchemy import text
 
 from app_prontocardio.database import oracle_engine
 from evolucao_sadt_backend.ipm_guides import ipm_page_count, select_ipm_models
+from evolucao_sadt_backend.mv_context_token import MvContextClaims, MvContextTokenError, require_mv_context
+from evolucao_sadt_backend.sadt_drafts import (
+    DraftInput, DraftRecord, begin_operation, clear_operation, close_draft, get_operation_reference,
+    read_draft, save_draft, store_reference,
+)
 BASE_DIR = Path(__file__).resolve().parent
 ASSET_DIR = BASE_DIR / 'evolucao_sadt_assets'
 MV_WRITE_ENABLED = (
@@ -456,6 +461,128 @@ def patient_context(cd_atendimento: int):
     return payload
 
 
+def _draft_patient(cd_atendimento: int, claims: MvContextClaims) -> int:
+    try:
+        claims.require_attendance(cd_atendimento)
+    except MvContextTokenError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return int(patient_context(cd_atendimento)['cd_paciente'])
+
+
+@app.get('/api/rascunhos/{cd_atendimento}')
+def get_sadt_draft(
+    cd_atendimento: int, response: Response, claims: MvContextClaims = Depends(require_mv_context),
+) -> DraftRecord | None:
+    response.headers['Cache-Control'] = 'private, no-store'
+    return read_draft(claims, _draft_patient(cd_atendimento, claims))
+
+
+@app.put('/api/rascunhos/{cd_atendimento}')
+def put_sadt_draft(
+    cd_atendimento: int, draft: DraftInput, response: Response, claims: MvContextClaims = Depends(require_mv_context),
+) -> DraftRecord:
+    response.headers['Cache-Control'] = 'private, no-store'
+    return save_draft(claims, _draft_patient(cd_atendimento, claims), draft)
+
+
+@app.get('/api/rascunhos/{cd_atendimento}/identidade')
+def sadt_draft_identity(cd_atendimento: int, response: Response, claims: MvContextClaims = Depends(require_mv_context)):
+    patient = _draft_patient(cd_atendimento, claims)
+    response.headers['Cache-Control'] = 'private, no-store'
+    return {'paciente': patient, 'prestador': claims.cd_prestador, 'usuario': claims.cd_usuario}
+
+
+def _draft_operation_context(http: Request, cd_atendimento: int):
+    draft_id = http.headers.get('X-SADT-Draft')
+    if not draft_id:
+        return None
+    claims = require_mv_context(http.headers.get('X-MV-Context-Token', ''))
+    revision = http.headers.get('X-SADT-Draft-Revision', '')
+    if not re.fullmatch(r'[0-9a-f]{32}', draft_id) or not re.fullmatch(r'[1-9][0-9]{0,12}', revision):
+        raise HTTPException(status_code=422, detail='Revisão da solicitação inválida.')
+    return claims, _draft_patient(cd_atendimento, claims), draft_id, int(revision)
+
+
+@app.get('/api/rascunhos/{cd_atendimento}/pdf')
+def read_sadt_draft_pdf(cd_atendimento: int, http: Request):
+    tracked = _draft_operation_context(http, cd_atendimento)
+    if not tracked:
+        raise HTTPException(status_code=422, detail='Identifique a solicitação para recuperar o PDF.')
+    return _verified_draft_pdf(*tracked)
+
+
+def _verified_draft_pdf(claims: MvContextClaims, patient: int, draft_id: str, revision: int):
+    reference = get_operation_reference(claims, patient, 'anexo', draft_id, revision)
+    if not reference:
+        raise HTTPException(status_code=409, detail='Anexo ainda não confirmado. Confira o prontuário no MV.')
+    expected = {key: reference[key] for key in ('cd_documento_clinico', 'cd_arquivo_documento', 'cd_arquivo_atendimento')}
+    with oracle_engine.connect() as connection:
+        row = connection.execute(text("""
+            SELECT f.lo_arquivo_documento AS pdf
+              FROM dbamv.arquivo_documento f
+              JOIN dbamv.arquivo_atendimento a ON a.cd_arquivo_documento = f.cd_arquivo_documento
+              JOIN dbamv.pw_documento_clinico p ON p.cd_documento_clinico = a.cd_documento_clinico
+             WHERE a.cd_atendimento = :attendance AND p.cd_atendimento = :attendance
+               AND a.cd_paciente = :patient AND p.cd_paciente = :patient
+               AND a.cd_arquivo_atendimento = :cd_arquivo_atendimento
+               AND p.cd_documento_clinico = :cd_documento_clinico
+               AND f.cd_arquivo_documento = :cd_arquivo_documento
+               AND p.tp_status = 'FECHADO'
+               AND a.cd_status_arquivo_atendimento = 2
+               AND f.ds_origem = 'SADT FASTAPI'
+        """), {**expected, 'attendance': claims.cd_atendimento, 'patient': patient}).mappings().one_or_none()
+        blob = row['pdf'] if row else None
+        pdf = blob.read() if hasattr(blob, 'read') else blob
+    if not pdf or not pdf.startswith(b'%PDF-'):
+        raise HTTPException(status_code=409, detail='O documento vinculado não foi confirmado no MV.')
+    return Response(content=pdf, media_type='application/pdf', headers={
+        'Cache-Control': 'private, no-store',
+        'X-SADT-Clinical-Document': str(expected['cd_documento_clinico']),
+    })
+
+
+@app.get('/api/rascunhos/{cd_atendimento}/prescricao')
+def read_sadt_draft_prescription(cd_atendimento: int, http: Request, response: Response):
+    tracked = _draft_operation_context(http, cd_atendimento)
+    if not tracked:
+        raise HTTPException(status_code=422, detail='Identifique a solicitação para conferir a prescrição.')
+    response.headers['Cache-Control'] = 'private, no-store'
+    return _verified_draft_prescription(*tracked)
+
+
+def _verified_draft_prescription(claims: MvContextClaims, patient: int, draft_id: str, revision: int):
+    reference = get_operation_reference(claims, patient, 'prescricao', draft_id, revision)
+    if not reference:
+        raise HTTPException(status_code=409, detail='Inclusão ainda não confirmada. Confira a prescrição no MV.')
+    with oracle_engine.connect() as connection:
+        rows = connection.execute(text("""
+            SELECT i.cd_tip_presc
+              FROM dbamv.pre_med p
+              LEFT JOIN dbamv.itpre_med i ON i.cd_pre_med = p.cd_pre_med AND NVL(i.sn_cancelado,'N') = 'N'
+             WHERE p.cd_pre_med = :prescription AND p.cd_atendimento = :attendance
+               AND p.cd_prestador = :provider
+        """), {'prescription': reference['cd_pre_med'], 'attendance': claims.cd_atendimento, 'provider': claims.cd_prestador}).scalars().all()
+    if not rows or not set(reference['tipos_confirmados']).issubset(rows):
+        raise HTTPException(status_code=409, detail='Os itens não foram confirmados na prescrição vinculada.')
+    return {'cd_pre_med': reference['cd_pre_med'], 'codigos_confirmados': reference['codigos_confirmados'],
+            'nao_mapeados': reference['nao_mapeados']}
+
+
+@app.post('/api/rascunhos/{cd_atendimento}/encerrar', status_code=204)
+def finish_sadt_draft(cd_atendimento: int, http: Request):
+    tracked = _draft_operation_context(http, cd_atendimento)
+    if not tracked:
+        raise HTTPException(status_code=422, detail='Identifique a solicitação a concluir.')
+    claims, patient, draft_id, revision = tracked
+    record = read_draft(claims, patient)
+    if not record or record.id != draft_id or record.revisao != revision:
+        raise HTTPException(status_code=409, detail='A solicitação mudou em outra estação.')
+    _verified_draft_pdf(*tracked)
+    if 'prescricao' in record.operacoes:
+        _verified_draft_prescription(*tracked)
+    close_draft(claims, patient, draft_id, revision, set(record.operacoes))
+
+
 @app.get('/api/medico')
 def doctor_context(usuario_mv: str | None = Query(default=None, max_length=30)):
     usuario = (
@@ -716,6 +843,7 @@ def prescription_history(cd_atendimento: int):
 def add_prescription_exams(
     cd_atendimento: int,
     request: PrescriptionExamRequest,
+    http: Request,
 ):
     if not MV_WRITE_ENABLED:
         raise HTTPException(
@@ -815,6 +943,13 @@ def add_prescription_exams(
     added = []
     existing = []
     unmapped = []
+    tracked = _draft_operation_context(http, cd_atendimento)
+    operation = None
+    confirmed_types = []
+    if tracked:
+        if tracked[0].cd_usuario != request.usuario_mv:
+            raise HTTPException(status_code=403, detail='O médico da prescrição não corresponde ao contexto MV.')
+        operation = begin_operation(*tracked, 'prescricao', request.codigos)
     try:
         with oracle_engine.begin() as connection:
             doctor = connection.execute(
@@ -825,6 +960,8 @@ def add_prescription_exams(
                     status_code=404,
                     detail='O usuário MV não possui médico/prestador vinculado.',
                 )
+            if tracked and int(doctor['cd_prestador']) != tracked[0].cd_prestador:
+                raise HTTPException(status_code=403, detail='O prestador da prescrição não corresponde ao contexto MV.')
             target = connection.execute(
                 target_query,
                 {
@@ -852,6 +989,7 @@ def add_prescription_exams(
                     'cd_pre_med': prescription_id,
                     'cd_tip_presc': int(mapped['cd_tip_presc']),
                 }
+                confirmed_types.append(parameters['cd_tip_presc'])
                 if connection.execute(
                     duplicate_query, parameters
                 ).scalar_one():
@@ -871,7 +1009,14 @@ def add_prescription_exams(
                     },
                 )
                 added.append(code)
+            if operation:
+                store_reference(operation, {
+                    'cd_pre_med': prescription_id, 'tipos_confirmados': confirmed_types,
+                    'codigos_confirmados': added + existing, 'nao_mapeados': unmapped,
+                })
     except HTTPException:
+        if operation:
+            clear_operation(operation)
         raise
     except Exception as exc:
         raise HTTPException(
@@ -2624,7 +2769,7 @@ def pdf(request: GuideRequest):
 
 
 @app.post('/api/mv/anexar')
-def attach_to_mv(request: GuideRequest):
+def attach_to_mv(request: GuideRequest, http: Request):
     if not MV_WRITE_ENABLED:
         raise HTTPException(
             status_code=403,
@@ -2643,6 +2788,15 @@ def attach_to_mv(request: GuideRequest):
         f'SADT {request.formato.upper()} - '
         f'{request.indicacao_clinica.strip()}'
     )[:4000]
+    tracked = _draft_operation_context(http, request.paciente.cd_atendimento)
+    operation = None
+    if tracked:
+        if tracked[1] != request.paciente.cd_paciente:
+            raise HTTPException(status_code=403, detail='Paciente da guia não corresponde ao contexto MV.')
+        operation = begin_operation(
+            *tracked, 'anexo', [item.codigo for item in request.exames],
+            expected_guide=(request.formato, request.natureza, request.indicacao_clinica),
+        )
 
     try:
         with oracle_engine.begin() as connection:
@@ -2812,7 +2966,14 @@ def attach_to_mv(request: GuideRequest):
                     'attachment_status': MV_STATUS_ARQUIVO_ANEXADO,
                 },
             )
+            if operation:
+                store_reference(operation, {
+                    'cd_arquivo_atendimento': int(attachment_id), 'cd_arquivo_documento': int(document_id),
+                    'cd_documento_clinico': int(clinical_document_id),
+                })
     except HTTPException:
+        if operation:
+            clear_operation(operation)
         raise
     except Exception as error:
         raise HTTPException(
