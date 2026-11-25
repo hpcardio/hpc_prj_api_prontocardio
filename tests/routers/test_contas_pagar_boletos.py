@@ -316,3 +316,64 @@ def test_fornecedor_de_outra_oficina_e_recusado():
     with pytest.raises(HTTPException) as erro:
         rota._nota_ou_404(postgres, oracle, _usuario(), '11222333000181', '123')
     assert erro.value.status_code == 403
+
+
+# ------------------------------------------------ desfazer envio ao financeiro
+
+def _desfazer(postgres, oracle, usuario=None):
+    return rota.desfazer_envio_ao_financeiro('11222333000181', '123', usuario or _usuario(), postgres, oracle)
+
+
+def _sessoes_desfazer(boletos, importacao=None, lancada=None):
+    """Setor com a oficina 2 concedida; nota da oficina 2."""
+    postgres = FakeSession([
+        [NOTA], REGRAS, [2], [],                       # nota, regras, oficinas concedidas, login MV
+        boletos,                                       # boletos da nota
+        [True], [importacao] if importacao else [],    # tabela de importações e registro
+        [], [],                                        # DELETE + commit
+    ])
+    lanc = [lancada] if lancada else []
+    oracle = FakeSession([EMPRESAS, [], lanc])        # empresas, ENT_SERV do fornecedor, lançadas no MV
+    return postgres, oracle
+
+
+def test_desfazer_envio_exclui_os_boletos_e_volta_para_a_lancar():
+    postgres, oracle = _sessoes_desfazer([{'id': 1, 'enviado_por': 7}, {'id': 2, 'enviado_por': 7}])
+    resposta = _desfazer(postgres, oracle)
+
+    assert resposta == {'desfeito': True, 'boletos_removidos': 2}
+    assert any('DELETE FROM api_prontocardio.contas_pagar_boletos' in sql for sql, _ in postgres.executions)
+    assert postgres.commits == 1
+
+
+def test_desfazer_envio_bloqueado_se_o_financeiro_ja_importou():
+    postgres, oracle = _sessoes_desfazer([{'id': 1, 'enviado_por': 7}], importacao={'status': 'importada'})
+    with pytest.raises(HTTPException) as erro:
+        _desfazer(postgres, oracle)
+    assert erro.value.status_code == 409
+    assert 'importou' in erro.value.detail
+    assert postgres.commits == 0
+
+
+def test_desfazer_envio_bloqueado_se_ja_lancada_no_mv():
+    lancada = {'cnpj': '11222333000181', 'nr_documento': '0123', 'cd_ent_serv': 55, 'cd_con_pag': 66,
+               'cd_usuario': 'RH000111', 'origem': 'ENT_SERV'}
+    postgres, oracle = _sessoes_desfazer([{'id': 1, 'enviado_por': 7}], lancada=lancada)
+    with pytest.raises(HTTPException) as erro:
+        _desfazer(postgres, oracle)
+    assert erro.value.status_code == 409
+    assert 'entrada 55' in erro.value.detail
+
+
+def test_desfazer_envio_so_por_quem_enviou():
+    postgres, oracle = _sessoes_desfazer([{'id': 1, 'enviado_por': 99}])
+    with pytest.raises(HTTPException) as erro:
+        _desfazer(postgres, oracle)
+    assert erro.value.status_code == 403
+
+
+def test_desfazer_envio_sem_boleto():
+    postgres, oracle = _sessoes_desfazer([])
+    with pytest.raises(HTTPException) as erro:
+        _desfazer(postgres, oracle)
+    assert erro.value.status_code == 404

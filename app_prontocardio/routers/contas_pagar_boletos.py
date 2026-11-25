@@ -29,9 +29,11 @@ from app_prontocardio.routers.contas_pagar_nfse import (
     AcessoFila,
     SessionOracle,
     SessionPostgres,
+    _chave_documento,
     _decimal,
     _empresas_mv,
     _gestor,
+    _lancadas_mv,
     _regras,
     escopo_da_fila,
     nfse_cancelada,
@@ -127,7 +129,9 @@ SQL_BOLETOS_DAS_NOTAS = text("""
 SELECT prestador_cnpj, numero_nfse, count(*) AS quantidade, sum(valor) AS soma,
        min(vencimento) AS primeiro_vencimento,
        bool_or(divergencias <> '[]') AS com_divergencia,
-       bool_or(coalesce(fora_do_prazo, false)) AS fora_do_prazo
+       bool_or(coalesce(fora_do_prazo, false)) AS fora_do_prazo,
+       array_agg(id ORDER BY vencimento, id) AS ids,
+       array_agg(DISTINCT enviado_por) AS enviado_por
   FROM api_prontocardio.contas_pagar_boletos
  WHERE prestador_cnpj = ANY(:cnpjs)
  GROUP BY prestador_cnpj, numero_nfse
@@ -467,9 +471,66 @@ def excluir_boleto(boleto_id: int, usuario: AcessoFila, session: SessionPostgres
     _nota_ou_404(session, oracle, usuario, linha['prestador_cnpj'], linha['numero_nfse'])
     if not _gestor(usuario) and linha['enviado_por'] != usuario.id:
         raise HTTPException(HTTPStatus.FORBIDDEN, 'Só quem anexou o boleto (ou o financeiro) pode excluí-lo.')
+    bloqueio = envio_bloqueado(session, oracle, linha['prestador_cnpj'], linha['numero_nfse'])
+    if bloqueio:
+        raise HTTPException(HTTPStatus.CONFLICT, bloqueio)
     session.execute(text('DELETE FROM api_prontocardio.contas_pagar_boletos WHERE id = :id'), {'id': boleto_id})
     session.commit()
     return Response(status_code=HTTPStatus.NO_CONTENT)
+
+
+def envio_bloqueado(session, oracle, cnpj: str, numero: str) -> str | None:
+    """Por que o envio ao financeiro não pode mais ser desfeito (None = pode).
+
+    Bloqueia quando o financeiro já deu baixa na nota: importação pelo
+    Receita Certa em andamento/concluída, ou entrada/título já no MV.
+    """
+    if session.execute(SQL_TABELA_IMPORTACOES).scalar_one():
+        registro = session.execute(SQL_IMPORTACAO_DA_NOTA, {'cnpj': cnpj, 'numero': numero}).mappings().first()
+        if registro and registro['status'] in ('em_andamento', 'importada'):
+            return ('O financeiro já importou esta nota para o MV. '
+                    'Para desfazer, peça ao financeiro para desfazer a importação.')
+    lancada = _lancadas_mv(oracle, [cnpj]).get((cnpj, _chave_documento(numero)))
+    if lancada:
+        onde = ' e '.join(filter(None, [
+            f"entrada {lancada['cd_ent_serv']}" if lancada.get('cd_ent_serv') else None,
+            f"título {lancada['cd_con_pag']}" if lancada.get('cd_con_pag') else None,
+        ]))
+        return f'Esta nota já foi lançada no MV ({onde}). O envio ao financeiro não pode mais ser desfeito.'
+    return None
+
+
+@router.post('/recebidas/{cnpj}/{numero}/boletos/desfazer-envio')
+def desfazer_envio_ao_financeiro(cnpj: str, numero: str, usuario: AcessoFila,
+                                 session: SessionPostgres, oracle: SessionOracle):
+    """Tira a nota da fila do financeiro: exclui os boletos enviados.
+
+    Só enquanto o financeiro não deu baixa (``envio_bloqueado``) e só por
+    quem enviou os boletos (ou pelo financeiro). A nota volta para "A lançar".
+    """
+    cnpj = somente_digitos(cnpj)
+    _nota_ou_404(session, oracle, usuario, cnpj, numero)
+    boletos = session.execute(
+        text('SELECT id, enviado_por FROM api_prontocardio.contas_pagar_boletos '
+             'WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero'),
+        {'cnpj': cnpj, 'numero': numero},
+    ).mappings().all()
+    if not boletos:
+        raise HTTPException(HTTPStatus.NOT_FOUND, 'Esta nota não tem boleto enviado ao financeiro.')
+    if not _gestor(usuario) and any(b['enviado_por'] != usuario.id for b in boletos):
+        raise HTTPException(HTTPStatus.FORBIDDEN, 'Só quem enviou os boletos (ou o financeiro) pode desfazer o envio.')
+    bloqueio = envio_bloqueado(session, oracle, cnpj, numero)
+    if bloqueio:
+        raise HTTPException(HTTPStatus.CONFLICT, bloqueio)
+    session.execute(
+        text('DELETE FROM api_prontocardio.contas_pagar_boletos '
+             'WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero'),
+        {'cnpj': cnpj, 'numero': numero},
+    )
+    session.commit()
+    logger.info('Envio ao financeiro desfeito: NFS-e %s/%s, %d boleto(s), usuário %s',
+                cnpj, numero, len(boletos), usuario.id)
+    return {'desfeito': True, 'boletos_removidos': len(boletos)}
 
 
 def boletos_por_nota(session, cnpjs: list[str]) -> dict[tuple[str, str], dict]:
