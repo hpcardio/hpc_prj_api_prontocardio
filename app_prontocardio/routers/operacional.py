@@ -5,11 +5,12 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app_prontocardio.database import get_session_oracle
+from app_prontocardio.agenda_medica_models import AgendaMedicaTratativaPaciente
+from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import Usuario
 from app_prontocardio.routers.agendamentos import ValidaUsuarioAtual
 from app_prontocardio.security import valida_token_usuario_atual
@@ -17,6 +18,7 @@ from app_prontocardio.unidades import nome_unidade_publica
 
 router = APIRouter(prefix='/operacional', tags=['operacional'])
 SessionOracle = Annotated[Session, Depends(get_session_oracle)]
+SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 UsuarioOperacional = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 FUSO_HORARIO_BRASIL = ZoneInfo('America/Sao_Paulo')
 StatusConfirmacao = Literal[
@@ -34,6 +36,15 @@ STATUS_ASSUNTO = {
     'reagendamento_solicitado': 'REAGENDAMENTO SOLICITADO VIA WHATSAPP',
 }
 INTERVALO_MAXIMO_CONFIRMACOES_DIAS = 31
+TELAS_CONFIRMACAO_LEITURA = {
+    'agenda_medica_atendente',
+    'agenda_medica_admin',
+    'agenda_medica_responsavel',
+}
+TELAS_CONFIRMACAO_ESCRITA = {
+    'agenda_medica_atendente',
+    'agenda_medica_admin',
+}
 
 
 class ConfirmacaoContatoInput(BaseModel):
@@ -45,6 +56,27 @@ class ConfirmacaoContatoInput(BaseModel):
     )
     data_resposta: datetime | None = None
     observacao: str | None = Field(default=None, max_length=1000)
+    motivo_correcao: str | None = Field(default=None, min_length=5, max_length=1000)
+
+
+class TratativaPacienteInput(BaseModel):
+    status: Literal['EM_TRATATIVA', 'CONCLUIDA', 'CANCELADA', 'FALHA']
+    motivo: str | None = Field(default=None, max_length=1000)
+    cd_it_agenda_destino: int | None = Field(default=None, gt=0)
+
+
+def _exigir_acesso_confirmacoes(
+    usuario: Usuario, *, escrita: bool = False
+) -> Usuario:
+    if usuario.perfil in {'ti', 'administrador'}:
+        return usuario
+    permitidas = TELAS_CONFIRMACAO_ESCRITA if escrita else TELAS_CONFIRMACAO_LEITURA
+    if not permitidas.intersection(usuario.telas_permitidas or []):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='Usuário sem permissão para confirmações de pacientes.',
+        )
+    return usuario
 
 
 def _validar_periodo_confirmacoes(data_inicio: date, data_fim: date) -> None:
@@ -129,12 +161,13 @@ def montar_resumo_confirmacoes(rows, data_inicio: date, data_fim: date):
 
 @router.get('/agendamentos/confirmacoes/resumo')
 def consultar_resumo_confirmacoes_agendamentos(
-    _: UsuarioOperacional,
+    usuario: UsuarioOperacional,
     session: SessionOracle,
     data_inicio: date,
     data_fim: date,
 ):
     """Indicadores agregados de confirmação, encaixe e presença no MV."""
+    _exigir_acesso_confirmacoes(usuario)
     _validar_periodo_confirmacoes(data_inicio, data_fim)
     rows = session.execute(
         text(
@@ -280,7 +313,7 @@ def consultar_resumo_confirmacoes_agendamentos(
 
 @router.get('/agendamentos/confirmacoes')
 def consultar_confirmacoes_agendamentos(
-    _: UsuarioOperacional,
+    usuario: UsuarioOperacional,
     session: SessionOracle,
     data_inicio: date,
     data_fim: date,
@@ -295,6 +328,7 @@ def consultar_confirmacoes_agendamentos(
     limite: int = Query(default=500, ge=1, le=1000),
 ):
     """Lista agendamentos e a última confirmação registrada no MV."""
+    _exigir_acesso_confirmacoes(usuario)
     _validar_periodo_confirmacoes(data_inicio, data_fim)
     params: dict[str, object] = {
         'data_inicio': data_inicio,
@@ -403,9 +437,12 @@ def registrar_confirmacao_contato(
     payload: ConfirmacaoContatoInput,
     usuario: UsuarioOperacional,
     session: SessionOracle,
+    session_postgres: SessionPostgres,
 ):
     """Registra no MV a resposta recebida por uma integração de contato."""
+    _exigir_acesso_confirmacoes(usuario, escrita=True)
     marcador = f'[ID_EXTERNO:{payload.id_mensagem_externa}]'
+    tratativa = None
     try:
         agendamento = session.execute(
             text(
@@ -429,6 +466,33 @@ def registrar_confirmacao_contato(
                 detail=(
                     'Agendamento não encontrado ou sem paciente vinculado '
                     'no MV.'
+                ),
+            )
+
+        atual = session.execute(
+            text(
+                """
+                SELECT DS_ASSUNTO AS assunto_contato
+                  FROM DBAMV.REGISTRO_CONTATO
+                 WHERE CD_REGISTRO_VINCULADO = :cd_it_agenda_central
+                   AND TP_ACAO = 'AS'
+                 ORDER BY TRUNC(DT_CONTATO)
+                          + (HR_CONTATO - TRUNC(HR_CONTATO)) DESC,
+                          CD_REGISTRO_CONTATO DESC
+                 FETCH FIRST 1 ROW ONLY
+                """
+            ),
+            {'cd_it_agenda_central': cd_it_agenda_central},
+        ).mappings().one_or_none()
+        assunto_atual = atual['assunto_contato'] if atual else None
+        assunto_novo = STATUS_ASSUNTO[payload.status]
+        eh_correcao = bool(assunto_atual and assunto_atual != assunto_novo)
+        if eh_correcao and not payload.motivo_correcao:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail=(
+                    'Já existe uma resposta diferente. Informe '
+                    'motivo_correcao para manter a trilha de auditoria.'
                 ),
             )
 
@@ -469,6 +533,44 @@ def registrar_confirmacao_contato(
                 'criado': False,
                 'idempotente': True,
             }
+
+
+        if payload.status == 'cancelamento_solicitado' or eh_correcao:
+            if payload.status == 'cancelamento_solicitado':
+                tratativa = session_postgres.scalar(
+                    select(AgendaMedicaTratativaPaciente).where(
+                        AgendaMedicaTratativaPaciente.cd_it_agenda_central
+                        == cd_it_agenda_central,
+                        AgendaMedicaTratativaPaciente.tipo == 'NAO_VIRA',
+                        AgendaMedicaTratativaPaciente.status.in_(
+                            ('PENDENTE', 'EM_TRATATIVA')
+                        ),
+                    )
+                )
+            if tratativa is None:
+                tratativa = AgendaMedicaTratativaPaciente(
+                    cd_it_agenda_central=cd_it_agenda_central,
+                    cd_agenda_central=None,
+                    solicitacao_id=None,
+                    tipo=(
+                        'NAO_VIRA'
+                        if payload.status == 'cancelamento_solicitado'
+                        else 'CORRECAO_CONFIRMACAO'
+                    ),
+                    status='EM_TRATATIVA',
+                    cd_it_agenda_destino=None,
+                    valor_anterior=assunto_atual,
+                    valor_novo=assunto_novo,
+                    motivo=payload.motivo_correcao or payload.observacao,
+                    criado_por_id=usuario.id,
+                    criado_por_nome=usuario.nome,
+                    concluido_por_id=None,
+                    concluido_por_nome=None,
+                    concluido_em=None,
+                )
+                session_postgres.add(tratativa)
+                session_postgres.commit()
+                session_postgres.refresh(tratativa)
 
         cd_registro_contato = session.execute(
             text('SELECT DBAMV.SEQ_REGISTRO_CONTATO.NEXTVAL FROM DUAL')
@@ -526,6 +628,38 @@ def registrar_confirmacao_contato(
             },
         )
         session.commit()
+        if tratativa is not None:
+            tratativa.status = (
+                'PENDENTE'
+                if payload.status == 'cancelamento_solicitado'
+                else 'CONCLUIDA'
+            )
+            if tratativa.status == 'CONCLUIDA':
+                tratativa.concluido_por_id = usuario.id
+                tratativa.concluido_por_nome = usuario.nome
+                tratativa.concluido_em = datetime.now(FUSO_HORARIO_BRASIL).replace(
+                    tzinfo=None
+                )
+            session_postgres.commit()
+        if payload.status == 'confirmado' and eh_correcao:
+            fila_cancelamento = session_postgres.scalar(
+                select(AgendaMedicaTratativaPaciente).where(
+                    AgendaMedicaTratativaPaciente.cd_it_agenda_central
+                    == cd_it_agenda_central,
+                    AgendaMedicaTratativaPaciente.tipo == 'NAO_VIRA',
+                    AgendaMedicaTratativaPaciente.status.in_(
+                        ('PENDENTE', 'EM_TRATATIVA', 'FALHA')
+                    ),
+                )
+            )
+            if fila_cancelamento is not None:
+                fila_cancelamento.status = 'CANCELADA'
+                fila_cancelamento.concluido_por_id = usuario.id
+                fila_cancelamento.concluido_por_nome = usuario.nome
+                fila_cancelamento.concluido_em = datetime.now(
+                    FUSO_HORARIO_BRASIL
+                ).replace(tzinfo=None)
+                session_postgres.commit()
         return {
             'cd_it_agenda_central': cd_it_agenda_central,
             'cd_registro_contato': cd_registro_contato,
@@ -533,16 +667,147 @@ def registrar_confirmacao_contato(
             'salvo_no_mv': True,
             'criado': True,
             'idempotente': False,
+            'tratativa_id': tratativa.id if tratativa else None,
         }
     except HTTPException:
         session.rollback()
         raise
     except SQLAlchemyError as exc:
         session.rollback()
+        if tratativa is not None:
+            tratativa.status = 'FALHA'
+            session_postgres.commit()
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail='Não foi possível registrar a confirmação no MV.',
         ) from exc
+
+
+def _tratativa_dict(item: AgendaMedicaTratativaPaciente) -> dict:
+    return {
+        'id': item.id,
+        'cd_it_agenda_central': item.cd_it_agenda_central,
+        'cd_agenda_central': item.cd_agenda_central,
+        'solicitacao_id': item.solicitacao_id,
+        'tipo': item.tipo,
+        'status': item.status,
+        'cd_it_agenda_destino': item.cd_it_agenda_destino,
+        'valor_anterior': item.valor_anterior,
+        'valor_novo': item.valor_novo,
+        'motivo': item.motivo,
+        'criado_por': item.criado_por_nome,
+        'criado_em': item.criado_em.isoformat() if item.criado_em else None,
+        'concluido_por': item.concluido_por_nome,
+        'concluido_em': (
+            item.concluido_em.isoformat() if item.concluido_em else None
+        ),
+    }
+
+
+@router.get('/agendamentos/tratativas')
+def listar_tratativas_paciente(
+    usuario: UsuarioOperacional,
+    session: SessionPostgres,
+    tipo: Literal['NAO_VIRA', 'REMANEJAMENTO', 'CORRECAO_CONFIRMACAO'] | None = None,
+    status: Literal['PENDENTE', 'EM_TRATATIVA', 'CONCLUIDA', 'CANCELADA', 'FALHA'] | None = None,
+    limite: int = Query(default=100, ge=1, le=500),
+):
+    _exigir_acesso_confirmacoes(usuario)
+    consulta = select(AgendaMedicaTratativaPaciente).order_by(
+        AgendaMedicaTratativaPaciente.id.desc()
+    )
+    if tipo:
+        consulta = consulta.where(AgendaMedicaTratativaPaciente.tipo == tipo)
+    if status:
+        consulta = consulta.where(AgendaMedicaTratativaPaciente.status == status)
+    itens = session.scalars(consulta.limit(limite)).all()
+    return {'tratativas': [_tratativa_dict(item) for item in itens]}
+
+
+@router.put('/agendamentos/tratativas/{tratativa_id}')
+def atualizar_tratativa_paciente(
+    tratativa_id: int,
+    payload: TratativaPacienteInput,
+    usuario: UsuarioOperacional,
+    session: SessionPostgres,
+    session_oracle: SessionOracle,
+):
+    _exigir_acesso_confirmacoes(usuario, escrita=True)
+    item = session.get(AgendaMedicaTratativaPaciente, tratativa_id)
+    if item is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Tratativa não encontrada.',
+        )
+    if item.status in {'CONCLUIDA', 'CANCELADA'}:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='Esta tratativa já foi encerrada.',
+        )
+    if (
+        item.tipo == 'REMANEJAMENTO'
+        and payload.status == 'CONCLUIDA'
+        and payload.cd_it_agenda_destino is None
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Informe o horário de destino do remanejamento.',
+        )
+    if payload.status == 'CONCLUIDA' and item.tipo in {
+        'NAO_VIRA',
+        'REMANEJAMENTO',
+    }:
+        origem = session_oracle.execute(
+            text(
+                """
+                SELECT CD_PACIENTE AS cd_paciente,
+                       NVL(TP_SITUACAO, 'M') AS tp_situacao
+                  FROM DBAMV.IT_AGENDA_CENTRAL
+                 WHERE CD_IT_AGENDA_CENTRAL = :cd_it
+                """
+            ),
+            {'cd_it': item.cd_it_agenda_central},
+        ).mappings().one_or_none()
+        origem_liberada = origem is None or (
+            origem['cd_paciente'] is None or origem['tp_situacao'] == 'C'
+        )
+        if not origem_liberada:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail=(
+                    'O horário original ainda está ocupado no SoulMV. '
+                    'Conclua o cancelamento ou remanejamento antes de '
+                    'encerrar a tratativa.'
+                ),
+            )
+        if item.tipo == 'REMANEJAMENTO':
+            destino = session_oracle.execute(
+                text(
+                    """
+                    SELECT CD_PACIENTE AS cd_paciente,
+                           NVL(TP_SITUACAO, 'M') AS tp_situacao
+                      FROM DBAMV.IT_AGENDA_CENTRAL
+                     WHERE CD_IT_AGENDA_CENTRAL = :cd_it
+                    """
+                ),
+                {'cd_it': payload.cd_it_agenda_destino},
+            ).mappings().one_or_none()
+            if destino is None or destino['cd_paciente'] is None or destino['tp_situacao'] == 'C':
+                raise HTTPException(
+                    status_code=HTTPStatus.CONFLICT,
+                    detail='O horário de destino não está ocupado no SoulMV.',
+                )
+    item.status = payload.status
+    item.cd_it_agenda_destino = payload.cd_it_agenda_destino
+    if payload.motivo:
+        item.motivo = payload.motivo.strip()
+    if payload.status in {'CONCLUIDA', 'CANCELADA'}:
+        item.concluido_por_id = usuario.id
+        item.concluido_por_nome = usuario.nome
+        item.concluido_em = datetime.now(FUSO_HORARIO_BRASIL).replace(tzinfo=None)
+    session.commit()
+    session.refresh(item)
+    return _tratativa_dict(item)
 
 
 
