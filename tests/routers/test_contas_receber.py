@@ -12,6 +12,8 @@ from app_prontocardio.permissions import TELAS_PADRAO, normalizar_telas
 from app_prontocardio.routers import contas_receber as rota
 from app_prontocardio.services.contas_receber_fluxo import (
     ProcessoPortal,
+    aliquotas_por_convenio,
+    aplicar_estimativa,
     casar_portal,
     montar_item,
     resumo_funil,
@@ -289,3 +291,65 @@ def test_protocolo_automatico_usa_a_entrada_no_portal():
     assert item['protocolo']['data_protocolo'] == date(2026, 11, 13)
     assert item['protocolo']['situacao_portal'] == 'LIBERADO'
     assert item['dias_na_etapa'] == 11
+
+
+def _item_com_nf(cd, valor, liquido, convenio=46):
+    return {
+        'cd_remessa': cd,
+        'cd_convenio': convenio,
+        'valor': Decimal(valor),
+        'protocolo': None,
+        'nfse': {'valor': Decimal(valor), 'valor_liquido': Decimal(liquido)},
+    }
+
+
+def test_retencao_estimada_pela_aliquota_do_convenio():
+    historico = [_item_com_nf(i, '1000.00', '958.00') for i in range(6)]
+    historico.append(_item_com_nf(99, '1000.00', '911.50'))  # fora do padrão
+    sem_nf_liberado = {
+        'cd_remessa': 200,
+        'cd_convenio': 46,
+        'valor': Decimal('1968.18'),
+        'protocolo': {'valor_liberado': Decimal('1328.30')},
+        'nfse': None,
+    }
+    sem_nf_bruto = {
+        'cd_remessa': 201,
+        'cd_convenio': 46,
+        'valor': Decimal('825.00'),
+        'protocolo': None,
+        'nfse': None,
+    }
+    outro_convenio = {
+        'cd_remessa': 300,
+        'cd_convenio': 12,
+        'valor': Decimal('10.00'),
+        'protocolo': None,
+        'nfse': None,
+    }
+    itens = [*historico, sem_nf_liberado, sem_nf_bruto, outro_convenio]
+
+    aliquotas = aliquotas_por_convenio(itens)
+    aplicar_estimativa(itens, aliquotas)
+
+    assert aliquotas == {46: Decimal('4.20')}
+    assert sem_nf_liberado['estimativa'] == {
+        'aliquota': Decimal('4.20'),
+        'base': Decimal('1328.30'),
+        'origem_base': 'liberado',
+        'retencoes': Decimal('55.79'),
+        'liquido': Decimal('1272.51'),
+    }
+    assert sem_nf_bruto['estimativa']['origem_base'] == 'bruto'
+    assert sem_nf_bruto['estimativa']['retencoes'] == Decimal('34.65')
+    assert outro_convenio['estimativa'] is None
+    assert historico[0]['estimativa'] is None  # NF real não é estimada
+
+
+def test_aliquota_exige_amostra_e_consenso():
+    poucos = [_item_com_nf(i, '1000.00', '958.00') for i in range(4)]
+    dividido = [_item_com_nf(i, '1000.00', '958.00') for i in range(5)] + [
+        _item_com_nf(10 + i, '1000.00', '970.00') for i in range(5)
+    ]
+    assert aliquotas_por_convenio(poucos) == {}
+    assert aliquotas_por_convenio(dividido) == {}
