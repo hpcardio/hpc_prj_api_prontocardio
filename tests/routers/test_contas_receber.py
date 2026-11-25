@@ -16,6 +16,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     aplicar_estimativa,
     bases_das_remessas,
     casar_portal,
+    config_retencao,
     montar_item,
     notas_por_nup,
     ratear_nfs,
@@ -224,6 +225,7 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
     )
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
 
     resposta = rota.fluxo(
@@ -260,6 +262,7 @@ def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(
     )
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
         oracle=None,
@@ -317,6 +320,7 @@ def test_exportar_devolve_todas_as_remessas_sem_paginar(monkeypatch):
     monkeypatch.setattr(rota, 'processos_portal', lambda _p: {})
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
         oracle=None,
@@ -420,6 +424,8 @@ def test_retencao_estimada_pela_aliquota_do_convenio():
     assert aliquotas == {46: Decimal('4.20')}
     assert sem_nf_liberado['estimativa'] == {
         'aliquota': Decimal('4.20'),
+        'fonte_aliquota': 'historico_nfs',
+        'retencoes_detalhe': {},
         'base': Decimal('1328.30'),
         'origem_base': 'liberado',
         'retencoes': Decimal('55.79'),
@@ -623,3 +629,193 @@ def test_nf_gravada_tem_prioridade_sobre_a_do_grupo():
     }
     item = montar_item(_remessa(20157, '10.00'), vinculo, None, HOJE, notas)
     assert item['nfse']['numero'] == '30083'
+
+
+BACEN = config_retencao({
+    'iss': '3',
+    'ir': '1.2',
+    'pis': '0.65',
+    'cofins': '3',
+    'csll': '1',
+})
+
+
+def test_configuracao_do_convenio_define_a_retencao_estimada_e_o_rateio():
+    sem_nf = {
+        'cd_remessa': 1,
+        'cd_convenio': 7,
+        'valor': Decimal('1000.00'),
+        'protocolo': None,
+        'nfse': None,
+    }
+    grupo = {
+        'numero': '9',
+        'prestador_cnpj': 'x',
+        'valor': Decimal('5000.00'),
+        'valor_liquido': Decimal('4900.00'),
+    }
+    em_grupo = [
+        {
+            'cd_remessa': 10 + i,
+            'cd_convenio': 7,
+            'valor': Decimal('2500.00'),
+            'protocolo': None,
+            'nfse': dict(grupo),
+        }
+        for i in range(2)
+    ]
+    itens = [sem_nf, *em_grupo]
+    configs = {7: BACEN}
+
+    ratear_nfs(itens, None, configs)
+    aplicar_estimativa(itens, {}, None, configs)
+
+    assert BACEN['total'] == Decimal('8.85')
+    assert sem_nf['estimativa']['aliquota'] == Decimal('8.85')
+    assert sem_nf['estimativa']['fonte_aliquota'] == 'configuracao'
+    assert sem_nf['estimativa']['retencoes'] == Decimal('88.50')
+    assert sem_nf['estimativa']['retencoes_detalhe'] == {
+        'iss': Decimal('30.00'),
+        'ir': Decimal('12.00'),
+        'pis': Decimal('6.50'),
+        'cofins': Decimal('30.00'),
+        'csll': Decimal('10.00'),
+    }
+    rateio = em_grupo[0]['nf_rateio']
+    assert rateio['aliquota_nf'] == Decimal('2.00')
+    assert rateio['aliquota'] == Decimal('8.85')
+    assert rateio['retencoes'] == Decimal('221.25')
+    assert rateio['fonte_aliquota'] == 'configuracao'
+
+
+def test_convenio_configurado_com_zero_nao_retem():
+    item = {
+        'cd_remessa': 1,
+        'cd_convenio': 9,
+        'valor': Decimal('100.00'),
+        'protocolo': None,
+        'nfse': None,
+    }
+    zero = config_retencao({})
+    aplicar_estimativa([item], {9: Decimal('3.00')}, None, {9: zero})
+    assert item['estimativa']['retencoes'] == Decimal('0.00')
+    assert item['estimativa']['liquido'] == Decimal('100.00')
+
+
+class _Resultado:
+    def __init__(self, linhas):
+        self.linhas = linhas
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.linhas
+
+
+class _Sessao:
+    def __init__(self, respostas):
+        self.respostas = list(respostas)
+        self.execucoes = []
+        self.commits = 0
+
+    def execute(self, sql, params=None):
+        self.execucoes.append((str(sql), params))
+        return _Resultado(self.respostas.pop(0) if self.respostas else [])
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_lista_convenios_do_mv_com_os_percentuais_salvos():
+    oracle = _Sessao([
+        [
+            {'cd_convenio': 7, 'nm_convenio': 'BACEN'},
+            {'cd_convenio': 9, 'nm_convenio': 'BRADESCO'},
+        ]
+    ])
+    postgres = _Sessao([
+        [
+            {
+                'cd_convenio': 7,
+                'convenio': 'BACEN',
+                'iss': Decimal('3'),
+                'ir': Decimal('1.2'),
+                'pis': Decimal('0.65'),
+                'cofins': Decimal('3'),
+                'csll': Decimal('1'),
+                'observacao': None,
+                'atualizado_por_nome': 'Financeiro',
+                'atualizado_em': None,
+            },
+        ]
+    ])
+
+    linhas = rota.listar_retencoes_convenio(oracle, postgres, None)[
+        'convenios'
+    ]
+
+    assert linhas[0]['total'] == Decimal('8.85')
+    assert linhas[0]['configurado'] is True
+    assert linhas[1]['configurado'] is False
+    assert linhas[1]['total'] == Decimal('0')
+
+
+def test_salva_so_o_que_mudou_e_audita():
+    postgres = _Sessao([
+        [
+            {
+                'cd_convenio': 7,
+                'convenio': 'BACEN',
+                'iss': Decimal('3'),
+                'ir': Decimal('1.2'),
+                'pis': Decimal('0.65'),
+                'cofins': Decimal('3'),
+                'csll': Decimal('1'),
+                'observacao': None,
+            },
+        ]
+    ])
+    usuario = SimpleNamespace(id=5, nome='Financeiro')
+    payload = [
+        rota.RetencaoConvenioInput(
+            cd_convenio=7,
+            convenio='BACEN',
+            iss=3,
+            ir=1.2,
+            pis=0.65,
+            cofins=3,
+            csll=1,
+        ),
+        rota.RetencaoConvenioInput(
+            cd_convenio=46, convenio='ISSEC', iss=3, ir=1.2
+        ),
+    ]
+
+    resposta = rota.salvar_retencoes_convenio(payload, postgres, usuario)
+
+    assert resposta == {'alterados': 1}
+    assert postgres.commits == 1
+    sqls = [sql for sql, _ in postgres.execucoes]
+    assert (
+        sum(
+            'INSERT INTO api_prontocardio.cr_convenio_retencoes' in s
+            for s in sqls
+        )
+        == 1
+    )
+    assert sum('cr_eventos' in s for s in sqls) == 1
+
+
+def test_acesso_a_configuracao():
+    assert rota.acesso_configuracao(
+        SimpleNamespace(
+            perfil='usuario', telas_permitidas=['configuracao_convenio']
+        )
+    )
+    with pytest.raises(HTTPException):
+        rota.acesso_configuracao(
+            SimpleNamespace(
+                perfil='usuario', telas_permitidas=['contas_receber_fluxo']
+            )
+        )

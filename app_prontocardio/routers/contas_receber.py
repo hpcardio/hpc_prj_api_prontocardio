@@ -8,13 +8,16 @@ importação do histórico e o recebimento pelo extrato vêm nas próximas
 entregas, sobre as tabelas ``cr_*`` (docs/oracle/contas_receber_fluxo.sql).
 """
 
+import json
 from datetime import date, datetime
+from decimal import Decimal
 from http import HTTPStatus
 from math import ceil
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app_prontocardio.models import Usuario
@@ -27,11 +30,13 @@ from app_prontocardio.routers.contas_pagar_nfse import (
 from app_prontocardio.services.contas_receber_fluxo import (
     CONCLUIDO,
     ETAPAS,
+    IMPOSTOS,
     ProcessoPortal,
     aliquotas_por_convenio,
     aplicar_estimativa,
     bases_das_remessas,
     casar_portal,
+    config_retencao,
     dinheiro,
     montar_item,
     notas_por_nup,
@@ -64,6 +69,20 @@ def acesso_fluxo(usuario: UsuarioAtual) -> Usuario:
 
 
 AcessoFluxo = Annotated[Usuario, Depends(acesso_fluxo)]
+TELA_CONFIGURACAO = 'configuracao_convenio'
+
+
+def acesso_configuracao(usuario: UsuarioAtual) -> Usuario:
+    if usuario.perfil in PERFIS_GESTAO or TELA_CONFIGURACAO in (
+        usuario.telas_permitidas or []
+    ):
+        return usuario
+    raise HTTPException(
+        HTTPStatus.FORBIDDEN, 'Sem acesso à Configuração por Convênio.'
+    )
+
+
+AcessoConfiguracao = Annotated[Usuario, Depends(acesso_configuracao)]
 
 
 # ---------------------------------------------------------------- MV
@@ -250,6 +269,21 @@ SELECT DISTINCT ON (prestador_cnpj, numero_nfse)
 TOMADOR_CONVENIO = {CD_CONVENIO_ISSEC: '30974559000183'}
 
 
+SQL_RETENCOES = text("""
+SELECT cd_convenio, convenio, iss, ir, pis, cofins, csll, observacao,
+       atualizado_por_nome, atualizado_em
+  FROM api_prontocardio.cr_convenio_retencoes
+""")
+
+
+def retencoes_configuradas(postgres) -> dict[int, dict]:
+    """Percentuais da Configuração por Convênio (cd_convenio -> config)."""
+    return {
+        int(linha['cd_convenio']): config_retencao(linha)
+        for linha in postgres.execute(SQL_RETENCOES).mappings().all()
+    }
+
+
 def notas_de_grupo(postgres) -> dict[str, dict]:
     notas = []
     for tomador in TOMADOR_CONVENIO.values():
@@ -354,7 +388,9 @@ def _competencia(valor: str | None, campo: str) -> date | None:
         ) from exc
 
 
-def montar_fluxo(remessas, portal, vinculos, hoje, notas_grupo=None):
+def montar_fluxo(
+    remessas, portal, vinculos, hoje, notas_grupo=None, configs=None
+):
     """Todos os itens do fluxo (sem filtro)."""
     numeros_vinculados = {
         (v['protocolo']['numero']) for v in vinculos.values()
@@ -380,8 +416,10 @@ def montar_fluxo(remessas, portal, vinculos, hoje, notas_grupo=None):
         for r in remessas
     ]
     bases = bases_das_remessas(itens)
-    ratear_nfs(itens, bases)
-    return aplicar_estimativa(itens, aliquotas_por_convenio(itens), bases)
+    ratear_nfs(itens, bases, configs)
+    return aplicar_estimativa(
+        itens, aliquotas_por_convenio(itens), bases, configs
+    )
 
 
 def _bate_busca(item, termo: str) -> bool:
@@ -494,6 +532,7 @@ def fluxo(
         vinculos_gravados(postgres),
         _hoje(),
         notas_de_grupo(postgres),
+        retencoes_configuradas(postgres),
     )
     filtrados = filtrar(
         todos,
@@ -528,3 +567,126 @@ def fluxo(
             timespec='seconds'
         ),
     }
+
+
+# ---------------------------------------------------------------- configuração
+
+SQL_CONVENIOS_ATIVOS = text("""
+SELECT cd_convenio, nm_convenio FROM dbamv.convenio
+ WHERE sn_ativo = 'S' AND nm_convenio IS NOT NULL
+ ORDER BY nm_convenio
+""")
+
+SQL_SALVAR_RETENCAO = text("""
+INSERT INTO api_prontocardio.cr_convenio_retencoes
+       (cd_convenio, convenio, iss, ir, pis, cofins, csll, observacao,
+        atualizado_por, atualizado_por_nome, atualizado_em)
+VALUES (:cd_convenio, :convenio, :iss, :ir, :pis, :cofins, :csll, :observacao,
+        :usuario_id, :usuario_nome, now())
+ON CONFLICT (cd_convenio) DO UPDATE SET
+       convenio = EXCLUDED.convenio, iss = EXCLUDED.iss, ir = EXCLUDED.ir,
+       pis = EXCLUDED.pis, cofins = EXCLUDED.cofins, csll = EXCLUDED.csll,
+       observacao = EXCLUDED.observacao,
+       atualizado_por = EXCLUDED.atualizado_por,
+       atualizado_por_nome = EXCLUDED.atualizado_por_nome,
+       atualizado_em = now()
+""")
+
+SQL_EVENTO = text("""
+INSERT INTO api_prontocardio.cr_eventos
+       (entidade, chave, acao, dados_anteriores, dados_novos, usuario_id, usuario_nome)
+VALUES ('retencao_convenio', :chave, :acao, CAST(:antes AS jsonb),
+        CAST(:depois AS jsonb), :usuario_id, :usuario_nome)
+""")
+
+
+class RetencaoConvenioInput(BaseModel):
+    cd_convenio: int
+    convenio: str = Field(min_length=1, max_length=120)
+    iss: Decimal = Field(default=Decimal('0'), ge=0, le=100)
+    ir: Decimal = Field(default=Decimal('0'), ge=0, le=100)
+    pis: Decimal = Field(default=Decimal('0'), ge=0, le=100)
+    cofins: Decimal = Field(default=Decimal('0'), ge=0, le=100)
+    csll: Decimal = Field(default=Decimal('0'), ge=0, le=100)
+    observacao: str | None = Field(default=None, max_length=300)
+
+
+def _linha_retencao(cd_convenio, nome, salvo):
+    config = config_retencao(salvo or {})
+    return {
+        'cd_convenio': cd_convenio,
+        'convenio': nome,
+        **{k: config[k] for k in IMPOSTOS},
+        'total': config['total'],
+        'observacao': (salvo or {}).get('observacao'),
+        'configurado': salvo is not None,
+        'atualizado_por_nome': (salvo or {}).get('atualizado_por_nome'),
+        'atualizado_em': (salvo or {}).get('atualizado_em'),
+    }
+
+
+@router.get('/retencoes-convenio')
+def listar_retencoes_convenio(
+    oracle: SessionOracle,
+    postgres: SessionPostgres,
+    _usuario: AcessoConfiguracao,
+):
+    """Percentuais de retenção (ISS, IR, PIS, COFINS, CSLL) por convênio."""
+    salvos = {
+        int(linha['cd_convenio']): dict(linha)
+        for linha in postgres.execute(SQL_RETENCOES).mappings().all()
+    }
+    linhas, vistos = [], set()
+    for convenio in oracle.execute(SQL_CONVENIOS_ATIVOS).mappings().all():
+        codigo = int(convenio['cd_convenio'])
+        vistos.add(codigo)
+        nome = (convenio['nm_convenio'] or '').strip()
+        linhas.append(_linha_retencao(codigo, nome, salvos.get(codigo)))
+    for codigo, salvo in salvos.items():
+        if codigo not in vistos:
+            linhas.append(_linha_retencao(codigo, salvo['convenio'], salvo))
+    return {'convenios': linhas}
+
+
+@router.put('/retencoes-convenio')
+def salvar_retencoes_convenio(
+    payload: list[RetencaoConvenioInput],
+    postgres: SessionPostgres,
+    usuario: AcessoConfiguracao,
+):
+    """Grava os percentuais (só os que mudaram) e registra a auditoria."""
+    salvos = {
+        int(linha['cd_convenio']): dict(linha)
+        for linha in postgres.execute(SQL_RETENCOES).mappings().all()
+    }
+    alterados = 0
+    for item in payload:
+        novo = item.model_dump()
+        anterior = salvos.get(item.cd_convenio)
+        if (
+            anterior is not None
+            and all(Decimal(str(anterior[k])) == novo[k] for k in IMPOSTOS)
+            and (anterior.get('observacao') or None)
+            == (novo['observacao'] or None)
+        ):
+            continue
+        postgres.execute(
+            SQL_SALVAR_RETENCAO,
+            {**novo, 'usuario_id': usuario.id, 'usuario_nome': usuario.nome},
+        )
+        postgres.execute(
+            SQL_EVENTO,
+            {
+                'chave': str(item.cd_convenio),
+                'acao': 'criar' if anterior is None else 'editar',
+                'antes': json.dumps(anterior, default=str)
+                if anterior
+                else None,
+                'depois': json.dumps(novo, default=str),
+                'usuario_id': usuario.id,
+                'usuario_nome': usuario.nome,
+            },
+        )
+        alterados += 1
+    postgres.commit()
+    return {'alterados': alterados}
