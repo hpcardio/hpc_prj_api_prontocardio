@@ -705,6 +705,8 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
                 'primeiro_vencimento': resumo_boletos['primeiro_vencimento'],
                 'com_divergencia': bool(resumo_boletos['com_divergencia']),
                 'fora_do_prazo': bool(resumo_boletos.get('fora_do_prazo')),
+                'ids': list(resumo_boletos.get('ids') or []),
+                'enviado_por': [u for u in (resumo_boletos.get('enviado_por') or []) if u is not None],
             } if resumo_boletos else None,
             'pronta': pronta,
         })
