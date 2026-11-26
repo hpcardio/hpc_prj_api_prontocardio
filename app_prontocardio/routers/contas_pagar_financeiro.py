@@ -53,7 +53,7 @@ ETAPAS = ('a_importar', 'pendencia', 'importada', 'lancada_mv', 'cancelada')
 SQL_BOLETOS_DAS_NOTAS_DETALHE = text("""
 SELECT b.id, b.prestador_cnpj, b.numero_nfse, b.banco, b.valor, b.vencimento, b.linha_digitavel,
        b.origem_leitura, b.divergencias, b.enviado_em, b.prazo_minimo, b.fora_do_prazo, b.justificativa_atraso,
-       u.nome AS enviado_por_nome
+       b.observacao, u.nome AS enviado_por_nome
   FROM api_prontocardio.contas_pagar_boletos b
   LEFT JOIN api_prontocardio.usuarios_api u ON u.id = b.enviado_por
  WHERE b.prestador_cnpj = ANY(:cnpjs)
