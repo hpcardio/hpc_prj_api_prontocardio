@@ -980,3 +980,17 @@ def test_fluxo_mostra_a_planilha_como_sugestao_e_casa_pelo_portal():
     assert itens[8]['protocolo']['situacao'] == 'automatico'
     assert itens[8]['protocolo_planilha'] is None
     assert rota.filtrar(list(itens.values()), q='35769')[0]['cd_remessa'] == 4
+
+
+def test_grupo_pago_vale_para_o_processo_pelo_nup_do_detalhe():
+    """Caso 2600005457: grupo pago no portal sem a lista de membros detalhada."""
+    sql = rota.sql_notas_portal({'pagas': True, 'pendentes': False, 'processos': True, 'processos_portal': True})
+    assert 'JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = pr.nup_grupo' in sql
+    assert sql.count('UNION ALL') == 2
+    todas = rota.sql_notas_portal({'pagas': True, 'pendentes': True, 'processos': True, 'processos_portal': True})
+    assert todas.count('UNION ALL') == 5
+    assert todas.count('_dlt_load_id = (') == 3
+    # Processo de grupo: o valor pago é do grupo inteiro, não vai para a remessa.
+    assert 'SELECT pr.processo, \'paga\', false, NULL::numeric' in sql
+    sem_portal = rota.sql_notas_portal({'pagas': True, 'pendentes': False, 'processos': False, 'processos_portal': False})
+    assert sem_portal.count('UNION ALL') == 0

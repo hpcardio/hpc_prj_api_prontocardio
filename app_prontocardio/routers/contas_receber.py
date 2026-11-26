@@ -399,7 +399,8 @@ def _competencia(valor: str | None, campo: str) -> date | None:
 SQL_TABELAS_NOTAS_PORTAL = text("""
 SELECT to_regclass('raw_issec_portal.notas_fiscais_pagas') IS NOT NULL AS pagas,
        to_regclass('raw_issec_portal.notas_fiscais_pendentes') IS NOT NULL AS pendentes,
-       to_regclass('raw_issec_portal.notas_fiscais_processos') IS NOT NULL AS processos
+       to_regclass('raw_issec_portal.notas_fiscais_processos') IS NOT NULL AS processos,
+       to_regclass('raw_issec_portal.processos') IS NOT NULL AS processos_portal
 """)
 
 # Pendentes é uma foto do portal: só vale a da última carga concluída. O dlt não
@@ -412,17 +413,30 @@ _SQL_PAGAS = """
 SELECT processo, 'paga' AS situacao, false AS nf_a_enviar, valor_pago, nup,
        primeira_extracao_em::text AS pago_desde, 1 AS prioridade
   FROM raw_issec_portal.notas_fiscais_pagas WHERE tipo <> 'AGRUPADOR'"""
+# Processo de um grupo (NUP agrupador): o valor pago no portal é o do grupo
+# inteiro, então não vai para o card da remessa (valor NULL).
 _SQL_PAGAS_GRUPO = """
-SELECT m.processo, 'paga', false, p.valor_pago, p.nup, p.primeira_extracao_em::text, 1
+SELECT m.processo, 'paga', false, NULL::numeric, p.nup, p.primeira_extracao_em::text, 1
   FROM raw_issec_portal.notas_fiscais_processos m
   JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = m.nup_grupo"""
+# O grupo também vem do detalhe de cada processo (processos.nup_grupo, 2025+),
+# que cobre os grupos cuja lista de membros a DAG não detalhou.
+_SQL_PAGAS_GRUPO_DETALHE = """
+SELECT pr.processo, 'paga', false, NULL::numeric, p.nup, p.primeira_extracao_em::text, 1
+  FROM raw_issec_portal.processos pr
+  JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = pr.nup_grupo AND p.tipo = 'AGRUPADOR'"""
 _SQL_PENDENTES = f"""
 SELECT processo, 'pendente', nf_a_enviar, valor, nup, NULL, 2
   FROM raw_issec_portal.notas_fiscais_pendentes WHERE NOT agrupado AND {_PENDENTES_DA_ULTIMA_CARGA}"""
 _SQL_PENDENTES_GRUPO = f"""
-SELECT m.processo, 'pendente', p.nf_a_enviar, p.valor, p.nup, NULL, 2
+SELECT m.processo, 'pendente', p.nf_a_enviar, NULL::numeric, p.nup, NULL, 2
   FROM raw_issec_portal.notas_fiscais_processos m
   JOIN raw_issec_portal.notas_fiscais_pendentes p ON p.nup = m.nup_grupo
+ WHERE p.{_PENDENTES_DA_ULTIMA_CARGA}"""
+_SQL_PENDENTES_GRUPO_DETALHE = f"""
+SELECT pr.processo, 'pendente', p.nf_a_enviar, NULL::numeric, p.nup, NULL, 2
+  FROM raw_issec_portal.processos pr
+  JOIN raw_issec_portal.notas_fiscais_pendentes p ON p.nup = pr.nup_grupo AND p.agrupado
  WHERE p.{_PENDENTES_DA_ULTIMA_CARGA}"""
 
 
@@ -433,10 +447,14 @@ def sql_notas_portal(tabelas) -> str | None:
         partes.append(_SQL_PAGAS)
         if tabelas.get('processos'):
             partes.append(_SQL_PAGAS_GRUPO)
+        if tabelas.get('processos_portal'):
+            partes.append(_SQL_PAGAS_GRUPO_DETALHE)
     if tabelas.get('pendentes'):
         partes.append(_SQL_PENDENTES)
         if tabelas.get('processos'):
             partes.append(_SQL_PENDENTES_GRUPO)
+        if tabelas.get('processos_portal'):
+            partes.append(_SQL_PENDENTES_GRUPO_DETALHE)
     return '\nUNION ALL'.join(partes) if partes else None
 
 
