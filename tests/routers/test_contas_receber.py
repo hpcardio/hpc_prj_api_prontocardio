@@ -858,6 +858,9 @@ class _ResultadoPortal:
     def all(self):
         return self.rows
 
+    def first(self):
+        return self.rows[0] if self.rows else None
+
 
 class _SessaoPortal:
     def __init__(self, respostas):
@@ -873,11 +876,33 @@ def test_notas_do_portal_paga_vale_mais_que_pendente_e_sem_tabelas_fica_vazio():
         {'processo': '2600040111', 'situacao': 'paga', 'nf_a_enviar': False, 'valor_pago': '9.58', 'nup': 'G1', 'pago_desde': '2026-11-26', 'prioridade': 1},
         {'processo': '2600050000', 'situacao': 'pendente', 'nf_a_enviar': True, 'valor_pago': '5.00', 'nup': 'G2', 'pago_desde': None, 'prioridade': 2},
     ]
-    notas = rota.notas_do_portal(_SessaoPortal([[True], linhas]))
+    todas = {'pagas': True, 'pendentes': True, 'processos': True}
+    notas = rota.notas_do_portal(_SessaoPortal([[todas], linhas]))
     assert notas['2600040111']['situacao'] == 'paga'
     assert notas['2600040111']['valor'] == Decimal('9.58')
     assert notas['2600050000'] == {'situacao': 'pendente', 'nf_a_enviar': True, 'valor': Decimal('5.00'), 'nup': 'G2', 'pago_desde': None}
-    assert rota.notas_do_portal(_SessaoPortal([[False]])) == {}
+    nenhuma = {'pagas': False, 'pendentes': False, 'processos': False}
+    assert rota.notas_do_portal(_SessaoPortal([[nenhuma]])) == {}
+
+
+def test_sem_tabela_de_pendentes_usa_so_as_pagas():
+    """Sem pendentes no portal o dlt não cria a tabela: as pagas continuam valendo."""
+    sql = rota.sql_notas_portal({'pagas': True, 'pendentes': False, 'processos': True})
+    assert 'notas_fiscais_pagas' in sql
+    assert 'notas_fiscais_pendentes' not in sql
+    assert sql.count('UNION ALL') == 1
+    linhas = [{'processo': '2600040111', 'situacao': 'paga', 'nf_a_enviar': False, 'valor_pago': '9.58',
+               'nup': 'G1', 'pago_desde': '2026-11-26', 'prioridade': 1}]
+    notas = rota.notas_do_portal(_SessaoPortal([[{'pagas': True, 'pendentes': False, 'processos': True}], linhas]))
+    assert notas['2600040111']['situacao'] == 'paga'
+
+
+def test_pendentes_so_da_ultima_carga():
+    sql = rota.sql_notas_portal({'pagas': True, 'pendentes': True, 'processos': True})
+    assert sql.count('UNION ALL') == 3
+    assert sql.count('_dlt_load_id = (') == 2
+    assert 'status = 0' in sql
+    assert rota.sql_notas_portal({'pagas': False, 'pendentes': True, 'processos': False}).count('UNION ALL') == 0
 
 
 def test_rota_usa_a_situacao_do_portal(monkeypatch):
