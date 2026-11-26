@@ -1,0 +1,17 @@
+# Exemplo: completar com o ambiente e as redes do payables dedicado.
+# Não executar antes do backup, schema e validação da configuração.
+services:
+  supplier-bulk-worker:
+    image: ${PAYABLES_FEATURE_IMAGE:?Defina a imagem imutavel aprovada}
+    command: ["python", "scripts/supplier_bulk_worker.py", "--interval", "1"]
+    env_file:
+      - ${PAYABLES_ENV_FILE:?Defina o arquivo privado de ambiente}
+    environment:
+      SUPPLIER_BULK_SEND_ENABLED: ${SUPPLIER_BULK_SEND_ENABLED:-false}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    # Acrescentar networks/volumes somente conforme o Compose efetivo da API.

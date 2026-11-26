@@ -56,6 +56,9 @@ from app_prontocardio.routers import (
     requisicoes,
     resultados,
     resultados_laboratoriais,
+    supplier_bulk,
+    supplier_payment_notices,
+    supplier_updates,
     usuarios,
     whatsapp,
 )
@@ -151,6 +154,9 @@ app.include_router(app_glosas.router)
 app.include_router(petrobras.router)
 app.include_router(financeiro.router)
 app.include_router(contas_pagar.router)
+app.include_router(supplier_updates.router)
+app.include_router(supplier_payment_notices.router)
+app.include_router(supplier_bulk.router)
 app.include_router(contas_pagar_nfse.router)
 app.include_router(contas_pagar_boletos.router)
 app.include_router(contas_pagar_financeiro.router)
