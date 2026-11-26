@@ -721,7 +721,10 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
             historico, documentos_da_base, escopo, regras, lancadores, nomes_da_oficina,
             nomes_empresa, FiltroFila(desde, cd_oficina, cd_setor),
         ))
-        itens.sort(key=lambda item: item['data_emissao'] or '', reverse=True)
+    # Mais recentes primeiro e, acima de tudo, o que o setor ainda precisa
+    # fazer (falta boleto). sort é estável: a 2ª ordenação mantém a 1ª.
+    itens.sort(key=lambda item: item['data_emissao'] or '', reverse=True)
+    itens.sort(key=prioridade_na_fila)
 
     por_oficina: dict[tuple, dict] = {}
     for item in itens:
@@ -744,6 +747,19 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
         ),
         'itens': itens,
     }
+
+
+def prioridade_na_fila(item: dict) -> int:
+    """0 = a lançar · falta boleto; 1 = boleto divergente; 2 = pronta para o
+    financeiro; 3 = sem setor/cancelada; 4 = já lançada no MV."""
+    boletos = item.get('boletos') or {}
+    if item['situacao'] == 'pendente':
+        if not boletos:
+            return 0
+        return 2 if item.get('pronta') else 1
+    if item['situacao'] in ('a_classificar', 'cancelada'):
+        return 3
+    return 4
 
 
 @dataclass(frozen=True)
