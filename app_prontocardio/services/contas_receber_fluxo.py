@@ -41,11 +41,13 @@ PENDENCIA = {
 
 
 # Funil da tela (pedido de 26/11/2026), com a página Notas Fiscais do portal
-# ISSEC: protocolado e fora de Notas Fiscais = NFS não autorizada; em Notas
-# Fiscais – Pendentes (com ou sem ENVIAR) = aguardando recebimento; Pagas =
+# ISSEC: Pendentes com ENVIAR (ou nota solicitada) = NFS autorizada, falta
+# anexar a NF; protocolado e fora de Notas Fiscais = NFS não autorizada;
+# Pendentes sem ENVIAR ou NFS vinculada = aguardando recebimento; Pagas =
 # recebida ("sem conciliação" enquanto o crédito não está no extrato).
 SITUACOES = (
     ('protocolo', 'Aguardando protocolo'),
+    ('nfs_autorizada', 'NFS autorizadas'),
     ('nao_autorizada', 'NFS não autorizadas'),
     ('aguardando_recebimento', 'Aguardando recebimento'),
     ('recebido', 'Recebidas'),
@@ -55,7 +57,7 @@ ROTULO_SITUACAO = dict(SITUACOES)
 SITUACOES_RECEBIDAS = {'recebido', 'recebido_sem_conciliacao'}
 
 
-def situacao_fluxo(item, nota_portal=None) -> str:
+def situacao_fluxo(item, nota_portal=None) -> str:  # noqa: PLR0911
     """Etapa do funil da remessa.
 
     ``nota_portal``: situação do processo na página Notas Fiscais do portal
@@ -68,14 +70,14 @@ def situacao_fluxo(item, nota_portal=None) -> str:
         return 'recebido' if conciliado else 'recebido_sem_conciliacao'
     if conciliado:
         return 'recebido'
-    # Pendente no portal (o convênio pediu a NF com ENVIAR ou já a recebeu),
-    # NFS vinculada ou nota solicitada pelo convênio: aguardando recebimento.
-    if (
-        (nota_portal and nota_portal.get('situacao') == 'pendente')
-        or item.get('nfse')
-        or item.get('solicitacao_nota')
-    ):
+    if nota_portal and nota_portal.get('situacao') == 'pendente':
+        if nota_portal.get('nf_a_enviar'):
+            return 'nfs_autorizada'
         return 'aguardando_recebimento'
+    if item.get('nfse'):
+        return 'aguardando_recebimento'
+    if item.get('solicitacao_nota'):
+        return 'nfs_autorizada'
     return 'nao_autorizada'
 
 
