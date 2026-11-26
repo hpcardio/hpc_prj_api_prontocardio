@@ -49,6 +49,7 @@ from app_prontocardio.routers import (
     prescricoes,
     pronto_escala,
     prontolaudo,
+    rastreio_prescricoes,
     reconciliacao_rede,
     repasse_medico,
     requisicoes,
@@ -164,6 +165,7 @@ app.include_router(agenda_medica.router)
 app.include_router(pronto_escala.router)
 app.include_router(evolucoes.router)
 app.include_router(operacional.router)
+app.include_router(rastreio_prescricoes.router)
 app.include_router(cuidados_paciente.router)
 app.include_router(cuidados_paciente.operational_router)
 app.include_router(prontolaudo.router)

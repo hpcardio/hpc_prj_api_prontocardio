@@ -411,6 +411,7 @@ class ConfirmarAgendamentoInput(PreValidacaoAgendamentoInput):
     confirmar_duplicidade: bool = False
     valor_exame: float | None = Field(default=None, ge=0)
     enviar_confirmacao_whatsapp: bool = True
+    rastreio_prescricao_id: int | None = Field(default=None, gt=0)
 
 
 class AgendamentoConfirmado(BaseModel):

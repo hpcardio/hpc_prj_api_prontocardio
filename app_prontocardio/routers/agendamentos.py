@@ -66,6 +66,7 @@ from app_prontocardio.agendamento_erros import (
     detalhe_seguro_atualizacao_paciente,
 )
 from app_prontocardio.agendamento_tipos import binds_contato_paciente
+from app_prontocardio.agenda_medica_models import AgendaMedicaRastreioPrescricao
 from app_prontocardio.cep_service import (
     CepErro,
     consultar_viacep,
@@ -138,15 +139,21 @@ def _registrar_evento_pos_mv(  # noqa: PLR0913
     protocolo_mv: int | None,
     cd_it_agenda_central_anterior: int | None = None,
     protocolo_mv_anterior: int | None = None,
+    rastreio_prescricao_id: int | None = None,
 ) -> bool:
     """Persiste auditoria depois do commit MV, sem desfazer o atendimento."""
     if engine is None:
         return False
     try:
         with Session(engine) as postgres:
+            origem_fluxo = (
+                OrigemAgendamento.PRESCRICAO_AMBULATORIAL
+                if rastreio_prescricao_id is not None
+                else origem_do_principal(usuario_atual)
+            )
             origem_resultado = RegistroOrigemResultado(
                 status='registro_desabilitado',
-                origem=origem_do_principal(usuario_atual),
+                origem=origem_fluxo,
             )
             if (
                 settings.AGENDAMENTO_REGISTRAR_ORIGEM
@@ -187,9 +194,13 @@ def _registrar_evento_pos_mv(  # noqa: PLR0913
                             cd_paciente=cd_paciente,
                             cd_agenda_central=cd_agenda_central,
                             protocolo_mv=protocolo_mv,
-                            origem=origem_do_principal(usuario_atual),
+                            origem=origem_fluxo,
                             evidencia=EvidenciaOrigem.GRAVACAO_DIRETA,
-                            referencia_externa=None,
+                            referencia_externa=(
+                                f'RASTREIO_PRESCRICAO:{rastreio_prescricao_id}'
+                                if rastreio_prescricao_id is not None
+                                else None
+                            ),
                             registrada_por_id=getattr(
                                 usuario_atual, 'id', None
                             ),
@@ -216,6 +227,20 @@ def _registrar_evento_pos_mv(  # noqa: PLR0913
                     chave_efeito_lote=None,
                 )
             )
+            if rastreio_prescricao_id is not None:
+                rastreio = postgres.get(
+                    AgendaMedicaRastreioPrescricao, rastreio_prescricao_id
+                )
+                if rastreio is not None:
+                    rastreio.status = 'AGENDADA'
+                    rastreio.cd_it_agenda_central = cd_it_agenda_central
+                    rastreio.protocolo_mv = protocolo_mv
+                    rastreio.atualizado_por_id = getattr(
+                        usuario_atual, 'id', None
+                    )
+                    rastreio.atualizado_por_nome = getattr(
+                        usuario_atual, 'nome', 'ACESSO_INTERNO'
+                    )
             postgres.commit()
         return True
     except (SQLAlchemyError, ValueError):
@@ -385,6 +410,12 @@ def _identificacao_agendamento(
         'AGENDAMENTO WEB MEU PRONTOCARDIO | '
         f'USUARIO_MV: {usuario} | OPERADOR: {nome}'
     )
+    rastreio_id = getattr(payload, 'rastreio_prescricao_id', None)
+    if rastreio_id is not None:
+        prefixo += (
+            ' | ORIGEM: PRESCRICAO AMBULATORIAL'
+            f' | RASTREIO_ID: {rastreio_id}'
+        )
     observacao_livre = _observacao_livre_sem_identificacao(observacao_original)
     observacao = prefixo
     if observacao_livre:
@@ -1120,6 +1151,36 @@ def confirmar_agendamento(
 ):
     """Conclui um agendamento usando a procedure oficial do SoulMV."""
     garantir_paciente_autorizado(usuario_atual, payload.cd_paciente)
+    if payload.rastreio_prescricao_id is not None and isinstance(
+        usuario_atual, PrincipalPaciente
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail='O rastreio ambulatorial exige operador interno.',
+        )
+    if payload.rastreio_prescricao_id is not None:
+        with Session(postgres_engine) as postgres:
+            rastreio = postgres.get(
+                AgendaMedicaRastreioPrescricao,
+                payload.rastreio_prescricao_id,
+            )
+            hoje = datetime.now().date()
+            valido = (
+                rastreio is not None
+                and rastreio.status == 'LIBERADA'
+                and rastreio.elegivel_em <= hoje
+                and rastreio.cd_paciente == payload.cd_paciente
+                and rastreio.cd_item_agendamento
+                == payload.cd_item_agendamento
+            )
+            if not valido:
+                raise HTTPException(
+                    status_code=HTTPStatus.CONFLICT,
+                    detail=(
+                        'O exame rastreado ainda não está liberado para '
+                        'agendamento ou não corresponde ao paciente/item.'
+                    ),
+                )
     _, _, observacao_identificada = _identificacao_agendamento(
         payload,
         usuario_atual,
@@ -1341,6 +1402,7 @@ def confirmar_agendamento(
         cd_agenda_central=payload.cd_agenda_central,
         cd_tip_mar=payload.cd_tip_mar,
         protocolo_mv=row[2],
+        rastreio_prescricao_id=payload.rastreio_prescricao_id,
     )
     whatsapp_status, whatsapp_mensagem = _enviar_confirmacao_whatsapp_agendamento(
         session=session,
