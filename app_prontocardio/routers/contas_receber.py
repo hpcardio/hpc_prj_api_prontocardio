@@ -617,7 +617,7 @@ def fluxo(
     competencia_ate: str | None = None,
     etapa: Literal[
         'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento',
-        'recebido', 'recebido_sem_conciliacao',
+        'recebido_sem_conciliacao', 'recebido',
     ] | None = None,
     q: Annotated[str | None, Query(max_length=60)] = None,
     a_confirmar: bool = False,
