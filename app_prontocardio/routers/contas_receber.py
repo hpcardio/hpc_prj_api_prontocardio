@@ -394,35 +394,57 @@ def _competencia(valor: str | None, campo: str) -> date | None:
 # situação de cada processo — pago (processo NORMAL ou membro de grupo pago)
 # ou pendente (processo ou membro de grupo pendente, com ENVIAR ou não).
 SQL_TABELAS_NOTAS_PORTAL = text("""
-SELECT to_regclass('raw_issec_portal.notas_fiscais_pagas') IS NOT NULL
-   AND to_regclass('raw_issec_portal.notas_fiscais_pendentes') IS NOT NULL
-   AND to_regclass('raw_issec_portal.notas_fiscais_processos') IS NOT NULL
+SELECT to_regclass('raw_issec_portal.notas_fiscais_pagas') IS NOT NULL AS pagas,
+       to_regclass('raw_issec_portal.notas_fiscais_pendentes') IS NOT NULL AS pendentes,
+       to_regclass('raw_issec_portal.notas_fiscais_processos') IS NOT NULL AS processos
 """)
 
-SQL_NOTAS_PORTAL = text("""
+# Pendentes é uma foto do portal: só vale a da última carga concluída. O dlt não
+# cria a tabela quando a lista vem vazia e, se ela esvaziar depois, as linhas da
+# carga anterior não podem continuar valendo.
+_PENDENTES_DA_ULTIMA_CARGA = """_dlt_load_id = (
+    SELECT max(load_id) FROM raw_issec_portal._dlt_loads WHERE schema_name = 'portal_issec' AND status = 0)"""
+
+_SQL_PAGAS = """
 SELECT processo, 'paga' AS situacao, false AS nf_a_enviar, valor_pago, nup,
        primeira_extracao_em::text AS pago_desde, 1 AS prioridade
-  FROM raw_issec_portal.notas_fiscais_pagas WHERE tipo <> 'AGRUPADOR'
-UNION ALL
+  FROM raw_issec_portal.notas_fiscais_pagas WHERE tipo <> 'AGRUPADOR'"""
+_SQL_PAGAS_GRUPO = """
 SELECT m.processo, 'paga', false, p.valor_pago, p.nup, p.primeira_extracao_em::text, 1
   FROM raw_issec_portal.notas_fiscais_processos m
-  JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = m.nup_grupo
-UNION ALL
+  JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = m.nup_grupo"""
+_SQL_PENDENTES = f"""
 SELECT processo, 'pendente', nf_a_enviar, valor, nup, NULL, 2
-  FROM raw_issec_portal.notas_fiscais_pendentes WHERE NOT agrupado
-UNION ALL
+  FROM raw_issec_portal.notas_fiscais_pendentes WHERE NOT agrupado AND {_PENDENTES_DA_ULTIMA_CARGA}"""
+_SQL_PENDENTES_GRUPO = f"""
 SELECT m.processo, 'pendente', p.nf_a_enviar, p.valor, p.nup, NULL, 2
   FROM raw_issec_portal.notas_fiscais_processos m
   JOIN raw_issec_portal.notas_fiscais_pendentes p ON p.nup = m.nup_grupo
-""")
+ WHERE p.{_PENDENTES_DA_ULTIMA_CARGA}"""
+
+
+def sql_notas_portal(tabelas) -> str | None:
+    """UNION só das partes cujas tabelas existem (cada tabela nasce na primeira carga com linhas)."""
+    partes = []
+    if tabelas.get('pagas'):
+        partes.append(_SQL_PAGAS)
+        if tabelas.get('processos'):
+            partes.append(_SQL_PAGAS_GRUPO)
+    if tabelas.get('pendentes'):
+        partes.append(_SQL_PENDENTES)
+        if tabelas.get('processos'):
+            partes.append(_SQL_PENDENTES_GRUPO)
+    return '\nUNION ALL'.join(partes) if partes else None
 
 
 def notas_do_portal(postgres) -> dict[str, dict]:
     """processo -> situação na página Notas Fiscais (paga vale mais que pendente)."""
-    if not postgres.execute(SQL_TABELAS_NOTAS_PORTAL).scalar_one():
+    tabelas = postgres.execute(SQL_TABELAS_NOTAS_PORTAL).mappings().first() or {}
+    sql = sql_notas_portal(tabelas)
+    if sql is None:
         return {}
     notas: dict[str, dict] = {}
-    for linha in postgres.execute(SQL_NOTAS_PORTAL).mappings().all():
+    for linha in postgres.execute(text(sql)).mappings().all():
         processo = str(linha['processo'])
         atual = notas.get(processo)
         if atual is None or linha['prioridade'] < atual['prioridade']:
