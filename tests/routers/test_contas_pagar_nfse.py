@@ -527,3 +527,32 @@ def test_lancada_marca_se_foi_pelo_receita_certa():
     por_chave = {i['chave']: i for i in resposta['itens']}
     assert por_chave['33333333000133-55']['lancada_pelo_receita_certa'] is True
     assert por_chave['11111111000111-0000123']['lancada_pelo_receita_certa'] is False
+
+
+def test_falta_boleto_vem_primeiro_e_depois_por_data():
+    itens = [
+        {'situacao': 'lancada', 'data_emissao': '2026-11-25', 'boletos': None, 'pronta': False},
+        {'situacao': 'pendente', 'data_emissao': '2026-11-01', 'boletos': None, 'pronta': False},
+        {'situacao': 'pendente', 'data_emissao': '2026-11-20', 'boletos': {'com_divergencia': False}, 'pronta': True},
+        {'situacao': 'pendente', 'data_emissao': '2026-11-10', 'boletos': None, 'pronta': False},
+        {'situacao': 'pendente', 'data_emissao': '2026-11-24', 'boletos': {'com_divergencia': True}, 'pronta': False},
+        {'situacao': 'cancelada', 'data_emissao': '2026-11-26', 'boletos': None, 'pronta': False},
+    ]
+    itens.sort(key=lambda i: i['data_emissao'], reverse=True)
+    itens.sort(key=rota.prioridade_na_fila)
+
+    assert [(i['situacao'], i['data_emissao']) for i in itens] == [
+        ('pendente', '2026-11-10'), ('pendente', '2026-11-01'),   # falta boleto, mais recente primeiro
+        ('pendente', '2026-11-24'),                                # boleto divergente
+        ('pendente', '2026-11-20'),                                # pronta para o financeiro
+        ('cancelada', '2026-11-26'),
+        ('lancada', '2026-11-25'),
+    ]
+
+
+def test_gestor_ve_falta_boleto_antes_das_lancadas():
+    postgres, oracle = _sessoes()
+    resposta = rota.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='todas')
+
+    assert [i['situacao'] for i in resposta['itens']][0] == 'pendente'
+    assert [i['situacao'] for i in resposta['itens']][-1] == 'lancada'
