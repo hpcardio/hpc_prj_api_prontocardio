@@ -576,7 +576,8 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
 ):
     """NFS-e recebidas por setor do MV (setor da oficina definida na regra).
 
-    ``pendente``: oficina definida e ainda sem entrada/título no MV.
+    ``pendente``: oficina definida, ainda sem entrada/título no MV e ainda
+    não enviada ao financeiro (sem boleto ou com boleto divergente).
     ``a_classificar``: fornecedor sem regra possível (só o financeiro vê).
     ``lancada``: já existe ENT_SERV ou CON_PAG no MV para fornecedor+número.
     ``pronta``: pendente com boleto(s) anexado(s) e sem divergência — os
@@ -665,7 +666,9 @@ def listar_recebidas(  # noqa: PLR0912, PLR0915 -- fila + escopo da oficina; his
         if situacao == 'pronta':
             if not pronta:
                 continue
-        elif situacao not in ('todas', situacao_nota):
+        elif situacao not in ('todas', situacao_nota) or (situacao == 'pendente' and pronta):
+            # Enviada ao financeiro (boleto sem divergência) sai de "A lançar":
+            # fica só em "Prontas para o financeiro".
             continue
         if cd_oficina is not None and oficina_nota != cd_oficina:
             continue

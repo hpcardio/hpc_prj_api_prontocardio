@@ -377,3 +377,26 @@ def test_desfazer_envio_sem_boleto():
     with pytest.raises(HTTPException) as erro:
         _desfazer(postgres, oracle)
     assert erro.value.status_code == 404
+
+
+def test_nota_enviada_ao_financeiro_sai_de_a_lancar():
+    nota_fila = {**NOTA, 'codigo_verificacao_nfse': 'A', 'data_hora': None, 'competencia_nfse': None,
+                 'tomador_razao_social': 'Hospital', 'discriminacao': '',
+                 'situacao_xml': None, 'situacao_portal': None, 'situacao_consultada_em': None}
+    sem_boleto = {**nota_fila, 'numero_nfse': '124'}
+    divergente = {**nota_fila, 'numero_nfse': '125'}
+    regras = [{**REGRAS[0], 'nm_fornecedor': 'Software SA', 'origem': 'historico', 'qtd_entradas': 3,
+               'participacao': Decimal('1'), 'usuario_id': 1, 'atualizado_em': None, 'cd_fornecedor': 1}]
+    boletos = [
+        {'prestador_cnpj': '11222333000181', 'numero_nfse': '123', 'quantidade': 1, 'soma': Decimal('1500.50'),
+         'primeiro_vencimento': HOJE, 'com_divergencia': False, 'fora_do_prazo': False},
+        {'prestador_cnpj': '11222333000181', 'numero_nfse': '125', 'quantidade': 1, 'soma': Decimal('9'),
+         'primeiro_vencimento': HOJE, 'com_divergencia': True, 'fora_do_prazo': False},
+    ]
+    postgres = FakeSession([[True], [False], [nota_fila, sem_boleto, divergente], regras, [], boletos])
+    oracle = FakeSession([[], EMPRESAS])
+
+    resposta = rota_nfse.listar_recebidas(_usuario(perfil='ti'), postgres, oracle, situacao='pendente')
+
+    # 123 (pronta) só em "Prontas para o financeiro"; sem boleto e divergente seguem em "A lançar".
+    assert [i['numero_nfse'] for i in resposta['itens']] == ['124', '125']
