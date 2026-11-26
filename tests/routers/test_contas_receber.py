@@ -207,7 +207,6 @@ def test_funil_soma_quantidade_e_valor_por_etapa():
     }
     assert por_etapa == {
         'protocolo': (2, Decimal('110.00')),
-        'nfs_autorizada': (0, Decimal('0.00')),
         'nao_autorizada': (0, Decimal('0.00')),
         'aguardando_recebimento': (1, Decimal('50.00')),
         'recebido': (1, Decimal('25.00')),
@@ -836,10 +835,10 @@ def test_situacao_do_funil_pelo_portal_e_pelos_vinculos():
     com_protocolo = {'protocolo': {'numero': 'P'}, 'nfse': None, 'recebimentos': [], 'solicitacao_nota': False}
     assert situacao_fluxo({**com_protocolo, 'protocolo': None}) == 'protocolo'
     assert situacao_fluxo(com_protocolo) == 'nao_autorizada'
-    assert situacao_fluxo({**com_protocolo, 'solicitacao_nota': True}) == 'nfs_autorizada'
+    assert situacao_fluxo({**com_protocolo, 'solicitacao_nota': True}) == 'aguardando_recebimento'
     assert situacao_fluxo({**com_protocolo, 'nfse': {'numero': '1'}}) == 'aguardando_recebimento'
-    # Portal ISSEC: ENVIAR = convênio pediu a NF; sem ENVIAR = NF enviada.
-    assert situacao_fluxo(com_protocolo, {'situacao': 'pendente', 'nf_a_enviar': True}) == 'nfs_autorizada'
+    # Portal ISSEC: pendente em Notas Fiscais, com ou sem ENVIAR = aguardando recebimento.
+    assert situacao_fluxo(com_protocolo, {'situacao': 'pendente', 'nf_a_enviar': True}) == 'aguardando_recebimento'
     assert situacao_fluxo(com_protocolo, {'situacao': 'pendente', 'nf_a_enviar': False}) == 'aguardando_recebimento'
     # Pago no portal: recebido só com o crédito vinculado no extrato.
     assert situacao_fluxo(com_protocolo, {'situacao': 'paga'}) == 'recebido_sem_conciliacao'
@@ -921,12 +920,16 @@ def test_rota_usa_a_situacao_do_portal(monkeypatch):
                           ordenar_por='parado', page=1, page_size=10)
 
     por_remessa = {i['cd_remessa']: i for i in resposta['itens']}
-    assert por_remessa[1]['situacao_fluxo'] == 'nfs_autorizada'
-    assert por_remessa[1]['pendencia'] == 'NFS autorizadas'
+    assert por_remessa[1]['situacao_fluxo'] == 'aguardando_recebimento'
+    assert por_remessa[1]['pendencia'] == 'Aguardando recebimento'
+    assert por_remessa[1]['nota_portal']['nf_a_enviar'] is True
     assert por_remessa[2]['situacao_fluxo'] == 'recebido_sem_conciliacao'
     assert por_remessa[2]['dias_na_etapa'] is None
     assert [s['chave'] for s in resposta['situacoes']] == [
-        'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento', 'recebido', 'recebido_sem_conciliacao']
+        'protocolo', 'nao_autorizada', 'aguardando_recebimento', 'recebido', 'recebido_sem_conciliacao']
+    assert [s['rotulo'] for s in resposta['situacoes']] == [
+        'Aguardando protocolo', 'NFS não autorizadas', 'Aguardando recebimento', 'Recebidas',
+        'Recebidas s/ conciliação bancária']
 
 
 def _vinculo_planilha(numero, origem='planilha'):
