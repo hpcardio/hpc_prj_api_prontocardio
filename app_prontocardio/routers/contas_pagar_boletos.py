@@ -114,11 +114,16 @@ def status_da_nota(session, cnpj: str, numero: str) -> str | None:
     return status_nfse(session.execute(SQL_SITUACAO_XML, chave).scalar_one_or_none(), portal)
 
 
+# Observação do setor ao enviar a NFS-e ao financeiro.
+OBSERVACAO_MINIMA = 20
+OBSERVACAO_MAXIMA = 2000
+
+
 SQL_BOLETOS_DA_NOTA = text("""
 SELECT id, prestador_cnpj, numero_nfse, cd_multi_empresa, nome_arquivo, tipo,
        linha_digitavel, banco, valor, vencimento, valor_impresso, nosso_numero,
        origem_leitura, divergencias, enviado_por, enviado_em,
-       prazo_minimo, fora_do_prazo, justificativa_atraso,
+       prazo_minimo, fora_do_prazo, justificativa_atraso, observacao,
        (SELECT u.nome FROM api_prontocardio.usuarios_api u WHERE u.id = enviado_por) AS enviado_por_nome
   FROM api_prontocardio.contas_pagar_boletos
  WHERE prestador_cnpj = :cnpj AND numero_nfse = :numero
@@ -142,11 +147,11 @@ INSERT INTO api_prontocardio.contas_pagar_boletos
     (prestador_cnpj, numero_nfse, cd_multi_empresa, nome_arquivo, arquivo, sha256,
      tipo, linha_digitavel, codigo_barras, banco, valor, vencimento, valor_impresso,
      nosso_numero, cnpjs_texto, origem_leitura, divergencias, enviado_por,
-     prazo_minimo, fora_do_prazo, justificativa_atraso)
+     prazo_minimo, fora_do_prazo, justificativa_atraso, observacao)
 VALUES (:cnpj, :numero, :empresa, :nome_arquivo, :arquivo, :sha256, :tipo,
         :linha_digitavel, :codigo_barras, :banco, :valor, :vencimento, :valor_impresso,
         :nosso_numero, :cnpjs_texto, :origem_leitura, :divergencias, :enviado_por,
-        :prazo_minimo, :fora_do_prazo, :justificativa_atraso)
+        :prazo_minimo, :fora_do_prazo, :justificativa_atraso, :observacao)
 RETURNING id
 """).bindparams(bindparam('arquivo'))
 
@@ -261,8 +266,20 @@ async def enviar_boleto(
     linha_digitavel: Annotated[str | None, Form(max_length=60)] = None,
     vencimento: Annotated[date | None, Form()] = None,
     justificativa_atraso: Annotated[str | None, Form(max_length=JUSTIFICATIVA_MAXIMA)] = None,
+    observacao: Annotated[str | None, Form(max_length=OBSERVACAO_MAXIMA)] = None,
 ):
-    """Anexa o PDF do boleto. Se o PDF for imagem (escaneado), informe a linha digitável."""
+    """Anexa o PDF do boleto (envia a nota ao financeiro).
+
+    ``observacao``: obrigatória — o setor explica do que se trata a NFS-e
+    (serviço, período, contrato/pedido...) para o financeiro conferir.
+    Se o PDF for imagem (escaneado), informe a linha digitável.
+    """
+    observacao = ' '.join((observacao or '').split())
+    if len(observacao) < OBSERVACAO_MINIMA:
+        raise HTTPException(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            f'Explique para o financeiro do que se trata a NFS-e (mínimo de {OBSERVACAO_MINIMA} caracteres).',
+        )
     cnpj = somente_digitos(cnpj)
     nota = _nota_ou_404(session, oracle, usuario, cnpj, numero)
     status = status_da_nota(session, cnpj, numero)
@@ -325,6 +342,7 @@ async def enviar_boleto(
             'prazo_minimo': prazo.date(),
             'fora_do_prazo': fora_do_prazo,
             'justificativa_atraso': justificativa,
+            'observacao': observacao,
         }).scalar_one()
         session.commit()
     except IntegrityError as exc:
@@ -332,7 +350,8 @@ async def enviar_boleto(
         raise HTTPException(HTTPStatus.CONFLICT, 'Este boleto já foi anexado a esta NFS-e.') from exc
 
     return {'id': novo_id, **lido.as_dict(), 'origem_leitura': origem, 'divergencias': problemas,
-            'prazo_minimo': prazo.date(), 'fora_do_prazo': fora_do_prazo, 'justificativa_atraso': justificativa}
+            'prazo_minimo': prazo.date(), 'fora_do_prazo': fora_do_prazo, 'justificativa_atraso': justificativa,
+            'observacao': observacao}
 
 
 

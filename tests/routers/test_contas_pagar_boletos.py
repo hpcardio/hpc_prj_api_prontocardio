@@ -85,7 +85,11 @@ def _pdf(valor=Decimal('1500.50'), dias=15, cnpj='11.222.333/0001-81', impresso=
     return gerar_pdf(f'CNPJ: {cnpj}', 'Valor do Documento', impresso, formatar(linha)), linha
 
 
+OBSERVACAO = 'Transporte de pacientes do mês de novembro, contrato 12/2026'
+
+
 def _enviar(postgres, oracle, conteudo, usuario=None, **kwargs):
+    kwargs.setdefault('observacao', OBSERVACAO)
     arquivo = UploadFile(BytesIO(conteudo), filename='boleto.pdf')
     return asyncio.run(rota.enviar_boleto('11.222.333/0001-81', '123', usuario or _usuario(),
                                           postgres, oracle, arquivo, **kwargs))
@@ -400,3 +404,23 @@ def test_nota_enviada_ao_financeiro_sai_de_a_lancar():
 
     # 123 (pronta) só em "Prontas para o financeiro"; sem boleto e divergente seguem em "A lançar".
     assert [i['numero_nfse'] for i in resposta['itens']] == ['124', '125']
+
+
+
+def test_envio_ao_financeiro_exige_observacao():
+    for observacao in (None, '', '   curta demais   '):
+        with pytest.raises(HTTPException) as erro:
+            _enviar(FakeSession([]), FakeSession([]), _pdf()[0], observacao=observacao)
+        assert erro.value.status_code == 422
+        assert 'do que se trata a NFS-e' in erro.value.detail
+
+
+def test_observacao_e_gravada_com_o_boleto():
+    pdf, _ = _pdf()
+    postgres = FakeSession([[NOTA], REGRAS, [2], [], [], [99]])
+    resposta = _enviar(postgres, FakeSession([EMPRESAS]), pdf,
+                       observacao='  Transporte   de pacientes de novembro, contrato 12/2026  ')
+
+    gravado = next(p for sql, p in postgres.executions if 'INSERT INTO api_prontocardio.contas_pagar_boletos' in sql)
+    assert gravado['observacao'] == 'Transporte de pacientes de novembro, contrato 12/2026'
+    assert resposta['observacao'] == gravado['observacao']
