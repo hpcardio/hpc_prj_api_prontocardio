@@ -780,7 +780,7 @@ def _rtf_to_text(value):
         "object", "datastore", "themedata", "xmlopen", "generator",
     }
     output: list[str] = []
-    groups = [{"skip": False, "at_start": False, "starred": False}]
+    groups = [{"skip": False, "at_start": False, "starred": False, "uc": 1}]
     index = 0
 
     def write(text: str) -> None:
@@ -790,7 +790,12 @@ def _rtf_to_text(value):
     while index < len(raw):
         character = raw[index]
         if character == "{":
-            groups.append({"skip": groups[-1]["skip"], "at_start": True, "starred": False})
+            groups.append({
+                "skip": groups[-1]["skip"],
+                "at_start": True,
+                "starred": False,
+                "uc": groups[-1]["uc"],
+            })
             index += 1
             continue
         if character == "}":
@@ -844,6 +849,11 @@ def _rtf_to_text(value):
                 write("\n")
             elif word == "tab":
                 write("\t")
+            elif word == "uc" and argument:
+                try:
+                    groups[-1]["uc"] = max(0, int(argument))
+                except ValueError:
+                    pass
             elif word == "u" and argument:
                 try:
                     codepoint = int(argument)
@@ -853,6 +863,22 @@ def _rtf_to_text(value):
             index = number_end
             if index < len(raw) and raw[index] == " ":
                 index += 1
+            if word == "u" and argument:
+                # RTF inclui, depois de \uN, caracteres de fallback para leitores
+                # sem Unicode. Eles não fazem parte do texto e não podem ser
+                # exibidos junto do caractere Unicode (ex.: "Nãão", "CONCLUSÃÃO").
+                for _ in range(groups[-1]["uc"]):
+                    if index >= len(raw):
+                        break
+                    if raw[index] == "\\" and index + 1 < len(raw):
+                        if raw[index + 1] == "'" and index + 3 < len(raw):
+                            index += 4
+                        elif raw[index + 1] in "\\{}":
+                            index += 2
+                        else:
+                            index += 1
+                    else:
+                        index += 1
             continue
         groups[-1]["at_start"] = False
         index += 1

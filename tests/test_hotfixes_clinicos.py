@@ -31,6 +31,15 @@ def test_painel_converte_rtf_binario_e_preserva_exame_pendente():
     ]
 
 
+def test_painel_rtf_descarta_fallback_de_caractere_unicode():
+    rtf = (
+        r"{\rtf1\ansi\uc1 CONCLUS\u195AO: N\u227ao h\u225a placas,"
+        r" obstru\u231c\u227ao.}"
+    )
+
+    assert painel._rtf_to_text(rtf) == "CONCLUSÃO: Não há placas, obstrução."
+
+
 def test_prevencao_usa_identificacao_e_prescricao_medicamentosa(monkeypatch):
     monkeypatch.setattr(care_support, 'load_lc_dac_support', lambda *_: {})
     monkeypatch.setattr(
