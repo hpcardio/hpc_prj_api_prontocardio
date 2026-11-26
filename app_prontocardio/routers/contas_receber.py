@@ -31,9 +31,11 @@ from app_prontocardio.services.contas_receber_fluxo import (
     CONCLUIDO,
     ETAPAS,
     IMPOSTOS,
+    SITUACOES,
     ProcessoPortal,
     aliquotas_por_convenio,
     aplicar_estimativa,
+    aplicar_situacao_portal,
     bases_das_remessas,
     casar_portal,
     config_retencao,
@@ -388,8 +390,58 @@ def _competencia(valor: str | None, campo: str) -> date | None:
         ) from exc
 
 
+# Página Notas Fiscais do portal ISSEC (DAG extracao_processos_portal_issec):
+# situação de cada processo — pago (processo NORMAL ou membro de grupo pago)
+# ou pendente (processo ou membro de grupo pendente, com ENVIAR ou não).
+SQL_TABELAS_NOTAS_PORTAL = text("""
+SELECT to_regclass('raw_issec_portal.notas_fiscais_pagas') IS NOT NULL
+   AND to_regclass('raw_issec_portal.notas_fiscais_pendentes') IS NOT NULL
+   AND to_regclass('raw_issec_portal.notas_fiscais_processos') IS NOT NULL
+""")
+
+SQL_NOTAS_PORTAL = text("""
+SELECT processo, 'paga' AS situacao, false AS nf_a_enviar, valor_pago, nup,
+       primeira_extracao_em::text AS pago_desde, 1 AS prioridade
+  FROM raw_issec_portal.notas_fiscais_pagas WHERE tipo <> 'AGRUPADOR'
+UNION ALL
+SELECT m.processo, 'paga', false, p.valor_pago, p.nup, p.primeira_extracao_em::text, 1
+  FROM raw_issec_portal.notas_fiscais_processos m
+  JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = m.nup_grupo
+UNION ALL
+SELECT processo, 'pendente', nf_a_enviar, valor, nup, NULL, 2
+  FROM raw_issec_portal.notas_fiscais_pendentes WHERE NOT agrupado
+UNION ALL
+SELECT m.processo, 'pendente', p.nf_a_enviar, p.valor, p.nup, NULL, 2
+  FROM raw_issec_portal.notas_fiscais_processos m
+  JOIN raw_issec_portal.notas_fiscais_pendentes p ON p.nup = m.nup_grupo
+""")
+
+
+def notas_do_portal(postgres) -> dict[str, dict]:
+    """processo -> situação na página Notas Fiscais (paga vale mais que pendente)."""
+    if not postgres.execute(SQL_TABELAS_NOTAS_PORTAL).scalar_one():
+        return {}
+    notas: dict[str, dict] = {}
+    for linha in postgres.execute(SQL_NOTAS_PORTAL).mappings().all():
+        processo = str(linha['processo'])
+        atual = notas.get(processo)
+        if atual is None or linha['prioridade'] < atual['prioridade']:
+            notas[processo] = {
+                'situacao': linha['situacao'],
+                'nf_a_enviar': bool(linha['nf_a_enviar']),
+                'valor': dinheiro(linha['valor_pago']) if linha['valor_pago'] is not None else None,
+                'nup': linha['nup'],
+                'pago_desde': linha['pago_desde'],
+                'prioridade': linha['prioridade'],
+            }
+    for nota in notas.values():
+        nota.pop('prioridade')
+    return notas
+
+
 def montar_fluxo(
-    remessas, portal, vinculos, hoje, notas_grupo=None, configs=None
+    remessas, portal, vinculos, hoje, notas_grupo=None, configs=None,
+    notas_portal=None,
 ):
     """Todos os itens do fluxo (sem filtro)."""
     numeros_vinculados = {
@@ -417,9 +469,10 @@ def montar_fluxo(
     ]
     bases = bases_das_remessas(itens)
     ratear_nfs(itens, bases, configs)
-    return aplicar_estimativa(
+    itens = aplicar_estimativa(
         itens, aliquotas_por_convenio(itens), bases, configs
     )
+    return aplicar_situacao_portal(itens, notas_portal)
 
 
 def _bate_busca(item, termo: str) -> bool:
@@ -509,8 +562,10 @@ def fluxo(
     convenio: int | None = None,
     competencia_de: str | None = None,
     competencia_ate: str | None = None,
-    etapa: Literal['protocolo', 'nfse', 'recebimento', 'concluido']
-    | None = None,
+    etapa: Literal[
+        'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento',
+        'recebido', 'recebido_sem_conciliacao',
+    ] | None = None,
     q: Annotated[str | None, Query(max_length=60)] = None,
     a_confirmar: bool = False,
     ordenar_por: Literal['parado', 'competencia', 'valor'] = 'parado',
@@ -533,6 +588,7 @@ def fluxo(
         _hoje(),
         notas_de_grupo(postgres),
         retencoes_configuradas(postgres),
+        notas_do_portal(postgres),
     )
     filtrados = filtrar(
         todos,
@@ -544,7 +600,7 @@ def fluxo(
     )
     resumo = resumo_funil(filtrados)
     if etapa:
-        filtrados = [i for i in filtrados if i['etapa_atual'] == etapa]
+        filtrados = [i for i in filtrados if i['situacao_fluxo'] == etapa]
     filtrados = ordenar(filtrados, ordenar_por)
     total = len(filtrados)
     total_pages = max(ceil(total / page_size), 1)
@@ -552,6 +608,7 @@ def fluxo(
     return {
         'resumo': resumo,
         'etapas': [{'chave': k, 'rotulo': r} for k, r in ETAPAS],
+        'situacoes': [{'chave': k, 'rotulo': r} for k, r in SITUACOES],
         'itens': (
             filtrados if exportar else filtrados[inicio : inicio + page_size]
         ),

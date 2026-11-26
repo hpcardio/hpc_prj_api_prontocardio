@@ -21,6 +21,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     notas_por_nup,
     ratear_nfs,
     resumo_funil,
+    situacao_fluxo,
 )
 
 HOJE = date(2026, 11, 24)
@@ -205,9 +206,11 @@ def test_funil_soma_quantidade_e_valor_por_etapa():
     }
     assert por_etapa == {
         'protocolo': (2, Decimal('110.00')),
-        'nfse': (0, Decimal('0.00')),
-        'recebimento': (1, Decimal('50.00')),
-        'concluido': (1, Decimal('25.00')),
+        'nfs_autorizada': (0, Decimal('0.00')),
+        'nao_autorizada': (0, Decimal('0.00')),
+        'aguardando_recebimento': (1, Decimal('50.00')),
+        'recebido': (1, Decimal('25.00')),
+        'recebido_sem_conciliacao': (0, Decimal('0.00')),
     }
     assert resumo['valor_total'] == Decimal('185.00')
     assert resumo['protocolos_a_confirmar'] == 1
@@ -226,6 +229,7 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
 
     resposta = rota.fluxo(
@@ -233,7 +237,7 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
         postgres=None,
         _usuario=None,
         convenio=46,
-        etapa='nfse',
+        etapa='nao_autorizada',
         competencia_de=None,
         competencia_ate=None,
         q=None,
@@ -263,6 +267,7 @@ def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
         oracle=None,
@@ -321,6 +326,7 @@ def test_exportar_devolve_todas_as_remessas_sem_paginar(monkeypatch):
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
         oracle=None,
@@ -819,3 +825,79 @@ def test_acesso_a_configuracao():
                 perfil='usuario', telas_permitidas=['contas_receber_fluxo']
             )
         )
+
+
+# ------------------------------------------------ funil com a página Notas Fiscais do portal
+
+
+
+def test_situacao_do_funil_pelo_portal_e_pelos_vinculos():
+    com_protocolo = {'protocolo': {'numero': 'P'}, 'nfse': None, 'recebimentos': [], 'solicitacao_nota': False}
+    assert situacao_fluxo({**com_protocolo, 'protocolo': None}) == 'protocolo'
+    assert situacao_fluxo(com_protocolo) == 'nao_autorizada'
+    assert situacao_fluxo({**com_protocolo, 'solicitacao_nota': True}) == 'nfs_autorizada'
+    assert situacao_fluxo({**com_protocolo, 'nfse': {'numero': '1'}}) == 'aguardando_recebimento'
+    # Portal ISSEC: ENVIAR = convênio pediu a NF; sem ENVIAR = NF enviada.
+    assert situacao_fluxo(com_protocolo, {'situacao': 'pendente', 'nf_a_enviar': True}) == 'nfs_autorizada'
+    assert situacao_fluxo(com_protocolo, {'situacao': 'pendente', 'nf_a_enviar': False}) == 'aguardando_recebimento'
+    # Pago no portal: recebido só com o crédito vinculado no extrato.
+    assert situacao_fluxo(com_protocolo, {'situacao': 'paga'}) == 'recebido_sem_conciliacao'
+    assert situacao_fluxo({**com_protocolo, 'recebimentos': [{'valor': 1}]}, {'situacao': 'paga'}) == 'recebido'
+
+
+class _ResultadoPortal:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def scalar_one(self):
+        return self.rows[0]
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _SessaoPortal:
+    def __init__(self, respostas):
+        self.respostas = list(respostas)
+
+    def execute(self, *_a, **_k):
+        return _ResultadoPortal(self.respostas.pop(0))
+
+
+def test_notas_do_portal_paga_vale_mais_que_pendente_e_sem_tabelas_fica_vazio():
+    linhas = [
+        {'processo': '2600040111', 'situacao': 'pendente', 'nf_a_enviar': True, 'valor_pago': '10.00', 'nup': 'G1', 'pago_desde': None, 'prioridade': 2},
+        {'processo': '2600040111', 'situacao': 'paga', 'nf_a_enviar': False, 'valor_pago': '9.58', 'nup': 'G1', 'pago_desde': '2026-11-26', 'prioridade': 1},
+        {'processo': '2600050000', 'situacao': 'pendente', 'nf_a_enviar': True, 'valor_pago': '5.00', 'nup': 'G2', 'pago_desde': None, 'prioridade': 2},
+    ]
+    notas = rota.notas_do_portal(_SessaoPortal([[True], linhas]))
+    assert notas['2600040111']['situacao'] == 'paga'
+    assert notas['2600040111']['valor'] == Decimal('9.58')
+    assert notas['2600050000'] == {'situacao': 'pendente', 'nf_a_enviar': True, 'valor': Decimal('5.00'), 'nup': 'G2', 'pago_desde': None}
+    assert rota.notas_do_portal(_SessaoPortal([[False]])) == {}
+
+
+def test_rota_usa_a_situacao_do_portal(monkeypatch):
+    monkeypatch.setattr(rota, 'remessas_mv', lambda _o: [_remessa(1, '100.00'), _remessa(2, '250.00')])
+    monkeypatch.setattr(rota, 'processos_portal', lambda _p: {46: [_processo('A', '100.00'), _processo('B', '250.00')]})
+    monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {
+        'A': {'situacao': 'pendente', 'nf_a_enviar': True}, 'B': {'situacao': 'paga', 'nf_a_enviar': False}})
+    monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
+
+    resposta = rota.fluxo(oracle=None, postgres=None, _usuario=None, convenio=None, etapa=None,
+                          competencia_de=None, competencia_ate=None, q=None, a_confirmar=False,
+                          ordenar_por='parado', page=1, page_size=10)
+
+    por_remessa = {i['cd_remessa']: i for i in resposta['itens']}
+    assert por_remessa[1]['situacao_fluxo'] == 'nfs_autorizada'
+    assert por_remessa[1]['pendencia'] == 'NFS autorizadas'
+    assert por_remessa[2]['situacao_fluxo'] == 'recebido_sem_conciliacao'
+    assert por_remessa[2]['dias_na_etapa'] is None
+    assert [s['chave'] for s in resposta['situacoes']] == [
+        'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento', 'recebido', 'recebido_sem_conciliacao']

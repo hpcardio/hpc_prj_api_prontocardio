@@ -36,6 +36,63 @@ PENDENCIA = {
 }
 
 
+# Funil da tela (pedido de 26/11/2026), com a página Notas Fiscais do portal
+# ISSEC: Pendentes com ENVIAR = convênio pediu a NF e falta anexar; Pendentes
+# sem ENVIAR = NF enviada, aguardando pagamento; Pagas = pago no portal
+# (recebido; "sem conciliação" enquanto o crédito não está no extrato).
+SITUACOES = (
+    ('protocolo', 'Aguardando protocolo'),
+    ('nfs_autorizada', 'NFS autorizadas'),
+    ('nao_autorizada', 'Não autorizadas'),
+    ('aguardando_recebimento', 'Aguardando recebimento'),
+    ('recebido', 'Recebidos'),
+    ('recebido_sem_conciliacao', 'Recebidos s/ conciliação bancária'),
+)
+ROTULO_SITUACAO = dict(SITUACOES)
+SITUACOES_RECEBIDAS = {'recebido', 'recebido_sem_conciliacao'}
+
+
+def situacao_fluxo(item, nota_portal=None) -> str:  # noqa: PLR0911
+    """Etapa do funil da remessa.
+
+    ``nota_portal``: situação do processo na página Notas Fiscais do portal
+    ({'situacao': 'pendente'|'paga', 'nf_a_enviar': bool, ...}) ou None.
+    """
+    if not item.get('protocolo'):
+        return 'protocolo'
+    conciliado = bool(item.get('recebimentos'))
+    if nota_portal and nota_portal.get('situacao') == 'paga':
+        return 'recebido' if conciliado else 'recebido_sem_conciliacao'
+    if conciliado:
+        return 'recebido'
+    if nota_portal and nota_portal.get('situacao') == 'pendente':
+        if nota_portal.get('nf_a_enviar'):
+            return 'nfs_autorizada'
+        return 'aguardando_recebimento'
+    if item.get('nfse'):
+        return 'aguardando_recebimento'
+    if item.get('solicitacao_nota'):
+        return 'nfs_autorizada'
+    return 'nao_autorizada'
+
+
+def aplicar_situacao_portal(itens, notas_portal):
+    """Situação do funil em cada item.
+
+    ``notas_portal``: processo -> situação na página Notas Fiscais.
+    """
+    for item in itens:
+        protocolo = item.get('protocolo') or {}
+        nota = (notas_portal or {}).get(str(protocolo.get('numero') or ''))
+        situacao = situacao_fluxo(item, nota)
+        item['nota_portal'] = nota
+        item['situacao_fluxo'] = situacao
+        item['pendencia'] = ROTULO_SITUACAO[situacao]
+        if situacao in SITUACOES_RECEBIDAS:
+            item['dias_na_etapa'] = None
+    return itens
+
+
 _NUP = re.compile(r'NUP\D{0,3}(\d[\d.\-/ ]{14,24}\d)', re.IGNORECASE)
 TAMANHO_NUP = 17
 
@@ -396,26 +453,20 @@ def ratear_nfs(itens, bases=None, configs=None):
 
 
 def resumo_funil(itens):
-    """Quantidade e valor parados em cada etapa (para os cards do topo)."""
-    chaves = [k for k, _ in ETAPAS[1:]] + [CONCLUIDO]
+    """Quantidade e valor parados em cada etapa do funil (cards do topo)."""
     resumo = {
-        k: {
-            'chave': k,
-            'rotulo': PENDENCIA[k],
-            'quantidade': 0,
-            'valor': Decimal('0.00'),
-        }
-        for k in chaves
+        k: {'chave': k, 'rotulo': r, 'quantidade': 0, 'valor': Decimal('0.00')}
+        for k, r in SITUACOES
     }
     a_confirmar = 0
     for item in itens:
-        r = resumo[item['etapa_atual']]
+        r = resumo[item.get('situacao_fluxo') or situacao_fluxo(item)]
         r['quantidade'] += 1
         r['valor'] += item['valor']
         if item['protocolo_candidatos']:
             a_confirmar += 1
     return {
-        'etapas': [resumo[k] for k in chaves],
+        'etapas': [resumo[k] for k, _ in SITUACOES],
         'total_remessas': len(itens),
         'valor_total': sum((i['valor'] for i in itens), Decimal('0.00')),
         'protocolos_a_confirmar': a_confirmar,
