@@ -38,6 +38,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     aplicar_situacao_portal,
     bases_das_remessas,
     casar_portal,
+    conferir_vinculos_pelo_portal,
     config_retencao,
     dinheiro,
     montar_item,
@@ -195,6 +196,7 @@ SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liber
 # o portal é atualizado a cada execução da DAG.
 SQL_VINCULOS = text(f"""
 SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
+       pr.origem AS origem_vinculo,
        COALESCE(pt.valor_cobrado, p.valor_cobrado) AS valor_cobrado,
        COALESCE(pt.valor_liberado, p.valor_liberado) AS valor_liberado,
        COALESCE(p.data_protocolo, pt.data_entrada) AS data_protocolo,
@@ -351,6 +353,7 @@ def vinculos_gravados(postgres) -> dict[int, dict]:
                 'id': linha['protocolo_id'],
                 'numero': linha['numero'],
                 'origem': linha['origem'],
+                'origem_vinculo': linha['origem_vinculo'],
                 'situacao': 'vinculado',
                 'valor_cobrado': linha['valor_cobrado'],
                 'valor_liberado': linha['valor_liberado'],
@@ -466,6 +469,9 @@ def montar_fluxo(
     notas_portal=None,
 ):
     """Todos os itens do fluxo (sem filtro)."""
+    vinculos, sugestoes_planilha = conferir_vinculos_pelo_portal(
+        remessas, vinculos, portal
+    )
     numeros_vinculados = {
         (v['protocolo']['numero']) for v in vinculos.values()
     }
@@ -489,6 +495,11 @@ def montar_fluxo(
         )
         for r in remessas
     ]
+    for item in itens:
+        if item['protocolo'] is None:
+            item['protocolo_planilha'] = sugestoes_planilha.get(
+                item['cd_remessa']
+            )
     bases = bases_das_remessas(itens)
     ratear_nfs(itens, bases, configs)
     itens = aplicar_estimativa(
@@ -503,6 +514,8 @@ def _bate_busca(item, termo: str) -> bool:
     if item['protocolo']:
         alvos.append(str(item['protocolo']['numero']).lower())
     alvos += [str(c['numero']) for c in item['protocolo_candidatos']]
+    if item.get('protocolo_planilha'):
+        alvos.append(str(item['protocolo_planilha']['numero']))
     if item['nfse']:
         alvos.append(str(item['nfse']['numero']))
     return any(termo in alvo for alvo in alvos)

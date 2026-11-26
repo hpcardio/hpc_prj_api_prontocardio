@@ -16,6 +16,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     aplicar_estimativa,
     bases_das_remessas,
     casar_portal,
+    conferir_vinculos_pelo_portal,
     config_retencao,
     montar_item,
     notas_por_nup,
@@ -926,3 +927,52 @@ def test_rota_usa_a_situacao_do_portal(monkeypatch):
     assert por_remessa[2]['dias_na_etapa'] is None
     assert [s['chave'] for s in resposta['situacoes']] == [
         'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento', 'recebido', 'recebido_sem_conciliacao']
+
+
+def _vinculo_planilha(numero, origem='planilha'):
+    v = _vinculo(nfse=True)
+    v['protocolo'] = {**v['protocolo'], 'numero': numero, 'origem': 'planilha', 'origem_vinculo': origem}
+    return v
+
+
+def test_vinculo_da_planilha_so_vale_se_o_portal_confirmar():
+    """Pedido de 26/11: no ISSEC o protocolo vem do MV × portal; a planilha vira sugestão."""
+    remessas = [
+        _remessa(1, '100.00'),                      # portal igual
+        _remessa(2, '60.00'), _remessa(3, '40.00'),  # duas remessas somam o protocolo B
+        _remessa(4, '184.20'),                      # protocolo fora do portal (caso 19714)
+        _remessa(5, '70.00'),                       # protocolo no portal com outro valor
+        _remessa(6, '80.00'),                       # confirmado por alguém na tela
+        _remessa(7, '90.00', convenio=12),          # convênio sem portal
+    ]
+    vinculos = {
+        1: _vinculo_planilha('A'), 2: _vinculo_planilha('B'), 3: _vinculo_planilha('B'),
+        4: _vinculo_planilha('X'), 5: _vinculo_planilha('C'), 6: _vinculo_planilha('Y', origem='manual'),
+        7: _vinculo_planilha('Z'),
+    }
+    portal = {46: [_processo('A', '100.00'), _processo('B', '100.00'), _processo('C', '75.00')]}
+
+    validos, sugestoes = conferir_vinculos_pelo_portal(remessas, vinculos, portal)
+
+    assert set(validos) == {1, 2, 3, 6, 7}
+    assert sugestoes[4]['numero'] == 'X'
+    assert sugestoes[4]['motivo'] == 'Protocolo não encontrado no portal do convênio'
+    assert sugestoes[5]['valor_cobrado'] == Decimal('75.00')
+    assert 'outra competência ou valor' in sugestoes[5]['motivo']
+
+
+def test_fluxo_mostra_a_planilha_como_sugestao_e_casa_pelo_portal():
+    remessas = [_remessa(4, '184.20'), _remessa(8, '55.00')]
+    vinculos = {4: _vinculo_planilha('2600035769'), 8: _vinculo_planilha('W')}
+    portal = {46: [_processo('P', '55.00')]}  # a 8 casa com P (planilha dizia W)
+
+    itens = {i['cd_remessa']: i for i in rota.montar_fluxo(remessas, portal, vinculos, HOJE)}
+
+    assert itens[4]['protocolo'] is None
+    assert itens[4]['nfse'] is None
+    assert itens[4]['protocolo_planilha']['numero'] == '2600035769'
+    assert itens[4]['situacao_fluxo'] == 'protocolo'
+    assert itens[8]['protocolo']['numero'] == 'P'
+    assert itens[8]['protocolo']['situacao'] == 'automatico'
+    assert itens[8]['protocolo_planilha'] is None
+    assert rota.filtrar(list(itens.values()), q='35769')[0]['cd_remessa'] == 4
