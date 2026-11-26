@@ -9,7 +9,10 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app_prontocardio.agenda_medica_models import AgendaMedicaTratativaPaciente
+from app_prontocardio.agenda_medica_models import (
+    AgendaMedicaTratativaHistorico,
+    AgendaMedicaTratativaPaciente,
+)
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import Usuario
 from app_prontocardio.routers.agendamentos import ValidaUsuarioAtual
@@ -65,6 +68,11 @@ class TratativaPacienteInput(BaseModel):
     status: Literal['EM_TRATATIVA', 'CONCLUIDA', 'CANCELADA', 'FALHA']
     motivo: str | None = Field(default=None, max_length=1000)
     cd_it_agenda_destino: int | None = Field(default=None, gt=0)
+
+
+class AtribuirTratativaInput(BaseModel):
+    responsavel_id: int = Field(gt=0)
+    motivo: str = Field(min_length=5, max_length=1000)
 
 
 def _exigir_acesso_confirmacoes(
@@ -736,12 +744,78 @@ def _tratativa_dict(item: AgendaMedicaTratativaPaciente) -> dict:
     }
 
 
+def _registrar_historico(
+    session: Session,
+    item: AgendaMedicaTratativaPaciente,
+    usuario: Usuario,
+    evento: str,
+    anterior: dict,
+    motivo: str | None = None,
+) -> None:
+    session.add(AgendaMedicaTratativaHistorico(
+        tratativa_id=item.id,
+        evento=evento,
+        usuario_id=usuario.id,
+        usuario_nome=usuario.nome,
+        status_anterior=anterior.get('status'),
+        status_novo=item.status,
+        responsavel_anterior_id=anterior.get('responsavel_id'),
+        responsavel_anterior_nome=anterior.get('responsavel_nome'),
+        responsavel_novo_id=item.assumido_por_id,
+        responsavel_novo_nome=item.assumido_por_nome,
+        motivo=motivo,
+    ))
+
+
+@router.get('/agendamentos/tratativas/indicadores')
+def indicadores_tratativas_paciente(
+    usuario: UsuarioOperacional,
+    session: SessionPostgres,
+):
+    _exigir_acesso_confirmacoes(usuario)
+    itens = session.scalars(select(AgendaMedicaTratativaPaciente).where(
+        AgendaMedicaTratativaPaciente.status.notin_(('CONCLUIDA', 'CANCELADA'))
+    )).all()
+    slas = [_sla_tratativa(item) for item in itens]
+    tempos = [sla['tempo_aberto_minutos'] for sla in slas]
+    return {
+        'total_abertas': len(itens),
+        'no_prazo': sum(sla['sla_status'] == 'NO_PRAZO' for sla in slas),
+        'atencao': sum(sla['sla_status'] == 'ATENCAO' for sla in slas),
+        'atrasadas': sum(sla['sla_status'] == 'ATRASADA' for sla in slas),
+        'sem_responsavel': sum(item.assumido_por_id is None for item in itens),
+        'em_tratativa': sum(item.status == 'EM_TRATATIVA' for item in itens),
+        'tempo_medio_minutos': round(sum(tempos) / len(tempos)) if tempos else 0,
+    }
+
+
+@router.get('/agendamentos/tratativas/responsaveis')
+def listar_responsaveis_tratativas(
+    usuario: UsuarioOperacional,
+    session: SessionPostgres,
+):
+    _exigir_acesso_confirmacoes(usuario)
+    usuarios = session.scalars(
+        select(Usuario).where(Usuario.ativo.is_(True)).order_by(Usuario.nome)
+    ).all()
+    elegiveis = [item for item in usuarios if (
+        item.perfil in {'ti', 'administrador'}
+        or TELAS_CONFIRMACAO_ESCRITA.intersection(item.telas_permitidas or [])
+    )]
+    return {'responsaveis': [
+        {'id': item.id, 'nome': item.nome, 'perfil': item.perfil}
+        for item in elegiveis
+    ]}
+
+
 @router.get('/agendamentos/tratativas')
 def listar_tratativas_paciente(
     usuario: UsuarioOperacional,
     session: SessionPostgres,
     tipo: Literal['NAO_VIRA', 'REMANEJAMENTO', 'CORRECAO_CONFIRMACAO'] | None = None,
     status: Literal['PENDENTE', 'EM_TRATATIVA', 'CONCLUIDA', 'CANCELADA', 'FALHA'] | None = None,
+    prazo: Literal['NO_PRAZO', 'ATENCAO', 'ATRASADA', 'SEM_RESPONSAVEL'] | None = None,
+    responsavel_id: int | None = Query(default=None, gt=0),
     limite: int = Query(default=100, ge=1, le=500),
 ):
     _exigir_acesso_confirmacoes(usuario)
@@ -752,8 +826,96 @@ def listar_tratativas_paciente(
         consulta = consulta.where(AgendaMedicaTratativaPaciente.tipo == tipo)
     if status:
         consulta = consulta.where(AgendaMedicaTratativaPaciente.status == status)
+    if responsavel_id:
+        consulta = consulta.where(
+            AgendaMedicaTratativaPaciente.assumido_por_id == responsavel_id
+        )
+    if prazo == 'SEM_RESPONSAVEL':
+        consulta = consulta.where(
+            AgendaMedicaTratativaPaciente.assumido_por_id.is_(None)
+        )
     itens = session.scalars(consulta.limit(limite)).all()
+    if prazo and prazo != 'SEM_RESPONSAVEL':
+        itens = [item for item in itens if _sla_tratativa(item)['sla_status'] == prazo]
     return {'tratativas': [_tratativa_dict(item) for item in itens]}
+
+
+@router.get('/agendamentos/tratativas/{tratativa_id}/historico')
+def historico_tratativa_paciente(
+    tratativa_id: int,
+    usuario: UsuarioOperacional,
+    session: SessionPostgres,
+):
+    _exigir_acesso_confirmacoes(usuario)
+    if session.get(AgendaMedicaTratativaPaciente, tratativa_id) is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail='Tratativa não encontrada.'
+        )
+    itens = session.scalars(select(AgendaMedicaTratativaHistorico).where(
+        AgendaMedicaTratativaHistorico.tratativa_id == tratativa_id
+    ).order_by(AgendaMedicaTratativaHistorico.criado_em.desc())).all()
+    return {'historico': [{
+        'id': item.id,
+        'evento': item.evento,
+        'usuario': item.usuario_nome,
+        'status_anterior': item.status_anterior,
+        'status_novo': item.status_novo,
+        'responsavel_anterior': item.responsavel_anterior_nome,
+        'responsavel_novo': item.responsavel_novo_nome,
+        'motivo': item.motivo,
+        'criado_em': item.criado_em.isoformat(),
+    } for item in itens]}
+
+
+@router.put('/agendamentos/tratativas/{tratativa_id}/responsavel')
+def atribuir_responsavel_tratativa(
+    tratativa_id: int,
+    payload: AtribuirTratativaInput,
+    usuario: UsuarioOperacional,
+    session: SessionPostgres,
+):
+    _exigir_acesso_confirmacoes(usuario, escrita=True)
+    item = session.get(AgendaMedicaTratativaPaciente, tratativa_id)
+    responsavel = session.get(Usuario, payload.responsavel_id)
+    if item is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND, detail='Tratativa não encontrada.'
+        )
+    if item.status in {'CONCLUIDA', 'CANCELADA'}:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='Tratativa encerrada não pode ser reatribuída.',
+        )
+    elegivel = responsavel is not None and responsavel.ativo and (
+        responsavel.perfil in {'ti', 'administrador'}
+        or TELAS_CONFIRMACAO_ESCRITA.intersection(responsavel.telas_permitidas or [])
+    )
+    if not elegivel:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Responsável inválido ou sem acesso às tratativas.',
+        )
+    anterior = {
+        'status': item.status,
+        'responsavel_id': item.assumido_por_id,
+        'responsavel_nome': item.assumido_por_nome,
+    }
+    item.assumido_por_id = responsavel.id
+    item.assumido_por_nome = responsavel.nome
+    item.assumido_em = datetime.now(FUSO_HORARIO_BRASIL).replace(tzinfo=None)
+    if item.status == 'PENDENTE':
+        item.status = 'EM_TRATATIVA'
+    _registrar_historico(
+        session,
+        item,
+        usuario,
+        'REATRIBUIDA' if anterior['responsavel_id'] else 'ASSUMIDA',
+        anterior,
+        payload.motivo.strip(),
+    )
+    session.commit()
+    session.refresh(item)
+    return _tratativa_dict(item)
 
 
 @router.put('/agendamentos/tratativas/{tratativa_id}')
@@ -829,6 +991,11 @@ def atualizar_tratativa_paciente(
                     status_code=HTTPStatus.CONFLICT,
                     detail='O horário de destino não está ocupado no SoulMV.',
                 )
+    anterior = {
+        'status': item.status,
+        'responsavel_id': item.assumido_por_id,
+        'responsavel_nome': item.assumido_por_nome,
+    }
     item.status = payload.status
     if payload.status == 'EM_TRATATIVA' and item.assumido_em is None:
         item.assumido_por_id = usuario.id
@@ -843,6 +1010,24 @@ def atualizar_tratativa_paciente(
         item.concluido_por_id = usuario.id
         item.concluido_por_nome = usuario.nome
         item.concluido_em = datetime.now(FUSO_HORARIO_BRASIL).replace(tzinfo=None)
+    evento = {
+        'EM_TRATATIVA': (
+            'ASSUMIDA'
+            if anterior['responsavel_id'] is None
+            else 'STATUS_ALTERADO'
+        ),
+        'CONCLUIDA': 'CONCLUIDA',
+        'CANCELADA': 'CANCELADA',
+        'FALHA': 'FALHA',
+    }[payload.status]
+    _registrar_historico(
+        session,
+        item,
+        usuario,
+        evento,
+        anterior,
+        payload.motivo.strip() if payload.motivo else None,
+    )
     session.commit()
     session.refresh(item)
     return _tratativa_dict(item)

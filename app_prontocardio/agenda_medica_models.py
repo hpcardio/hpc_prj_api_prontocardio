@@ -241,3 +241,27 @@ class AgendaMedicaTratativaPaciente:
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+@table_registry.mapped_as_dataclass
+class AgendaMedicaTratativaHistorico:
+    """Linha do tempo imutável das decisões sobre uma tratativa."""
+
+    __tablename__ = 'agenda_medica_tratativas_historico'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    tratativa_id: Mapped[int] = mapped_column(Integer, index=True)
+    evento: Mapped[str] = mapped_column(String(40), index=True)
+    usuario_id: Mapped[int] = mapped_column(Integer)
+    usuario_nome: Mapped[str] = mapped_column(String(200))
+    status_anterior: Mapped[str | None] = mapped_column(String(30), default=None)
+    status_novo: Mapped[str | None] = mapped_column(String(30), default=None)
+    responsavel_anterior_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    responsavel_anterior_nome: Mapped[str | None] = mapped_column(String(200), default=None)
+    responsavel_novo_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    responsavel_novo_nome: Mapped[str | None] = mapped_column(String(200), default=None)
+    motivo: Mapped[str | None] = mapped_column(Text, default=None)
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime, init=False, server_default=func.now()
+    )
