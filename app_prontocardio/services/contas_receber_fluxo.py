@@ -8,6 +8,10 @@ Regras puras (sem banco), usadas pela rota ``contas_receber``:
   casamento automático com o portal (mês de produção + valor cobrado =
   competência + valor da remessa). Só vira "automático" quando o par é único
   nos dois sentidos; senão fica como sugestão "a confirmar";
+- no convênio com portal (ISSEC), o vínculo que veio da planilha só vale se o
+  portal confirmar (pedido de 26/11/2026): o processo existe com o mesmo mês
+  de produção e o valor cobrado é o da remessa ou a soma das remessas ligadas
+  ao protocolo. Senão o número da planilha vira só sugestão a conferir;
 - a NFS e o recebimento vêm dos vínculos gravados.
 """
 
@@ -168,6 +172,67 @@ def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
     return sugestoes
 
 
+# Vínculos de remessa que não foram feitos nem confirmados por alguém no
+# Receita Certa: no convênio com portal, precisam bater com o portal.
+ORIGENS_A_CONFERIR = frozenset({'planilha', 'legado'})
+
+
+def conferir_vinculos_pelo_portal(remessas, vinculos, portal):
+    """Separa os vínculos que o portal não confirma.
+
+    ``portal``: {cd_convenio: [ProcessoPortal]} — só esses convênios são
+    conferidos. Retorna (vinculos_validos, sugestoes) onde ``sugestoes`` é
+    {cd_remessa: {'numero', 'origem', 'motivo', 'valor_cobrado',
+    'competencia_portal'}} com o número da planilha a confirmar na tela.
+    """
+    por_remessa = {r['cd_remessa']: r for r in remessas}
+    soma_do_protocolo = defaultdict(lambda: Decimal('0.00'))
+    for cd, vinculo in vinculos.items():
+        remessa = por_remessa.get(cd)
+        if remessa:
+            chave = (remessa['cd_convenio'], vinculo['protocolo']['numero'])
+            soma_do_protocolo[chave] += dinheiro(remessa['valor'])
+    processos = {
+        (cd_convenio, p.numero): p
+        for cd_convenio, lista in portal.items()
+        for p in lista
+    }
+    validos, sugestoes = {}, {}
+    for cd, vinculo in vinculos.items():
+        remessa = por_remessa.get(cd)
+        protocolo = vinculo['protocolo']
+        origem = protocolo.get('origem_vinculo') or protocolo.get('origem')
+        if (
+            remessa is None
+            or remessa['cd_convenio'] not in portal
+            or origem not in ORIGENS_A_CONFERIR
+        ):
+            validos[cd] = vinculo
+            continue
+        chave = (remessa['cd_convenio'], protocolo['numero'])
+        p = processos.get(chave)
+        valores = {dinheiro(remessa['valor']), soma_do_protocolo[chave]}
+        if (
+            p is not None
+            and p.competencia == remessa['competencia']
+            and p.valor_cobrado in valores
+        ):
+            validos[cd] = vinculo
+            continue
+        sugestoes[cd] = {
+            'numero': protocolo['numero'],
+            'origem': origem,
+            'motivo': (
+                'Protocolo não encontrado no portal do convênio'
+                if p is None
+                else 'No portal o protocolo tem outra competência ou valor'
+            ),
+            'valor_cobrado': p.valor_cobrado if p else None,
+            'competencia_portal': p.competencia if p else None,
+        }
+    return validos, sugestoes
+
+
 def _dias(desde: date | None, hoje: date) -> int | None:
     return (hoje - desde).days if desde else None
 
@@ -261,6 +326,8 @@ def montar_item(remessa, vinculo, sugestao, hoje, notas_por_nup=None):
         'dt_prevista_pgto': remessa.get('dt_prevista_pgto'),
         'protocolo': protocolo,
         'protocolo_candidatos': candidatos,
+        # Número da planilha que o portal não confirmou (montar_fluxo).
+        'protocolo_planilha': None,
         'nfse': nfse,
         'recebimentos': recebimentos,
         'valor_recebido': sum(
