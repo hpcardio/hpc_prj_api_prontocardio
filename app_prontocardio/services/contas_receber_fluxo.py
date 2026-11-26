@@ -41,22 +41,21 @@ PENDENCIA = {
 
 
 # Funil da tela (pedido de 26/11/2026), com a página Notas Fiscais do portal
-# ISSEC: Pendentes com ENVIAR = convênio pediu a NF e falta anexar; Pendentes
-# sem ENVIAR = NF enviada, aguardando pagamento; Pagas = pago no portal
-# (recebido; "sem conciliação" enquanto o crédito não está no extrato).
+# ISSEC: protocolado e fora de Notas Fiscais = NFS não autorizada; em Notas
+# Fiscais – Pendentes (com ou sem ENVIAR) = aguardando recebimento; Pagas =
+# recebida ("sem conciliação" enquanto o crédito não está no extrato).
 SITUACOES = (
     ('protocolo', 'Aguardando protocolo'),
-    ('nfs_autorizada', 'NFS autorizadas'),
-    ('nao_autorizada', 'Não autorizadas'),
+    ('nao_autorizada', 'NFS não autorizadas'),
     ('aguardando_recebimento', 'Aguardando recebimento'),
-    ('recebido', 'Recebidos'),
-    ('recebido_sem_conciliacao', 'Recebidos s/ conciliação bancária'),
+    ('recebido', 'Recebidas'),
+    ('recebido_sem_conciliacao', 'Recebidas s/ conciliação bancária'),
 )
 ROTULO_SITUACAO = dict(SITUACOES)
 SITUACOES_RECEBIDAS = {'recebido', 'recebido_sem_conciliacao'}
 
 
-def situacao_fluxo(item, nota_portal=None) -> str:  # noqa: PLR0911
+def situacao_fluxo(item, nota_portal=None) -> str:
     """Etapa do funil da remessa.
 
     ``nota_portal``: situação do processo na página Notas Fiscais do portal
@@ -69,14 +68,14 @@ def situacao_fluxo(item, nota_portal=None) -> str:  # noqa: PLR0911
         return 'recebido' if conciliado else 'recebido_sem_conciliacao'
     if conciliado:
         return 'recebido'
-    if nota_portal and nota_portal.get('situacao') == 'pendente':
-        if nota_portal.get('nf_a_enviar'):
-            return 'nfs_autorizada'
+    # Pendente no portal (o convênio pediu a NF com ENVIAR ou já a recebeu),
+    # NFS vinculada ou nota solicitada pelo convênio: aguardando recebimento.
+    if (
+        (nota_portal and nota_portal.get('situacao') == 'pendente')
+        or item.get('nfse')
+        or item.get('solicitacao_nota')
+    ):
         return 'aguardando_recebimento'
-    if item.get('nfse'):
-        return 'aguardando_recebimento'
-    if item.get('solicitacao_nota'):
-        return 'nfs_autorizada'
     return 'nao_autorizada'
 
 
