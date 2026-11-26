@@ -67,7 +67,6 @@ WITH prescritos AS (
       LEFT JOIN DBAMV.EXA_LAB lab ON lab.CD_EXA_LAB = tp.CD_EXA_LAB
      WHERE a.TP_ATENDIMENTO = 'A'
        AND a.DT_ATENDIMENTO >= SYSDATE - 2
-       AND pm.SN_FECHADO = 'S'
        AND NVL(ipm.SN_CANCELADO, 'N') = 'N'
        AND (tp.SN_SOLICITACAO = 'S' OR tp.CD_EXA_RX IS NOT NULL
             OR tp.CD_EXA_LAB IS NOT NULL)
