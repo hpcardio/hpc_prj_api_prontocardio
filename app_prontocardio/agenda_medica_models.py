@@ -265,3 +265,36 @@ class AgendaMedicaTratativaHistorico:
     criado_em: Mapped[datetime] = mapped_column(
         DateTime, init=False, server_default=func.now()
     )
+
+
+@table_registry.mapped_as_dataclass
+class AgendaMedicaRastreioPrescricao:
+    """Exame prescrito no ambulatório encaminhado à Central de Marcações."""
+
+    __tablename__ = 'agenda_medica_rastreio_prescricoes'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cd_itpre_med: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    cd_pre_med: Mapped[int] = mapped_column(Integer, index=True)
+    cd_atendimento: Mapped[int] = mapped_column(Integer, index=True)
+    cd_paciente: Mapped[int] = mapped_column(Integer, index=True)
+    cd_tip_presc: Mapped[int] = mapped_column(Integer)
+    cd_item_agendamento: Mapped[int] = mapped_column(Integer, index=True)
+    data_atendimento: Mapped[datetime] = mapped_column(DateTime)
+    data_prescricao: Mapped[datetime] = mapped_column(DateTime)
+    elegivel_em: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    codigo_tuss: Mapped[str | None] = mapped_column(String(30), default=None)
+    cd_prestador: Mapped[int | None] = mapped_column(Integer, default=None)
+    cd_it_agenda_central: Mapped[int | None] = mapped_column(Integer, default=None)
+    protocolo_mv: Mapped[int | None] = mapped_column(Integer, default=None)
+    motivo_descarte: Mapped[str | None] = mapped_column(Text, default=None)
+    atualizado_por_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    atualizado_por_nome: Mapped[str | None] = mapped_column(String(200), default=None)
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime, init=False, server_default=func.now()
+    )
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime, init=False, server_default=func.now(), onupdate=func.now()
+    )
