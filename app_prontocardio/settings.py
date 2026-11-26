@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     WHATSAPP_GRAPH_API_VERSION: str = 'v25.0'
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
     WHATSAPP_ACCESS_TOKEN: str | None = None
+    SUPPLIER_BULK_SEND_ENABLED: bool = False
+    SUPPLIER_WHATSAPP_WABA_ID: str | None = None
+    SUPPLIER_UPDATE_WHATSAPP_TEMPLATE: str | None = None
+    SUPPLIER_PAYMENT_WHATSAPP_TEMPLATE: str | None = None
+    SUPPLIER_WHATSAPP_LANGUAGE: str = 'pt_BR'
     WHATSAPP_AUTO_REPLY_TEXT: str | None = None
     WHATSAPP_MIDIA_TEMPLATE_ENABLED: bool = False
     WHATSAPP_MIDIA_TEMPLATE_ALLOWLIST: str = "preparo_angiotc_coronariana_v1"
