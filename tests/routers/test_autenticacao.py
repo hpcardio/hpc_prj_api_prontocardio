@@ -121,7 +121,7 @@ def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
     assert 'https://api.exemplo.local' not in conteudo
 
 
-def test_token_painel_medicos_tem_audiencia_e_expiracao(
+def test_token_painel_medicos_tem_audiencia_e_versao_da_credencial(
     session, usuario_teste
 ):
     usuario_teste.perfil = 'leitura'
@@ -142,7 +142,11 @@ def test_token_painel_medicos_tem_audiencia_e_expiracao(
         audience='painel_leitos_medicos',
     )
     assert payload['sub'] == usuario_teste.email
-    assert payload['exp'] > payload.get('iat', 0)
+    # Sessão persistente do painel médico (26/11): sem expiração, revogada
+    # quando a senha muda (versão da credencial em "sv").
+    assert 'exp' not in payload
+    assert payload['iat'] > 0
+    assert payload['sv']
 
 
 def test_link_receita_certa_entrega_token_por_query(monkeypatch):

@@ -58,6 +58,16 @@ def criar_token_usuario(usuario: Usuario) -> str:
     })
 
 
+def criar_token_painel_medicos(usuario: Usuario) -> str:
+    """Cria sessão persistente, revogável pelo usuário ou pela credencial."""
+    return criar_token({
+        'sub': usuario.email,
+        'aud': 'painel_leitos_medicos',
+        'iat': datetime.now(timezone.utc),
+        'sv': _versao_credencial(usuario),
+    })
+
+
 def valida_token_usuario_atual(
     session: SessionPostgres, token: str = Depends(oauth2_scheme)
 ):
@@ -134,9 +144,15 @@ def valida_acesso_painel_leitos_medicos(
             settings.SECRET_KEY,
             algorithms=settings.ALGORITHM,
             audience='painel_leitos_medicos',
+            options={'require': ['sub', 'aud', 'iat', 'sv']},
         )
         subject_email = payload.get('sub')
-        if not subject_email:
+        if (
+            not isinstance(subject_email, str)
+            or not subject_email
+            or not isinstance(payload.get('iat'), (int, float))
+            or not isinstance(payload.get('sv'), str)
+        ):
             raise excessao_autenticacao
     except InvalidTokenError:
         raise excessao_autenticacao
@@ -144,7 +160,13 @@ def valida_acesso_painel_leitos_medicos(
     usuario = session.scalar(
         select(Usuario).where(Usuario.email == subject_email)
     )
-    if not usuario or not usuario.ativo:
+    if (
+        not usuario
+        or not usuario.ativo
+        or not hmac.compare_digest(
+            payload['sv'].encode(), _versao_credencial(usuario).encode()
+        )
+    ):
         raise excessao_autenticacao
     if usuario.perfil not in {'leitura', 'ti'}:
         raise HTTPException(

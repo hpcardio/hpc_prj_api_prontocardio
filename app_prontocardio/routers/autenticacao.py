@@ -15,14 +15,14 @@ from sqlalchemy.orm import Session
 from app_prontocardio.database import get_session_postgres
 from app_prontocardio.models import TokenRedefinicaoSenha, Usuario
 from app_prontocardio.schema import (
-    Message,
     FirstAccessPasswordChange,
+    Message,
     PasswordResetConfirm,
     PasswordResetRequest,
     Token,
 )
 from app_prontocardio.security import (
-    criar_token,
+    criar_token_painel_medicos,
     criar_token_usuario,
     gera_hash_senha,
     valida_senha_cru_x_senha_hash_db,
@@ -151,7 +151,7 @@ def concluir_primeiro_acesso(
 def autenticar_usuario_painel_medicos(
     form_data: OAuthForm, session: SessionPostgres
 ):
-    """Gera uma sessão de oito horas restrita ao painel médico externo."""
+    """Sessão persistente restrita ao painel médico externo."""
     usuario_banco = session.scalar(
         select(Usuario).where(Usuario.email == form_data.username)
     )
@@ -169,13 +169,7 @@ def autenticar_usuario_painel_medicos(
     ):
         raise excessao_autenticacao
 
-    token = criar_token(
-        claim={
-            'sub': usuario_banco.email,
-            'aud': 'painel_leitos_medicos',
-            'exp': datetime.now(timezone.utc) + timedelta(hours=8),
-        }
-    )
+    token = criar_token_painel_medicos(usuario_banco)
     return {'access_token': token, 'token_type': 'Bearer'}
 
 
