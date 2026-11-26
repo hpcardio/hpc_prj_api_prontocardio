@@ -50,8 +50,8 @@ SITUACOES = (
     ('nfs_autorizada', 'NFS autorizadas'),
     ('nao_autorizada', 'NFS não autorizadas'),
     ('aguardando_recebimento', 'Aguardando recebimento'),
-    ('recebido', 'Recebidas'),
     ('recebido_sem_conciliacao', 'Recebidas s/ conciliação bancária'),
+    ('recebido', 'Recebidas'),
 )
 ROTULO_SITUACAO = dict(SITUACOES)
 SITUACOES_RECEBIDAS = {'recebido', 'recebido_sem_conciliacao'}

@@ -210,8 +210,8 @@ def test_funil_soma_quantidade_e_valor_por_etapa():
         'nfs_autorizada': (0, Decimal('0.00')),
         'nao_autorizada': (0, Decimal('0.00')),
         'aguardando_recebimento': (1, Decimal('50.00')),
-        'recebido': (1, Decimal('25.00')),
         'recebido_sem_conciliacao': (0, Decimal('0.00')),
+        'recebido': (1, Decimal('25.00')),
     }
     assert resumo['valor_total'] == Decimal('185.00')
     assert resumo['protocolos_a_confirmar'] == 1
@@ -927,10 +927,10 @@ def test_rota_usa_a_situacao_do_portal(monkeypatch):
     assert por_remessa[2]['situacao_fluxo'] == 'recebido_sem_conciliacao'
     assert por_remessa[2]['dias_na_etapa'] is None
     assert [s['chave'] for s in resposta['situacoes']] == [
-        'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento', 'recebido', 'recebido_sem_conciliacao']
+        'protocolo', 'nfs_autorizada', 'nao_autorizada', 'aguardando_recebimento', 'recebido_sem_conciliacao', 'recebido']
     assert [s['rotulo'] for s in resposta['situacoes']] == [
-        'Aguardando protocolo', 'NFS autorizadas', 'NFS não autorizadas', 'Aguardando recebimento', 'Recebidas',
-        'Recebidas s/ conciliação bancária']
+        'Aguardando protocolo', 'NFS autorizadas', 'NFS não autorizadas', 'Aguardando recebimento',
+        'Recebidas s/ conciliação bancária', 'Recebidas']
 
 
 def _vinculo_planilha(numero, origem='planilha'):
