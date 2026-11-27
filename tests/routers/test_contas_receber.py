@@ -15,6 +15,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     aliquotas_por_convenio,
     aplicar_estimativa,
     bases_das_remessas,
+    casar_por_guia,
     casar_portal,
     conferir_vinculos_pelo_portal,
     config_retencao,
@@ -24,6 +25,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     resumo_funil,
     situacao_fluxo,
 )
+from app_prontocardio.services.contas_receber_guias import SenhasDasRemessas
 
 HOJE = date(2026, 11, 24)
 OUT = date(2026, 10, 1)
@@ -230,6 +232,7 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
 
@@ -268,6 +271,7 @@ def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
@@ -327,6 +331,7 @@ def test_exportar_devolve_todas_as_remessas_sem_paginar(monkeypatch):
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
@@ -912,6 +917,7 @@ def test_rota_usa_a_situacao_do_portal(monkeypatch):
     monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {
         'A': {'situacao': 'pendente', 'nf_a_enviar': True}, 'B': {'situacao': 'paga', 'nf_a_enviar': False}})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
@@ -1027,3 +1033,82 @@ def test_valor_diferente_em_analise_continua_sugestao():
 def test_situacao_do_portal_usa_o_motivo_quando_vazia():
     assert "'Motivo da Situação:'" in rota._situacao_portal('ip')
     assert 'mes_producao IS NOT NULL' not in str(rota.SQL_PORTAL[rota.CD_CONVENIO_ISSEC])
+
+
+def _com_guias(processo, *senhas):
+    return ProcessoPortal(processo.numero, processo.competencia, processo.valor_cobrado,
+                          processo.valor_liberado, data_entrada=processo.data_entrada, senhas=frozenset(senhas))
+
+
+def test_guia_decide_o_processo_mesmo_com_competencia_diferente():
+    """Caso 2600002999 / 16308: produção 12/2025 no portal, competência 01/2026 no MV."""
+    jan = date(2026, 1, 1)
+    remessa = {**_remessa(16308, '63.50', competencia=jan), 'senhas': frozenset({'0057P2P18', '0052ZDQIF'})}
+    processo = _com_guias(_processo('2600002999', '63.50', competencia=date(2025, 12, 1)), '0057P2P18', '0052ZDQIF')
+    outro = _com_guias(_processo('2600009999', '63.50', competencia=jan), '005XXXXXX')
+
+    sugestao = casar_portal([remessa], [processo, outro], set(), set())[16308]
+    assert sugestao['criterio'] == 'guia'
+    assert sugestao['situacao'] == 'automatico'
+    assert [p.numero for p in sugestao['candidatos']] == ['2600002999']
+
+    # Vínculo da planilha: vale se as guias apontam o mesmo processo.
+    validos, sugestoes = conferir_vinculos_pelo_portal([remessa], {16308: _vinculo_planilha('2600002999')}, {46: [processo, outro]})
+    assert set(validos) == {16308}
+    assert not sugestoes
+    _, sugestoes = conferir_vinculos_pelo_portal([remessa], {16308: _vinculo_planilha('2600009999')}, {46: [processo, outro]})
+    assert 'As guias da remessa estão no processo 2600002999' in sugestoes[16308]['motivo']
+
+    item = rota.montar_fluxo([_remessa(16308, '63.50', competencia=jan)], {46: [processo, outro]}, {}, HOJE,
+                             senhas={16308: frozenset({'0057P2P18', '0052ZDQIF'})})[0]
+    assert item['protocolo']['numero'] == '2600002999'
+    assert item['protocolo']['criterio'] == 'guia'
+    assert 'senhas' not in item
+
+
+def test_guia_com_mais_senhas_em_comum_e_empate_pelo_mes():
+    out = date(2026, 10, 1)
+    remessa = {**_remessa(1, '10.00'), 'senhas': frozenset({'A', 'B', 'C'})}
+    um = _com_guias(_processo('P1', '10.00', competencia=out), 'A')
+    dois = _com_guias(_processo('P2', '10.00', competencia=date(2026, 9, 1)), 'A', 'B')
+    assert casar_por_guia([remessa], [um, dois])[1]['candidatos'][0].numero == 'P2'
+
+    remessa = {**_remessa(1, '10.00'), 'senhas': frozenset({'A', 'B'})}
+    empate = _com_guias(_processo('P3', '10.00', competencia=date(2026, 9, 1)), 'A')
+    sugestao = casar_por_guia([remessa], [um, empate])[1]
+    assert [p.numero for p in sugestao['candidatos']] == ['P1']  # mesmo mês da remessa
+
+    sem_mes = _com_guias(_processo('P4', '10.00', competencia=date(2026, 8, 1)), 'A')
+    sugestao = casar_por_guia([remessa], [empate, sem_mes])[1]
+    assert sugestao['situacao'] == 'a_confirmar'
+
+
+def test_guias_conhecidas_sem_nada_em_comum_nao_casam_por_valor():
+    remessa = {**_remessa(1, '10.00'), 'senhas': frozenset({'A'})}
+    processo = _com_guias(_processo('P', '10.00'), 'Z')
+    assert casar_portal([remessa], [processo], set(), set()) == {}
+    # Sem guias no portal (ex.: internamento), segue mês de produção + valor.
+    sugestao = casar_portal([remessa], [_processo('P', '10.00')], set(), set())[1]
+    assert sugestao['criterio'] == 'mes_valor'
+
+
+def test_senhas_das_remessas_em_lotes_e_so_as_novas():
+    chamadas = []
+
+    def carregar(lote):
+        chamadas.append(list(lote))
+        return {cd: {f'S{cd}'} for cd in lote if cd != 3}
+
+    cache = SenhasDasRemessas(carregar, em_segundo_plano=False)
+    assert cache.obter([1, 2, 3]) == {1: frozenset({'S1'}), 2: frozenset({'S2'}), 3: frozenset()}
+    cache.obter([1, 2, 3, 4])
+    assert chamadas == [[1, 2, 3], [4]]
+
+
+def test_senha_repetida_em_outro_mes_nao_basta():
+    """Menos da metade das senhas da remessa no processo: não casa pela guia."""
+    remessa = {**_remessa(1, '10.00'), 'senhas': frozenset({'A', 'B', 'C'})}
+    seriado = _com_guias(_processo('P', '99.00', competencia=date(2026, 9, 1)), 'A', 'X', 'Y')
+    assert casar_por_guia([remessa], [seriado]) == {}
+    metade = {**_remessa(2, '10.00'), 'senhas': frozenset({'A', 'B'})}
+    assert casar_por_guia([metade], [seriado])[2]['candidatos'][0].numero == 'P'

@@ -138,18 +138,79 @@ class ProcessoPortal:
     data_entrada: date | None = None
     situacao: str | None = None
     nup_grupo: str | None = None
+    # Senhas das guias do processo ("Detalhes de Contas" no portal).
+    senhas: frozenset = frozenset()
+
+
+MINIMO_SENHAS_EM_COMUM = Decimal('0.5')
+
+
+def casar_por_guia(remessas, processos):
+    """Processo do portal de cada remessa pelas guias (pedido de 27/11/2026).
+
+    A senha da guia no portal ("Detalhes de Contas") é a GUIA.CD_SENHA das
+    contas da remessa no MV. Vence o processo com mais senhas em comum; no
+    empate, o de mesmo mês de produção. Um processo pode ter várias remessas.
+    O processo precisa ter pelo menos metade das senhas da remessa: a mesma
+    senha se repete em meses diferentes (tratamento seriado) e uma senha
+    isolada não basta (amostra de 27/11: 307 de 307 vínculos confirmados
+    ficam; 10 de 11 divergentes saem).
+    Retorna {cd_remessa: {'situacao', 'candidatos', 'criterio': 'guia'}}.
+    """
+    por_senha = defaultdict(set)
+    por_numero = {}
+    for p in processos:
+        por_numero[p.numero] = p
+        for senha in p.senhas:
+            por_senha[senha].add(p.numero)
+    resultado = {}
+    for r in remessas:
+        comuns = Counter(
+            numero
+            for senha in r.get('senhas') or ()
+            for numero in por_senha.get(senha, ())
+        )
+        if not comuns:
+            continue
+        maior = max(comuns.values())
+        if maior < len(r['senhas']) * MINIMO_SENHAS_EM_COMUM:
+            continue
+        melhores = sorted(n for n, qt in comuns.items() if qt == maior)
+        if len(melhores) > 1:
+            mesmo_mes = [
+                n for n in melhores
+                if por_numero[n].competencia == r['competencia']
+            ]
+            melhores = mesmo_mes if len(mesmo_mes) == 1 else melhores
+        resultado[r['cd_remessa']] = {
+            'situacao': 'automatico' if len(melhores) == 1 else 'a_confirmar',
+            'candidatos': [por_numero[n] for n in melhores],
+            'criterio': 'guia',
+        }
+    return resultado
 
 
 def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
     """Sugestões de protocolo do portal para as remessas ainda sem vínculo.
 
-    ``remessas``: dicts com cd_remessa, competencia (date, dia 1) e valor.
+    ``remessas``: dicts com cd_remessa, competencia (date, dia 1), valor e
+    senhas (guias no MV). Primeiro pelas guias; para as remessas sem guia em
+    comum com o portal, pelo mês de produção + valor cobrado.
     Retorna {cd_remessa: {'situacao': 'automatico'|'a_confirmar',
-    'candidatos': [ProcessoPortal, ...]}}.
+    'candidatos': [ProcessoPortal, ...], 'criterio': 'guia'|'mes_valor'}}.
     """
+    livres = [
+        r for r in remessas if r['cd_remessa'] not in remessas_vinculadas
+    ]
+    sugestoes = casar_por_guia(livres, processos)
+    usados = {
+        c.numero for sugestao in sugestoes.values()
+        for c in sugestao['candidatos']
+    }
+    com_guias = {r['cd_remessa'] for r in livres if r.get('senhas')}
     por_chave = defaultdict(list)
-    for r in remessas:
-        if r['cd_remessa'] in remessas_vinculadas:
+    for r in livres:
+        if r['cd_remessa'] in sugestoes:
             continue
         por_chave[(r['competencia'], dinheiro(r['valor']))].append(
             r['cd_remessa']
@@ -157,13 +218,19 @@ def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
     candidatos_da_remessa = defaultdict(list)
     remessas_do_processo = {}
     for p in processos:
-        if p.numero in numeros_vinculados or p.competencia is None:
+        if (
+            p.numero in numeros_vinculados
+            or p.numero in usados
+            or p.competencia is None
+        ):
             continue
         alvo = por_chave.get((p.competencia, dinheiro(p.valor_cobrado)), [])
+        if p.senhas:
+            # Guias conhecidas dos dois lados e nenhuma em comum: não casa.
+            alvo = [cd for cd in alvo if cd not in com_guias]
         remessas_do_processo[p.numero] = alvo
         for cd in alvo:
             candidatos_da_remessa[cd].append(p)
-    sugestoes = {}
     for cd, procs in candidatos_da_remessa.items():
         unico = (
             len(procs) == 1 and len(remessas_do_processo[procs[0].numero]) == 1
@@ -171,6 +238,7 @@ def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
         sugestoes[cd] = {
             'situacao': 'automatico' if unico else 'a_confirmar',
             'candidatos': sorted(procs, key=lambda p: p.numero),
+            'criterio': 'mes_valor',
         }
     return sugestoes
 
@@ -200,6 +268,11 @@ def conferir_vinculos_pelo_portal(remessas, vinculos, portal):
         for cd_convenio, lista in portal.items()
         for p in lista
     }
+    pela_guia = {}
+    for cd_convenio, lista in portal.items():
+        pela_guia.update(casar_por_guia(
+            [r for r in remessas if r['cd_convenio'] == cd_convenio], lista,
+        ))
     validos, sugestoes = {}, {}
     for cd, vinculo in vinculos.items():
         remessa = por_remessa.get(cd)
@@ -214,6 +287,25 @@ def conferir_vinculos_pelo_portal(remessas, vinculos, portal):
             continue
         chave = (remessa['cd_convenio'], protocolo['numero'])
         p = processos.get(chave)
+        guia = pela_guia.get(cd)
+        if guia:
+            # As guias decidem: vale se o protocolo registrado é um dos
+            # processos com as guias da remessa.
+            numeros = [c.numero for c in guia['candidatos']]
+            if protocolo['numero'] in numeros:
+                validos[cd] = vinculo
+                continue
+            sugestoes[cd] = {
+                'numero': protocolo['numero'],
+                'origem': origem,
+                'motivo': (
+                    'As guias da remessa estão no processo '
+                    f"{', '.join(numeros)} do portal"
+                ),
+                'valor_cobrado': p.valor_cobrado if p else None,
+                'competencia_portal': p.competencia if p else None,
+            }
+            continue
         valores = {dinheiro(remessa['valor']), soma_do_protocolo[chave]}
         # Processo "Em Análise" ainda não tem mês de produção no portal: vale o
         # valor cobrado (caso 2600041925, remessa 20618).
@@ -261,6 +353,7 @@ def montar_item(remessa, vinculo, sugestao, hoje, notas_por_nup=None):
             'data_protocolo': p.data_entrada,
             'situacao_portal': p.situacao,
             'nup_grupo': p.nup_grupo,
+            'criterio': sugestao.get('criterio'),
             'solicitacao_nota_em': None,
             'solicitacao_nota_obs': None,
         }
