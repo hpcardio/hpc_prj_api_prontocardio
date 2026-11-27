@@ -87,6 +87,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if settings.RUN_MIGRATIONS_ON_STARTUP:
         ensure_postgres_schema()
         run_postgres_migrations()
+    # Contas a Receber: senhas das guias do MV (só no serviço payables).
+    contas_receber.iniciar_carga_das_senhas()
     yield
 
 

@@ -9,6 +9,8 @@ entregas, sobre as tabelas ``cr_*`` (docs/oracle/contas_receber_fluxo.sql).
 """
 
 import json
+import logging
+import os
 import threading
 from datetime import date, datetime
 from decimal import Decimal
@@ -49,6 +51,8 @@ from app_prontocardio.services.contas_receber_fluxo import (
     resumo_funil,
 )
 from app_prontocardio.services.contas_receber_guias import SenhasDasRemessas
+
+logger = logging.getLogger('uvicorn.error')
 
 router = APIRouter(
     prefix='/app_glosas/financeiro/contas-a-receber',
@@ -291,6 +295,38 @@ def _carregar_senhas_mv(cd_remessas: list[int]) -> dict[int, set[str]]:
 
 
 _senhas_remessas = SenhasDasRemessas(_carregar_senhas_mv)
+
+
+def iniciar_carga_das_senhas() -> None:
+    """Carrega em segundo plano as senhas das guias ao subir a API.
+
+    Só no serviço dedicado do Contas a Pagar/Receber (payables), o único com
+    PAYABLES_MV_CALL_TIMEOUT_MS: a API principal não serve esta tela.
+    """
+    if int(os.getenv('PAYABLES_MV_CALL_TIMEOUT_MS', '0') or 0) <= 0:
+        return
+
+    def carregar():
+        from sqlalchemy.orm import Session  # noqa: PLC0415
+
+        from app_prontocardio.database import oracle_engine  # noqa: PLC0415
+
+        try:
+            with Session(oracle_engine) as oracle:
+                senhas_mv(remessas_mv(oracle))
+        except Exception:  # noqa: BLE001 - a tela carrega na primeira consulta
+            logger.warning(
+                'Senhas das guias: carga na subida falhou.', exc_info=True
+            )
+
+    threading.Thread(target=carregar, daemon=True, name='senhas-subida').start()
+
+
+def guias_carregando(remessas) -> bool:
+    """Ainda há remessas dos convênios com portal sem as senhas carregadas."""
+    return _senhas_remessas.faltam(
+        r['cd_remessa'] for r in remessas if r['cd_convenio'] in SQL_PORTAL
+    ) > 0
 
 
 def senhas_mv(remessas) -> dict[int, frozenset]:
@@ -811,6 +847,9 @@ def fluxo(
         'page_size': page_size,
         'total_pages': total_pages,
         'convenios': _opcoes_convenios(todos),
+        # Enquanto as senhas das guias carregam (após a subida da API), os
+        # vínculos pelas guias ainda não aparecem: a tela avisa.
+        'guias_carregando': guias_carregando(remessas),
         'atualizado_em': datetime.now(FUSO_HOSPITAL).isoformat(
             timespec='seconds'
         ),
