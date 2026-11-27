@@ -617,17 +617,59 @@ def ratear_nfs(itens, bases=None, configs=None):
     return itens
 
 
+# Cards que mostram o valor líquido (pedido de 27/11/2026): o que deve entrar
+# no banco depois das glosas e das retenções da NF.
+SITUACOES_VALOR_LIQUIDO = frozenset(
+    {'aguardando_recebimento', 'recebido_sem_conciliacao', 'recebido'}
+)
+
+
+def liquido_do_item(item) -> Decimal:
+    """Valor líquido da remessa, como no card da tela.
+
+    Parte da NF de grupo que cabe à remessa; senão o líquido da NF no ISS;
+    sem NF, o líquido estimado pela alíquota do convênio; sem nada disso, o
+    valor total da remessa.
+    """
+    rateio = item.get('nf_rateio') or {}
+    nfse = item.get('nfse') or {}
+    estimativa = item.get('estimativa') or {}
+    for valor in (
+        rateio.get('liquido') if rateio else nfse.get('valor_liquido'),
+        estimativa.get('liquido'),
+    ):
+        if valor is not None:
+            return dinheiro(valor)
+    return item['valor']
+
+
 def resumo_funil(itens):
-    """Quantidade e valor parados em cada etapa do funil (cards do topo)."""
+    """Quantidade e valor parados em cada etapa do funil (cards do topo).
+
+    Nos cards de recebimento o valor é o líquido; nos demais, o valor total
+    das remessas (``base_valor``).
+    """
     resumo = {
-        k: {'chave': k, 'rotulo': r, 'quantidade': 0, 'valor': Decimal('0.00')}
+        k: {
+            'chave': k,
+            'rotulo': r,
+            'quantidade': 0,
+            'valor': Decimal('0.00'),
+            'base_valor': (
+                'liquido' if k in SITUACOES_VALOR_LIQUIDO else 'total'
+            ),
+        }
         for k, r in SITUACOES
     }
     a_confirmar = 0
     for item in itens:
         r = resumo[item.get('situacao_fluxo') or situacao_fluxo(item)]
         r['quantidade'] += 1
-        r['valor'] += item['valor']
+        r['valor'] += (
+            liquido_do_item(item)
+            if r['base_valor'] == 'liquido'
+            else item['valor']
+        )
         if item['protocolo_candidatos']:
             a_confirmar += 1
     return {
