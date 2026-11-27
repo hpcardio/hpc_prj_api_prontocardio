@@ -19,6 +19,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     casar_portal,
     conferir_vinculos_pelo_portal,
     config_retencao,
+    liquido_do_item,
     montar_item,
     notas_por_nup,
     ratear_nfs,
@@ -1147,3 +1148,26 @@ def test_versao_dos_dados_sem_tabelas_volta_none():
     sessao = Falha()
     assert rota.versao_dos_dados(sessao) is None
     assert sessao.rolou
+
+
+def test_cards_de_recebimento_somam_o_valor_liquido():
+    """Pedido de 27/11: aguardando recebimento e recebidas mostram o líquido."""
+    def item(cd, situacao, **extra):
+        return {'cd_remessa': cd, 'valor': Decimal('100.00'), 'situacao_fluxo': situacao,
+                'protocolo_candidatos': [], **extra}
+
+    itens = [
+        item(1, 'aguardando_recebimento', nf_rateio={'liquido': Decimal('90.00')}, nfse={'valor_liquido': '999'}),
+        item(2, 'aguardando_recebimento', nfse={'valor_liquido': '80.00'}),
+        item(3, 'recebido_sem_conciliacao', estimativa={'liquido': Decimal('70.00')}),
+        item(4, 'recebido'),  # sem NF nem estimativa: o total
+        item(5, 'nao_autorizada', nfse={'valor_liquido': '10.00'}),  # card de total
+    ]
+    assert liquido_do_item(itens[0]) == Decimal('90.00')
+    etapas = {e['chave']: e for e in resumo_funil(itens)['etapas']}
+    assert etapas['aguardando_recebimento']['valor'] == Decimal('170.00')
+    assert etapas['aguardando_recebimento']['base_valor'] == 'liquido'
+    assert etapas['recebido_sem_conciliacao']['valor'] == Decimal('70.00')
+    assert etapas['recebido']['valor'] == Decimal('100.00')
+    assert etapas['nao_autorizada']['valor'] == Decimal('100.00')
+    assert etapas['nao_autorizada']['base_valor'] == 'total'
