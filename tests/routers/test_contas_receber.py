@@ -1171,3 +1171,57 @@ def test_cards_de_recebimento_somam_o_valor_liquido():
     assert etapas['recebido']['valor'] == Decimal('100.00')
     assert etapas['nao_autorizada']['valor'] == Decimal('100.00')
     assert etapas['nao_autorizada']['base_valor'] == 'total'
+
+
+def test_senhas_tentam_de_novo_e_registram_a_falha(caplog):
+    tentativas = []
+
+    def carregar(lote):
+        tentativas.append(list(lote))
+        if len(tentativas) == 1:
+            raise RuntimeError('ORA-03113')
+        return {cd: {'S'} for cd in lote}
+
+    cache = SenhasDasRemessas(carregar, em_segundo_plano=False, espera_entre_tentativas=0)
+    with caplog.at_level('WARNING', logger='uvicorn.error'):
+        assert cache.obter([1, 2]) == {1: frozenset({'S'}), 2: frozenset({'S'})}
+    assert len(tentativas) == 2
+    assert 'tentativa 1 de 3' in caplog.text
+    assert '2 remessas carregadas, 0 com falha' in caplog.text
+    assert cache.faltam([1, 2, 3]) == 1
+
+
+def test_lote_que_sempre_falha_nao_trava_a_carga():
+    cache = SenhasDasRemessas(lambda lote: (_ for _ in ()).throw(RuntimeError('x')),
+                              em_segundo_plano=False, espera_entre_tentativas=0)
+    assert cache.obter([1]) == {}
+    assert cache.faltam([1]) == 1
+    # A próxima consulta tenta de novo (não fica "carregando" para sempre).
+    assert cache.obter([1]) == {}
+
+
+def test_carga_na_subida_so_no_servico_payables(monkeypatch):
+    iniciadas = []
+    monkeypatch.setattr(rota.threading, 'Thread', lambda **kw: iniciadas.append(kw) or SimpleNamespace(start=lambda: None))
+    monkeypatch.delenv('PAYABLES_MV_CALL_TIMEOUT_MS', raising=False)
+    rota.iniciar_carga_das_senhas()
+    assert iniciadas == []
+    monkeypatch.setenv('PAYABLES_MV_CALL_TIMEOUT_MS', '20000')
+    rota.iniciar_carga_das_senhas()
+    assert iniciadas[0]['name'] == 'senhas-subida'
+
+
+def test_fluxo_informa_guias_carregando(monkeypatch):
+    monkeypatch.setattr(rota, 'remessas_mv', lambda _o: [_remessa(1, '100.00')])
+    monkeypatch.setattr(rota, 'processos_portal', lambda _p: {46: []})
+    monkeypatch.setattr(rota, 'vinculos_gravados', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
+    monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
+    monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
+    monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
+    monkeypatch.setattr(rota, 'versao_dos_dados', lambda _p: None)
+    monkeypatch.setattr(rota, 'guias_carregando', lambda _r: True)
+    resposta = rota.fluxo(oracle=None, postgres=None, _usuario=None, convenio=None, etapa=None,
+                          competencia_de=None, competencia_ate=None, q=None, a_confirmar=False,
+                          ordenar_por='parado', page=1, page_size=10)
+    assert resposta['guias_carregando'] is True
