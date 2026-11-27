@@ -10,8 +10,9 @@ Regras puras (sem banco), usadas pela rota ``contas_receber``:
   nos dois sentidos; senão fica como sugestão "a confirmar";
 - no convênio com portal (ISSEC), o vínculo que veio da planilha só vale se o
   portal confirmar (pedido de 26/11/2026): o processo existe com o mesmo mês
-  de produção e o valor cobrado é o da remessa ou a soma das remessas ligadas
-  ao protocolo. Senão o número da planilha vira só sugestão a conferir;
+  de produção (ou ainda sem mês, "Em Análise") e o valor cobrado é o da
+  remessa ou a soma das remessas ligadas ao protocolo. Senão o número da
+  planilha vira só sugestão a conferir;
 - a NFS e o recebimento vêm dos vínculos gravados.
 """
 
@@ -130,7 +131,8 @@ def dinheiro(valor) -> Decimal:
 @dataclass(frozen=True)
 class ProcessoPortal:
     numero: str
-    competencia: date
+    # None: processo "Em Análise" no portal (ainda sem mês de produção).
+    competencia: date | None
     valor_cobrado: Decimal
     valor_liberado: Decimal | None
     data_entrada: date | None = None
@@ -155,7 +157,7 @@ def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
     candidatos_da_remessa = defaultdict(list)
     remessas_do_processo = {}
     for p in processos:
-        if p.numero in numeros_vinculados:
+        if p.numero in numeros_vinculados or p.competencia is None:
             continue
         alvo = por_chave.get((p.competencia, dinheiro(p.valor_cobrado)), [])
         remessas_do_processo[p.numero] = alvo
@@ -213,9 +215,11 @@ def conferir_vinculos_pelo_portal(remessas, vinculos, portal):
         chave = (remessa['cd_convenio'], protocolo['numero'])
         p = processos.get(chave)
         valores = {dinheiro(remessa['valor']), soma_do_protocolo[chave]}
+        # Processo "Em Análise" ainda não tem mês de produção no portal: vale o
+        # valor cobrado (caso 2600041925, remessa 20618).
         if (
             p is not None
-            and p.competencia == remessa['competencia']
+            and p.competencia in {remessa['competencia'], None}
             and p.valor_cobrado in valores
         ):
             validos[cd] = vinculo
