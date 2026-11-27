@@ -9,10 +9,12 @@ entregas, sobre as tabelas ``cr_*`` (docs/oracle/contas_receber_fluxo.sql).
 """
 
 import json
+import threading
 from datetime import date, datetime
 from decimal import Decimal
 from http import HTTPStatus
 from math import ceil
+from time import monotonic
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
@@ -202,6 +204,24 @@ SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liber
 # Valores do portal lidos na hora (o protocolo gravado guarda só o vínculo):
 # o portal é atualizado a cada execução da DAG.
 SQL_VINCULOS = text(f"""
+WITH nf AS (
+  -- Valor líquido da NFS no ISS, só das NFs vinculadas (última versão).
+  SELECT DISTINCT ON (nx.numero_nfse, nx.prestador_cnpj)
+         nx.numero_nfse, nx.prestador_cnpj,
+         NULLIF(nx.valor_liquido_nfse, '')::numeric AS valor_liquido
+    FROM api_prontocardio.nfse_xml nx
+    JOIN api_prontocardio.cr_protocolo_nfse n
+      ON n.numero_nfse = nx.numero_nfse
+     AND n.prestador_cnpj = nx.prestador_cnpj
+   ORDER BY nx.numero_nfse, nx.prestador_cnpj, nx.data_hora DESC),
+pt AS (
+  -- Última leitura de cada processo no portal.
+  SELECT DISTINCT ON (ip.processo) ip.processo, ip.valor_cobrado,
+         ip.valor_liberado, {_entrada_portal('ip')} AS data_entrada,
+         {_situacao_portal('ip')} AS situacao,
+         to_jsonb(ip) ->> 'nup_grupo' AS nup_grupo
+    FROM raw_issec_portal.processos ip
+   ORDER BY ip.processo, ip.extraido_em DESC)
 SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
        pr.origem AS origem_vinculo,
        COALESCE(pt.valor_cobrado, p.valor_cobrado) AS valor_cobrado,
@@ -210,29 +230,14 @@ SELECT pr.cd_remessa, p.id AS protocolo_id, p.cd_convenio, p.numero, p.origem,
        pt.situacao AS situacao_portal, pt.nup_grupo,
        p.solicitacao_nota_em, p.solicitacao_nota_obs,
        n.numero_nfse, n.prestador_cnpj, n.data_emissao, n.valor AS valor_nfse,
-       n.origem AS origem_nfse, x.valor_liquido AS valor_liquido_nfse
+       n.origem AS origem_nfse, nf.valor_liquido AS valor_liquido_nfse
   FROM api_prontocardio.cr_protocolo_remessas pr
   JOIN api_prontocardio.cr_protocolos p ON p.id = pr.protocolo_id
   LEFT JOIN api_prontocardio.cr_protocolo_nfse n ON n.protocolo_id = p.id
-  -- Valor líquido da NFS no ISS (quando a nota está na base extraída).
-  LEFT JOIN LATERAL (
-    SELECT NULLIF(nx.valor_liquido_nfse, '')::numeric AS valor_liquido
-      FROM api_prontocardio.nfse_xml nx
-     WHERE nx.numero_nfse = n.numero_nfse
-       AND nx.prestador_cnpj = n.prestador_cnpj
-     ORDER BY nx.data_hora DESC
-     LIMIT 1
-  ) x ON n.prestador_cnpj IS NOT NULL
-  LEFT JOIN LATERAL (
-    SELECT ip.valor_cobrado, ip.valor_liberado,
-           {_entrada_portal('ip')} AS data_entrada,
-           {_situacao_portal('ip')} AS situacao,
-           to_jsonb(ip) ->> 'nup_grupo' AS nup_grupo
-      FROM raw_issec_portal.processos ip
-     WHERE ip.processo = p.numero
-     ORDER BY ip.extraido_em DESC
-     LIMIT 1
-  ) pt ON p.cd_convenio = {CD_CONVENIO_ISSEC}
+  LEFT JOIN nf ON nf.numero_nfse = n.numero_nfse
+              AND nf.prestador_cnpj = n.prestador_cnpj
+  LEFT JOIN pt ON pt.processo = p.numero
+              AND p.cd_convenio = {CD_CONVENIO_ISSEC}
 """)
 
 SQL_RECEBIMENTOS = text("""
@@ -489,9 +494,11 @@ _SQL_PAGAS_GRUPO_DETALHE = """
 SELECT pr.processo, 'paga', false, NULL::numeric, p.nup, p.primeira_extracao_em::text, 1
   FROM raw_issec_portal.processos pr
   JOIN raw_issec_portal.notas_fiscais_pagas p ON p.nup = pr.nup_grupo AND p.tipo = 'AGRUPADOR'"""
+# A pendente vale para o próprio processo, agrupada ou não: a leitura de
+# 27/11/2026 marcou como agrupados processos sem ANALISAR (2600044480).
 _SQL_PENDENTES = f"""
 SELECT processo, 'pendente', nf_a_enviar, valor, nup, NULL, 2
-  FROM raw_issec_portal.notas_fiscais_pendentes WHERE NOT agrupado AND {_PENDENTES_DA_ULTIMA_CARGA}"""
+  FROM raw_issec_portal.notas_fiscais_pendentes WHERE {_PENDENTES_DA_ULTIMA_CARGA}"""
 _SQL_PENDENTES_GRUPO = f"""
 SELECT m.processo, 'pendente', p.nf_a_enviar, NULL::numeric, p.nup, NULL, 2
   FROM raw_issec_portal.notas_fiscais_processos m
@@ -544,6 +551,53 @@ def notas_do_portal(postgres) -> dict[str, dict]:
     for nota in notas.values():
         nota.pop('prioridade')
     return notas
+
+
+# Versão dos dados que alimentam o fluxo: carga do portal (dlt), eventos de
+# vínculo, retenções e recebimentos. Os filtros e cards da tela só filtram o
+# fluxo já montado; ele é remontado quando a versão muda ou a cada 5 min.
+SQL_VERSAO_FLUXO = text("""
+SELECT (SELECT max(load_id) FROM raw_issec_portal._dlt_loads
+         WHERE status = 0) AS portal,
+       (SELECT COALESCE(max(id), 0) FROM api_prontocardio.cr_eventos) AS eventos,
+       (SELECT max(atualizado_em)::text
+          FROM api_prontocardio.cr_convenio_retencoes) AS retencoes,
+       (SELECT COALESCE(max(id), 0)
+          FROM api_prontocardio.cr_recebimentos) AS recebimentos
+""")
+FLUXO_TTL_SEGUNDOS = 300
+
+
+def versao_dos_dados(postgres):
+    try:
+        return tuple(postgres.execute(SQL_VERSAO_FLUXO).one())
+    except Exception:  # noqa: BLE001 - sem versão, o fluxo é remontado
+        postgres.rollback()
+        return None
+
+
+class _CacheFluxo:
+    """Um fluxo montado por vez (a chave muda a cada alteração de dados)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._chave = None
+        self._valor = None
+        self._expira = 0.0
+
+    def obter(self, chave, montar):
+        if chave is None:
+            return montar()
+        with self._lock:
+            if self._chave == chave and self._expira > monotonic():
+                return self._valor
+            valor = montar()
+            self._chave, self._valor = chave, valor
+            self._expira = monotonic() + FLUXO_TTL_SEGUNDOS
+            return valor
+
+
+_cache_fluxo = _CacheFluxo()
 
 
 def montar_fluxo(
@@ -707,15 +761,25 @@ def fluxo(
     de = _competencia(competencia_de, 'Competência inicial')
     ate = _competencia(competencia_ate, 'Competência final')
     remessas = remessas_mv(oracle)
-    todos = montar_fluxo(
-        remessas,
-        processos_portal(postgres),
-        vinculos_gravados(postgres),
-        _hoje(),
-        notas_de_grupo(postgres),
-        retencoes_configuradas(postgres),
-        notas_do_portal(postgres),
-        senhas_mv(remessas),
+    senhas = senhas_mv(remessas)
+    hoje = _hoje()
+    versao = versao_dos_dados(postgres)
+    chave = (
+        None if versao is None
+        else (versao, hoje, id(remessas), len(remessas), len(senhas))
+    )
+    todos = _cache_fluxo.obter(
+        chave,
+        lambda: montar_fluxo(
+            remessas,
+            processos_portal(postgres),
+            vinculos_gravados(postgres),
+            hoje,
+            notas_de_grupo(postgres),
+            retencoes_configuradas(postgres),
+            notas_do_portal(postgres),
+            senhas,
+        ),
     )
     filtrados = filtrar(
         todos,

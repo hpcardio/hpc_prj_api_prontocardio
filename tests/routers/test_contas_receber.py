@@ -233,6 +233,7 @@ def test_rota_filtra_pagina_e_funil_ignora_a_etapa(monkeypatch):
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
+    monkeypatch.setattr(rota, 'versao_dos_dados', lambda _p: None)
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
 
@@ -272,6 +273,7 @@ def test_busca_encontra_por_protocolo_e_competencia_invalida_e_recusada(
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
+    monkeypatch.setattr(rota, 'versao_dos_dados', lambda _p: None)
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
@@ -332,6 +334,7 @@ def test_exportar_devolve_todas_as_remessas_sem_paginar(monkeypatch):
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
+    monkeypatch.setattr(rota, 'versao_dos_dados', lambda _p: None)
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
     kwargs = dict(
@@ -918,6 +921,7 @@ def test_rota_usa_a_situacao_do_portal(monkeypatch):
     monkeypatch.setattr(rota, 'notas_de_grupo', lambda _p: {})
     monkeypatch.setattr(rota, 'retencoes_configuradas', lambda _p: {})
     monkeypatch.setattr(rota, 'senhas_mv', lambda _r: {})
+    monkeypatch.setattr(rota, 'versao_dos_dados', lambda _p: None)
     monkeypatch.setattr(rota, 'notas_do_portal', lambda _p: {
         'A': {'situacao': 'pendente', 'nf_a_enviar': True}, 'B': {'situacao': 'paga', 'nf_a_enviar': False}})
     monkeypatch.setattr(rota, '_hoje', lambda: HOJE)
@@ -1112,3 +1116,34 @@ def test_senha_repetida_em_outro_mes_nao_basta():
     assert casar_por_guia([remessa], [seriado]) == {}
     metade = {**_remessa(2, '10.00'), 'senhas': frozenset({'A', 'B'})}
     assert casar_por_guia([metade], [seriado])[2]['candidatos'][0].numero == 'P'
+
+
+def test_cache_do_fluxo_remonta_quando_a_versao_muda(monkeypatch):
+    montagens = []
+    cache = rota._CacheFluxo()
+
+    def montar():
+        montagens.append(1)
+        return [len(montagens)]
+
+    assert cache.obter(('v1',), montar) == [1]
+    assert cache.obter(('v1',), montar) == [1]  # filtros/cards: sem remontar
+    assert cache.obter(('v2',), montar) == [2]  # vínculo alterado ou nova carga
+    assert cache.obter(None, montar) == [3]  # sem versão: sempre monta
+    monkeypatch.setattr(rota, 'FLUXO_TTL_SEGUNDOS', -1)
+    cache.obter(('v3',), montar)
+    cache.obter(('v3',), montar)
+    assert len(montagens) == 5  # expirado: remonta
+
+
+def test_versao_dos_dados_sem_tabelas_volta_none():
+    class Falha:
+        def execute(self, *_a, **_k):
+            raise RuntimeError('sem _dlt_loads')
+
+        def rollback(self):
+            self.rolou = True
+
+    sessao = Falha()
+    assert rota.versao_dos_dados(sessao) is None
+    assert sessao.rolou
