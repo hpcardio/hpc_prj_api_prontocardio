@@ -176,7 +176,12 @@ def _entrada_portal(t: str) -> str:
 
 
 def _situacao_portal(t: str) -> str:
-    return f"NULLIF({_PAR.format(t=t)} ->> 'Situação:', '')"
+    # Em análise o portal deixa "Situação:" vazio e informa só o motivo.
+    par = _PAR.format(t=t)
+    return (
+        f"COALESCE(NULLIF({par} ->> 'Situação:', ''), "
+        f"NULLIF({par} ->> 'Motivo da Situação:', ''))"
+    )
 
 
 # Protocolos extraídos dos portais dos convênios, por código do convênio no MV.
@@ -187,7 +192,7 @@ SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liber
        {_situacao_portal('processos')} AS situacao,
        to_jsonb(processos) ->> 'nup_grupo' AS nup_grupo
   FROM raw_issec_portal.processos
- WHERE processo IS NOT NULL AND mes_producao IS NOT NULL
+ WHERE processo IS NOT NULL
  ORDER BY processo, extraido_em DESC
 """),
 }
@@ -242,7 +247,11 @@ def processos_portal(postgres) -> dict[int, list[ProcessoPortal]]:
         resultado[cd_convenio] = [
             ProcessoPortal(
                 numero=str(linha['processo']).strip(),
-                competencia=_como_data(linha['mes_producao']).replace(day=1),
+                competencia=(
+                    _como_data(linha['mes_producao']).replace(day=1)
+                    if linha['mes_producao'] is not None
+                    else None
+                ),
                 valor_cobrado=dinheiro(linha['valor_cobrado']),
                 valor_liberado=(
                     dinheiro(linha['valor_liberado'])

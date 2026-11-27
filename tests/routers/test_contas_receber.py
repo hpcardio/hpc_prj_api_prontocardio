@@ -994,3 +994,36 @@ def test_grupo_pago_vale_para_o_processo_pelo_nup_do_detalhe():
     assert 'SELECT pr.processo, \'paga\', false, NULL::numeric' in sql
     sem_portal = rota.sql_notas_portal({'pagas': True, 'pendentes': False, 'processos': False, 'processos_portal': False})
     assert sem_portal.count('UNION ALL') == 0
+
+
+def test_processo_em_analise_confirma_pelo_valor_e_nao_casa_sozinho():
+    """Caso 20618 / 2600041925: "Em Análise" no portal, sem mês de produção."""
+    remessas = [_remessa(20618, '9828.44'), _remessa(20619, '50.00')]
+    em_analise = ProcessoPortal('2600041925', None, Decimal('9828.44'), None, situacao='Em Análise')
+    outro = ProcessoPortal('2600041999', None, Decimal('50.00'), None, situacao='Em Análise')
+    vinculos = {20618: _vinculo_planilha('2600041925')}
+    vinculos[20618]['nfse'] = None
+    vinculos[20618]['protocolo']['solicitacao_nota_em'] = None
+
+    validos, sugestoes = conferir_vinculos_pelo_portal(remessas, vinculos, {46: [em_analise, outro]})
+    assert set(validos) == {20618}
+    assert not sugestoes
+
+    # Sem número registrado, processo sem mês de produção não casa por valor.
+    assert casar_portal(remessas, [outro], set(), set()) == {}
+
+    itens = {i['cd_remessa']: i for i in rota.montar_fluxo(remessas, {46: [em_analise, outro]}, vinculos, HOJE)}
+    assert itens[20618]['protocolo']['numero'] == '2600041925'
+    assert itens[20618]['situacao_fluxo'] == 'nao_autorizada'
+
+
+def test_valor_diferente_em_analise_continua_sugestao():
+    remessas = [_remessa(20618, '9828.44')]
+    em_analise = ProcessoPortal('2600041925', None, Decimal('1.00'), None)
+    _, sugestoes = conferir_vinculos_pelo_portal(remessas, {20618: _vinculo_planilha('2600041925')}, {46: [em_analise]})
+    assert sugestoes[20618]['numero'] == '2600041925'
+
+
+def test_situacao_do_portal_usa_o_motivo_quando_vazia():
+    assert "'Motivo da Situação:'" in rota._situacao_portal('ip')
+    assert 'mes_producao IS NOT NULL' not in str(rota.SQL_PORTAL[rota.CD_CONVENIO_ISSEC])
