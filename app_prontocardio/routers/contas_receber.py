@@ -46,6 +46,7 @@ from app_prontocardio.services.contas_receber_fluxo import (
     ratear_nfs,
     resumo_funil,
 )
+from app_prontocardio.services.contas_receber_guias import SenhasDasRemessas
 
 router = APIRouter(
     prefix='/app_glosas/financeiro/contas-a-receber',
@@ -190,7 +191,8 @@ SQL_PORTAL = {
 SELECT DISTINCT ON (processo) processo, mes_producao, valor_cobrado, valor_liberado,
        {_entrada_portal('processos')} AS data_entrada,
        {_situacao_portal('processos')} AS situacao,
-       to_jsonb(processos) ->> 'nup_grupo' AS nup_grupo
+       to_jsonb(processos) ->> 'nup_grupo' AS nup_grupo,
+       to_jsonb(processos) ->> 'guias' AS guias
   FROM raw_issec_portal.processos
  WHERE processo IS NOT NULL
  ORDER BY processo, extraido_em DESC
@@ -241,6 +243,58 @@ SELECT rn.numero_nfse, rn.prestador_cnpj, rn.valor_alocado,
 """)
 
 
+def _senhas_do_portal(guias) -> frozenset:
+    try:
+        return frozenset(g['senha'] for g in json.loads(guias or '[]'))
+    except (TypeError, ValueError, KeyError):
+        return frozenset()
+
+
+# Senhas das guias das contas de cada remessa no MV (GUIA.CD_SENHA).
+SQL_SENHAS_REMESSAS = """
+SELECT DISTINCT x.cd_remessa, g.cd_senha FROM (
+  SELECT r.cd_remessa, ia.cd_guia FROM dbamv.reg_amb r
+    JOIN dbamv.itreg_amb ia ON ia.cd_reg_amb = r.cd_reg_amb
+   WHERE r.cd_remessa IN ({binds})
+  UNION ALL
+  SELECT rf.cd_remessa, it.cd_guia FROM dbamv.reg_fat rf
+    JOIN dbamv.itreg_fat it ON it.cd_reg_fat = rf.cd_reg_fat
+   WHERE rf.cd_remessa IN ({binds})
+  UNION ALL
+  SELECT rf.cd_remessa, rf.cd_guia FROM dbamv.reg_fat rf
+   WHERE rf.cd_remessa IN ({binds})) x
+JOIN dbamv.guia g ON g.cd_guia = x.cd_guia
+WHERE g.cd_senha IS NOT NULL
+"""
+
+
+def _carregar_senhas_mv(cd_remessas: list[int]) -> dict[int, set[str]]:
+    from sqlalchemy.orm import Session  # noqa: PLC0415
+
+    from app_prontocardio.database import oracle_engine  # noqa: PLC0415
+
+    binds = ', '.join(f':r{i}' for i in range(len(cd_remessas)))
+    params = {f'r{i}': cd for i, cd in enumerate(cd_remessas)}
+    senhas: dict[int, set[str]] = {}
+    with Session(oracle_engine) as oracle:
+        linhas = oracle.execute(
+            text(SQL_SENHAS_REMESSAS.format(binds=binds)), params
+        ).all()
+    for cd_remessa, senha in linhas:
+        senhas.setdefault(int(cd_remessa), set()).add(str(senha).strip())
+    return senhas
+
+
+_senhas_remessas = SenhasDasRemessas(_carregar_senhas_mv)
+
+
+def senhas_mv(remessas) -> dict[int, frozenset]:
+    """Senhas das remessas dos convênios com portal (carga em segundo plano)."""
+    return _senhas_remessas.obter(
+        r['cd_remessa'] for r in remessas if r['cd_convenio'] in SQL_PORTAL
+    )
+
+
 def processos_portal(postgres) -> dict[int, list[ProcessoPortal]]:
     resultado = {}
     for cd_convenio, sql in SQL_PORTAL.items():
@@ -261,6 +315,7 @@ def processos_portal(postgres) -> dict[int, list[ProcessoPortal]]:
                 data_entrada=_como_data(linha['data_entrada']),
                 situacao=linha['situacao'],
                 nup_grupo=linha['nup_grupo'],
+                senhas=_senhas_do_portal(linha.get('guias')),
             )
             for linha in postgres.execute(sql).mappings().all()
         ]
@@ -493,9 +548,17 @@ def notas_do_portal(postgres) -> dict[str, dict]:
 
 def montar_fluxo(
     remessas, portal, vinculos, hoje, notas_grupo=None, configs=None,
-    notas_portal=None,
+    notas_portal=None, senhas=None,
 ):
-    """Todos os itens do fluxo (sem filtro)."""
+    """Todos os itens do fluxo (sem filtro).
+
+    ``senhas``: cd_remessa -> senhas das guias no MV (casamento pela guia).
+    """
+    senhas = senhas or {}
+    remessas = [
+        {**r, 'senhas': senhas.get(r['cd_remessa'], frozenset())}
+        for r in remessas
+    ]
     vinculos, sugestoes_planilha = conferir_vinculos_pelo_portal(
         remessas, vinculos, portal
     )
@@ -643,14 +706,16 @@ def fluxo(
     """
     de = _competencia(competencia_de, 'Competência inicial')
     ate = _competencia(competencia_ate, 'Competência final')
+    remessas = remessas_mv(oracle)
     todos = montar_fluxo(
-        remessas_mv(oracle),
+        remessas,
         processos_portal(postgres),
         vinculos_gravados(postgres),
         _hoje(),
         notas_de_grupo(postgres),
         retencoes_configuradas(postgres),
         notas_do_portal(postgres),
+        senhas_mv(remessas),
     )
     filtrados = filtrar(
         todos,
