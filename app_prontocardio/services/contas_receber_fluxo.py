@@ -10,7 +10,8 @@ Regras puras (sem banco), usadas pela rota ``contas_receber``:
   nos dois sentidos; senão fica como sugestão "a confirmar";
 - no convênio com portal (ISSEC), o vínculo que veio da planilha só vale se o
   portal confirmar (pedido de 26/11/2026): o processo existe com o mesmo mês
-  de produção (ou ainda sem mês, "Em Análise") e o valor cobrado é o da
+  de produção (ou, se não bater, o mês da entrada no protocolo; ou ainda sem
+  mês, "Em Análise") e o valor cobrado é o da
   remessa ou a soma das remessas ligadas ao protocolo. Senão o número da
   planilha vira só sugestão a conferir;
 - a NFS e o recebimento vêm dos vínculos gravados.
@@ -140,38 +141,76 @@ class ProcessoPortal:
     nup_grupo: str | None = None
 
 
+def _mes(data):
+    return data.replace(day=1) if data else None
+
+
+# Meses do processo no portal comparados com a competência da remessa no MV,
+# em ordem de prioridade (pedido de 27/11/2026): o mês de produção e, se não
+# bater, o mês da entrada no protocolo (ex.: 2600002999 tem produção 12/2025,
+# atendimentos de dezembro faturados na competência 01/2026 e entrada em
+# 28/01/2026, uma semana depois do fechamento da remessa 16308).
+CRITERIOS_MES = (
+    ('mes_producao', lambda p: p.competencia),
+    ('entrada_protocolo', lambda p: _mes(p.data_entrada)),
+)
+
+
+def mes_confere(processo, competencia) -> str | None:
+    """Critério em que o mês do processo bate com a competência (ou None)."""
+    for criterio, mes in CRITERIOS_MES:
+        if mes(processo) is not None and mes(processo) == competencia:
+            return criterio
+    return None
+
+
+def _casar(remessas, processos, mes):
+    por_chave = defaultdict(list)
+    for r in remessas:
+        chave = (r['competencia'], dinheiro(r['valor']))
+        por_chave[chave].append(r['cd_remessa'])
+    candidatos_da_remessa = defaultdict(list)
+    remessas_do_processo = {}
+    for p in processos:
+        if mes(p) is None:
+            continue
+        alvo = por_chave.get((mes(p), dinheiro(p.valor_cobrado)), [])
+        remessas_do_processo[p.numero] = alvo
+        for cd in alvo:
+            candidatos_da_remessa[cd].append(p)
+    return candidatos_da_remessa, remessas_do_processo
+
+
 def casar_portal(remessas, processos, remessas_vinculadas, numeros_vinculados):
     """Sugestões de protocolo do portal para as remessas ainda sem vínculo.
 
     ``remessas``: dicts com cd_remessa, competencia (date, dia 1) e valor.
+    Casa valor cobrado = valor da remessa e mês = competência, primeiro pelo
+    mês de produção e, para o que sobrar, pelo mês da entrada no protocolo.
     Retorna {cd_remessa: {'situacao': 'automatico'|'a_confirmar',
-    'candidatos': [ProcessoPortal, ...]}}.
+    'candidatos': [ProcessoPortal, ...], 'criterio': ...}}.
     """
-    por_chave = defaultdict(list)
-    for r in remessas:
-        if r['cd_remessa'] in remessas_vinculadas:
-            continue
-        por_chave[(r['competencia'], dinheiro(r['valor']))].append(
-            r['cd_remessa']
-        )
-    candidatos_da_remessa = defaultdict(list)
-    remessas_do_processo = {}
-    for p in processos:
-        if p.numero in numeros_vinculados or p.competencia is None:
-            continue
-        alvo = por_chave.get((p.competencia, dinheiro(p.valor_cobrado)), [])
-        remessas_do_processo[p.numero] = alvo
-        for cd in alvo:
-            candidatos_da_remessa[cd].append(p)
+    livres = [
+        r for r in remessas if r['cd_remessa'] not in remessas_vinculadas
+    ]
+    processos = [p for p in processos if p.numero not in numeros_vinculados]
     sugestoes = {}
-    for cd, procs in candidatos_da_remessa.items():
-        unico = (
-            len(procs) == 1 and len(remessas_do_processo[procs[0].numero]) == 1
-        )
-        sugestoes[cd] = {
-            'situacao': 'automatico' if unico else 'a_confirmar',
-            'candidatos': sorted(procs, key=lambda p: p.numero),
-        }
+    for criterio, mes in CRITERIOS_MES:
+        candidatos, remessas_do_processo = _casar(livres, processos, mes)
+        for cd, procs in candidatos.items():
+            unico = (
+                len(procs) == 1
+                and len(remessas_do_processo[procs[0].numero]) == 1
+            )
+            sugestoes[cd] = {
+                'situacao': 'automatico' if unico else 'a_confirmar',
+                'candidatos': sorted(procs, key=lambda p: p.numero),
+                'criterio': criterio,
+            }
+        # O critério seguinte só vale para quem ainda não teve candidato.
+        usados = {p.numero for procs in candidatos.values() for p in procs}
+        livres = [r for r in livres if r['cd_remessa'] not in candidatos]
+        processos = [p for p in processos if p.numero not in usados]
     return sugestoes
 
 
@@ -215,11 +254,15 @@ def conferir_vinculos_pelo_portal(remessas, vinculos, portal):
         chave = (remessa['cd_convenio'], protocolo['numero'])
         p = processos.get(chave)
         valores = {dinheiro(remessa['valor']), soma_do_protocolo[chave]}
+        # Mês de produção ou, se não bater, mês da entrada no protocolo.
         # Processo "Em Análise" ainda não tem mês de produção no portal: vale o
         # valor cobrado (caso 2600041925, remessa 20618).
         if (
             p is not None
-            and p.competencia in {remessa['competencia'], None}
+            and (
+                p.competencia is None
+                or mes_confere(p, remessa['competencia']) is not None
+            )
             and p.valor_cobrado in valores
         ):
             validos[cd] = vinculo

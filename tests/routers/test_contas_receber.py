@@ -1027,3 +1027,31 @@ def test_valor_diferente_em_analise_continua_sugestao():
 def test_situacao_do_portal_usa_o_motivo_quando_vazia():
     assert "'Motivo da Situação:'" in rota._situacao_portal('ip')
     assert 'mes_producao IS NOT NULL' not in str(rota.SQL_PORTAL[rota.CD_CONVENIO_ISSEC])
+
+
+def test_entrada_no_protocolo_quando_o_mes_de_producao_nao_bate():
+    """Caso 2600002999: produção 12/2025, MV competência 01/2026, entrada 28/01/2026."""
+    jan = date(2026, 1, 1)
+    remessas = [_remessa(16308, '63.50', competencia=jan)]
+    processo = ProcessoPortal('2600002999', date(2025, 12, 1), Decimal('63.50'), Decimal('63.50'),
+                              data_entrada=date(2026, 1, 28))
+
+    validos, sugestoes = conferir_vinculos_pelo_portal(remessas, {16308: _vinculo_planilha('2600002999')}, {46: [processo]})
+    assert set(validos) == {16308}
+    assert not sugestoes
+
+    sugestao = casar_portal(remessas, [processo], set(), set())[16308]
+    assert sugestao['situacao'] == 'automatico'
+    assert sugestao['criterio'] == 'entrada_protocolo'
+
+
+def test_mes_de_producao_tem_prioridade_sobre_a_entrada():
+    jan = date(2026, 1, 1)
+    remessas = [_remessa(1, '10.00', competencia=jan)]
+    pela_producao = ProcessoPortal('P', jan, Decimal('10.00'), None, data_entrada=date(2026, 2, 5))
+    pela_entrada = ProcessoPortal('E', date(2025, 12, 1), Decimal('10.00'), None, data_entrada=date(2026, 1, 20))
+
+    sugestao = casar_portal(remessas, [pela_entrada, pela_producao], set(), set())[1]
+    assert [p.numero for p in sugestao['candidatos']] == ['P']
+    assert sugestao['criterio'] == 'mes_producao'
+    assert sugestao['situacao'] == 'automatico'
